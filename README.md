@@ -1,0 +1,81 @@
+# AOS 8 → Aruba Central Migration Console
+
+Web-based wizard for migrating customers from AOS 8 to AOS 10 on
+**New Central** (HPE GreenLake). Supported source platforms:
+
+- **Mobility Controller / Conductor** — `ap convert` path, with the choice to
+  keep the MCs as AOS 10 gateways (overlay SSIDs) or retire them (all bridge)
+- **Instant cluster (IAP)** — Central-driven conversion: claim + subscribe in
+  GreenLake, pre-assign to an AOS 10 device group, Central pushes the image.
+  No controller commands, no gateways. Zones map to device groups.
+
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Open http://localhost:8501 in your browser.
+
+## Wizard Steps
+
+| Step | What it does |
+|---|---|
+| 1. Connect & Discover | Pulls AOS 8 config via REST API (or CLI paste fallback) — SSIDs with per-group bindings, auth types/PSKs, AP inventory with serials, VLANs, RADIUS, cluster topology |
+| 2. Preflight Checks | AP model compatibility, firmware train check (8.10 ≥ .0.12 / 8.12 ≥ .0.1), SSID mapping/auth coverage, serial coverage, cluster sequencing warnings |
+| 3. Provision Central | Creates the site, device groups (one per AP group), VLANs, overlay/underlay SSIDs, gateway cluster, auth-server profiles and firmware compliance in **New Central** — every API failure is reported per step |
+| 4. GreenLake Onboarding | Claims the APs into the GLP workspace (serial + wired MAC, async claim with polling) and assigns subscriptions — required for Central to adopt converted APs |
+| 5. AP Convert Runbook | Customer-specific `ap convert` CLI runbook (single MC, L2 or L3 cluster sequencing) |
+| 6. Validate | Confirms converted APs are online in Central by serial; post-migration checklist |
+
+## AOS 8 API Access
+
+The tool logs in at `https://<mc-ip>:4343/v1/api/login` and reads configuration
+via `/v1/configuration/object/...` and `showcommand` with the UIDARUBA session
+token. On a Mobility Conductor use `config_path=/md` (default); on a standalone
+controller set it to `/mm/mynode` (Advanced options in Step 1).
+
+If port 4343 is firewalled or the API is disabled, use **Paste CLI output**
+mode in Step 1. Recommended commands to paste:
+
+```
+show running-config
+show ap database long        # includes Group, Serial #, Wired MAC
+show version
+show lc-cluster group-membership
+show controller-ip
+show aaa authentication-server all
+```
+
+## New Central API Credentials
+
+Create API client credentials in HPE GreenLake (Manage → API) with access to
+the Aruba Central service. The tool authenticates against
+`sso.common.cloud.hpe.com` (client-credentials grant) and calls your
+**regional** New Central base URL, e.g.
+`https://us4.api.central.arubanetworks.com`.
+
+Provisioning maps AOS 8 constructs onto the New Central model:
+
+| AOS 8 | New Central |
+|---|---|
+| ap-group | Device group (scope) |
+| virtual-ap (tunnel/split) | Overlay SSID + role/policy + overlay-wlan → GW cluster |
+| virtual-ap (bridge) | Underlay SSID scope-mapped to the device group |
+| VLAN | layer2-vlan profile scope-mapped to the group |
+| RADIUS server | auth-server library profile |
+| MC cluster | Gateway cluster (in its own `-gws` device group) |
+
+## Deployment
+
+```bash
+# Docker
+docker build -t aos8-migration .
+docker run -p 8501:8501 aos8-migration
+
+# Or just run locally per engagement:
+streamlit run app.py
+```
+
+Credentials live only in the Streamlit session — nothing is written to disk.

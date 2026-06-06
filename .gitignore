@@ -1,0 +1,34 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+# Keep .streamlit/config.toml (theme/server config) but never commit secrets.
+.streamlit/secrets.toml
+
+# ── Tooling / local state ─────────────────────────────────────────────────────
+.playwright-mcp/
+*.log
+
+# ── OS / editor cruft ─────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+
+# UI audit artifacts
+audit-*.png
+step*.png
