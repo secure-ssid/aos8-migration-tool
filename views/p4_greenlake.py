@@ -119,9 +119,56 @@ def render():
         info_banner(
             f"<b>{len(no_mac) + len(no_serial)} AP(s) can't be claimed automatically</b> "
             f"({esc(names)}{' …' if len(no_mac) + len(no_serial) > 15 else ''}) — re-discover "
-            "with <code>show ap database long</code> or add them manually in GreenLake.",
+            "with <code>show ap database long</code> or add the wired MAC below.",
             color=WARN,
         )
+
+    # ── Add wired MACs in-app so the APs become claimable without re-running
+    #    discovery (the wired MAC isn't in the short `show ap database`) ──────
+    if no_mac:
+        import re as _re
+        _MAC = _re.compile(r"^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$")
+        with st.expander(f"➕ Add wired MACs for {len(no_mac)} AP(s) — needed to claim",
+                         expanded=True):
+            st.markdown(
+                f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.4rem;">'
+                f'GreenLake needs each AP\'s <b>wired (Ethernet) MAC</b> — the '
+                f'<code>show ap database long</code> "Wired MAC" column / the device '
+                f'label. Pre-filled from the AP name where it looks like a MAC; '
+                f'<b>verify it\'s the wired MAC</b> (not a radio/BSSID MAC) before '
+                f'claiming.</div>', unsafe_allow_html=True)
+            macs: dict[str, str] = {}
+            for ap in no_mac:
+                c1, c2 = st.columns([1, 1])
+                c1.markdown(
+                    f'<div style="padding-top:6px;font-family:\'IBM Plex Mono\',monospace;'
+                    f'font-size:12px;color:{TEXT};">{esc(ap.serial)} '
+                    f'<span style="color:{FAINT};">({esc(ap.name)})</span></div>',
+                    unsafe_allow_html=True)
+                default = ap.name if _MAC.match((ap.name or "").strip()) else ""
+                macs[ap.serial] = c2.text_input(
+                    f"Wired MAC for {ap.serial}", value=default,
+                    key=f"macedit_{ap.serial}", label_visibility="collapsed",
+                    placeholder="aa:bb:cc:dd:ee:ff")
+            if st.button("Apply wired MACs", type="primary"):
+                applied, bad = 0, []
+                for ap in customer.aps:
+                    v = (macs.get(ap.serial) or "").strip()
+                    if not v:
+                        continue
+                    if _MAC.match(v):
+                        ap.mac = v
+                        applied += 1
+                    else:
+                        bad.append(f"{ap.serial}: '{v}'")
+                st.session_state["customer_config"] = customer
+                if bad:
+                    st.error("Invalid MAC format (need aa:bb:cc:dd:ee:ff): "
+                             + "; ".join(bad))
+                if applied:
+                    st.success(f"Applied {applied} wired MAC(s) — these APs are now "
+                               "claimable.")
+                st.rerun()
 
     # ── Credentials ────────────────────────────────────────────────────────
     section_label("GLP API credentials", color=HPE_GREEN)
