@@ -6,10 +6,51 @@ moment `ap convert` brings them up in Central.
 import streamlit as st
 
 from lib.glp_client import GLPClient
+from lib.session_clients import (
+    build_central_client, build_classic_client, have_classic_creds,
+    persist_rotated_refresh_token,
+)
 from lib.styles import (
     OK, WARN, MUTED, TEXT, FAINT, HPE_GREEN,
     page_header, section_label, badge, esc, mono_row, mono_caption, info_banner,
+    provision_step_line,
 )
+
+
+def _review_checklist(central_cfg, customer) -> bool:
+    """Pre-onboarding gate — the operator reviews the staged config in New
+    Central before any AP is claimed or moved. Returns True once confirmed."""
+    n_groups = len(central_cfg.groups)
+    n_ssids = len({s.display_name for g in central_cfg.groups for s in g.ssids})
+    n_vlans = len({v.id for g in central_cfg.groups for v in g.vlans})
+    fw = central_cfg.groups[0].firmware_version if central_cfg.groups else "—"
+    has_radius = bool(central_cfg.radius_servers)
+
+    with st.container(border=True):
+        st.markdown(
+            f'<div style="font-weight:600;color:{HPE_GREEN};margin-bottom:0.4rem;">'
+            f'✅ Before onboarding — verify the staged config in New Central</div>'
+            f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.6rem;">'
+            f'Step 3 built the config but <b>has not touched any AP</b>. Confirm it '
+            f'looks right in the New Central UI, then onboard the devices below. '
+            f'Moving APs into groups is what converts them over.</div>',
+            unsafe_allow_html=True)
+        for item in (
+            f"Device groups created: <b>{n_groups}</b> "
+            f"({', '.join(g.name for g in central_cfg.groups) or '—'})",
+            f"SSIDs present with correct VLANs: <b>{n_ssids}</b> SSID(s), "
+            f"<b>{n_vlans}</b> VLAN(s)",
+            (f"RADIUS server-group bound to enterprise SSIDs "
+             f"(remember to set the real shared secret)" if has_radius
+             else "No RADIUS — PSK/open SSIDs only"),
+            f"Firmware compliance set: <b>{esc(fw)}</b>",
+            "APs in GreenLake workspace with a subscription (claim below)",
+        ):
+            st.markdown(f'<div style="font-size:13px;color:{TEXT};margin:2px 0;">'
+                        f'☐ {item}</div>', unsafe_allow_html=True)
+        return st.checkbox(
+            "I've reviewed the configuration in New Central — proceed to onboard the APs",
+            key="onboard_reviewed")
 
 
 def _client() -> GLPClient:
@@ -36,11 +77,20 @@ def render():
         return
 
     if not st.session_state.get("provision_done"):
-        info_banner("Central isn't provisioned yet (Step 3). You can still claim devices, "
-                    "but the recommended order is: provision Central → claim → convert.",
+        info_banner("Configuration isn't built yet (Step 3). Build it first so you can "
+                    "review it here before onboarding APs: build config → review → "
+                    "claim → move APs → convert.",
                     color=WARN)
 
     central_cfg = st.session_state.get("central_config")
+    # Pre-onboarding review checklist (only meaningful for the New Central path
+    # once config is built)
+    reviewed = True
+    if central_cfg and getattr(central_cfg, "destination", "new") == "new" \
+            and st.session_state.get("provision_done"):
+        reviewed = _review_checklist(central_cfg, customer)
+        st.divider()
+
     if central_cfg and getattr(central_cfg, "destination", "new") == "classic":
         info_banner(
             "<b>Classic destination:</b> Step 3 already pre-added the serial+MAC pairs "
@@ -270,6 +320,64 @@ def render():
                                   (ap.model, TEXT), (ap.name, FAINT)],
                                  trailing_html=b))
         st.markdown("".join(rows), unsafe_allow_html=True)
+
+    # ── Move APs into device groups (the devices phase) ────────────────────
+    if central_cfg and getattr(central_cfg, "destination", "new") == "new" \
+            and st.session_state.get("provision_done"):
+        st.divider()
+        section_label("Move APs into device groups + assign", color=HPE_GREEN)
+        st.markdown(
+            f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.5rem;">'
+            f'Moves the <b>claimed</b> APs into their New Central device groups '
+            f'(Classic on hybrid), assigns the CAMPUS_AP persona, and adds them to '
+            f'the site. Run this <b>after</b> the APs are claimed + subscribed above. '
+            f'This is the step that converts the APs over.</div>',
+            unsafe_allow_html=True)
+        if not reviewed:
+            info_banner("Tick the review checklist at the top first.", color=WARN)
+        ap_serials = {grp.name: [s for s in grp.ap_serials if s]
+                      for grp in customer.ap_groups}
+        if st.button("Move APs into groups + assign persona/site",
+                     type="primary", disabled=not reviewed):
+            box = st.empty()
+            lines: list[tuple[str, bool]] = []
+
+            def on_step(label: str, ok: bool):
+                lines.append((label, ok))
+                with box.container():
+                    for lbl, success in lines:
+                        provision_step_line(lbl, success)
+            try:
+                client = build_central_client()
+                with st.spinner("Authenticating with New Central..."):
+                    client.authenticate()
+                classic = build_classic_client() if have_classic_creds() else None
+                with st.spinner("Moving APs and assigning persona/site..."):
+                    results = client.provision(central_cfg, ap_serials=ap_serials,
+                                               on_step=on_step, classic_client=classic,
+                                               phase="devices")
+                if classic is not None:
+                    persist_rotated_refresh_token(classic)
+                st.session_state["onboard_results"] = results
+                st.rerun()
+            except Exception as e:
+                st.error(f"Device onboarding failed: {e}")
+
+        onb = st.session_state.get("onboard_results")
+        if onb:
+            fail = [r for r in onb if not r[1]]
+            if fail:
+                st.warning(f"{len(fail)} step(s) failed — APs must be in the GreenLake "
+                           "workspace (claimed + subscribed) first; fix and re-run.")
+                for label, _, err in fail:
+                    provision_step_line(label, False)
+                    if err:
+                        st.code(err, language="text")
+            else:
+                st.success("APs moved into their groups and assigned — migration complete.")
+            with st.expander("Onboarding step log", expanded=False):
+                for label, success, _ in onb:
+                    provision_step_line(label, success)
 
     st.divider()
     col_back, col_mid, col_next = st.columns([1, 3, 1])

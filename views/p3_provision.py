@@ -117,9 +117,12 @@ def render():
 
     # ── Provision ──────────────────────────────────────────────────────────
     info_banner(
-        "Provisioning <b>writes to the customer tenant</b>. Steps are idempotent — "
-        "existing sites/groups/profiles with matching names are reused, and every "
-        "API failure is reported per step (nothing is silently skipped).",
+        "This step builds the <b>configuration only</b> — sites, device groups, "
+        "VLANs, SSIDs, RADIUS and firmware. <b>No APs are claimed, moved or "
+        "rebooted</b>, so you can review everything in New Central before "
+        "converting. Device onboarding (claim → move APs → persona → site) "
+        "happens next, on the GreenLake step. Steps are idempotent — re-running "
+        "reuses existing objects.",
     )
 
     if central_cfg.gw_cluster_name:
@@ -207,9 +210,10 @@ def render():
                 st.warning("A Classic access token is set but the Classic API Gateway "
                            "base URL is empty — set it in Step 1 → 'Hybrid cluster?' "
                            "before provisioning, or device-group create will fail.")
-            with st.spinner("Provisioning..."):
+            with st.spinner("Building configuration (no APs are touched)..."):
                 results = client.provision(central_cfg, ap_serials=ap_serials,
-                                           on_step=on_step, classic_client=classic_client)
+                                           on_step=on_step, classic_client=classic_client,
+                                           phase="config")
             if classic_client is not None and persist_rotated_refresh_token(classic_client):
                 st.info("The Classic refresh token rotated during this run — the new "
                         "one is saved in this session.")
@@ -235,7 +239,9 @@ def _show_results(results: list[tuple[str, bool, str]]):
             if err:
                 st.code(err, language="text")
     else:
-        st.success("All provisioning steps completed successfully.")
+        st.success("Configuration built successfully — nothing on the APs has "
+                   "changed yet. Review it in New Central, then continue to "
+                   "GreenLake to onboard the devices.")
 
     with st.expander("Full step log", expanded=False):
         for label, success, _ in results:

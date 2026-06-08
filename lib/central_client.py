@@ -720,23 +720,44 @@ class CentralClient:
             "use 'Reset & re-run provisioning' shortly and it'll resolve (the group "
             "already exists, so create is a no-op).")
 
+    def _resolve_group_scope(self, name: str) -> str:
+        for grp in self.list_device_groups(refresh=True):
+            if grp.get("scopeName") == name:
+                return str(grp.get("scopeId"))
+        return ""
+
     def provision(
         self,
         central_config: CentralConfig,
         ap_serials: dict[str, list[str]],
         on_step: Optional[Callable[[str, bool], None]] = None,
         classic_client=None,
+        phase: str = "config",
     ) -> list[tuple[str, bool, str]]:
-        """Run the full New Central provisioning sequence.
+        """Run the New Central provisioning sequence in two phases:
+
+        phase="config" (default) — build the target config only: sites,
+        auth-servers, server-groups, device GROUPS (empty), VLANs, SSIDs,
+        scope-maps, firmware compliance. NON-DISRUPTIVE — nothing touches the
+        production APs, so the operator can review everything in New Central
+        before converting.
+
+        phase="devices" — onboard the APs: move them into their device groups
+        (Classic on hybrid), assign the CAMPUS_AP persona, assign to sites.
+        Run AFTER the devices are claimed in GreenLake. Groups must already
+        exist (config phase) — their scope-ids are resolved from the tenant.
+
+        phase="all" — both, in one pass (legacy single-shot behavior).
 
         classic_client: optional ClassicCentralClient. On HYBRID-CLUSTER
-        tenants New Central blocks device-group create/move, so when this is
-        supplied those two operations route through the Classic API (HPE's own
-        onboarding pattern); WLANs/VLANs/scope-maps stay on New Central.
+        tenants New Central blocks device-group create/move, so those route
+        through the Classic API; WLANs/VLANs/scope-maps stay on New Central.
 
-        Returns [(step_label, ok, error_detail)]. Failures are recorded and
-        the flow continues so the operator gets a complete picture.
+        Returns [(step_label, ok, error_detail)]; failures are recorded and the
+        flow continues so the operator gets a complete picture.
         """
+        do_config = phase in ("config", "all")
+        do_devices = phase in ("devices", "all")
         results: list[tuple[str, bool, str]] = []
 
         def _make_group(name, serials, include_gateways=False) -> str:
@@ -772,66 +793,104 @@ class CentralClient:
             return results  # nothing else can proceed
         global_scope = scope_holder["g"]
 
-        # Sites
+        # Sites — created in the config phase; resolved from the tenant in the
+        # devices phase (needed to assign APs to them).
         site_ids: dict[str, str] = {}
         cc = central_config
-        for site_name in cc.sites:
-            step(f"Create site: {site_name}",
-                 lambda s=site_name: site_ids.update({s: self.create_site(
-                     s, cc.site_address, cc.site_city, cc.site_state,
-                     cc.site_country, cc.site_zipcode,
-                     timezone_id=getattr(cc, "site_timezone", "UTC"))}))
+        if do_config:
+            for site_name in cc.sites:
+                step(f"Create site: {site_name}",
+                     lambda s=site_name: site_ids.update({s: self.create_site(
+                         s, cc.site_address, cc.site_city, cc.site_state,
+                         cc.site_country, cc.site_zipcode,
+                         timezone_id=getattr(cc, "site_timezone", "UTC"))}))
+        else:
+            try:
+                for site in self.list_sites(refresh=True):
+                    site_ids[self._site_name(site)] = self._site_id(site)
+            except Exception:
+                pass
 
-        # RADIUS servers (library profiles)
-        for server in cc.radius_servers:
-            step(f"Create auth server: {server.name}",
-                 lambda s=server: self.create_auth_server(s))
-
-        # RADIUS server-group — enterprise (802.1X) SSIDs bind to this so they
-        # actually authenticate. One group from all discovered servers; bound
-        # to every enterprise SSID below.
+        radius_group = ""
+        gw_scope: dict[str, str] = {}
         import re as _re
         _slug = _re.sub(r"[^a-z0-9-]+", "-", cc.customer_name.lower()).strip("-") or "migrated"
-        radius_group = ""
         has_enterprise = any(s.auth_type in (AuthType.WPA2_ENTERPRISE,
                                              AuthType.WPA3_ENTERPRISE)
                              for g in cc.groups for s in g.ssids)
         if cc.radius_servers and has_enterprise:
             radius_group = f"{_slug}-radius"
-            step(f"Create RADIUS server-group: {radius_group}",
-                 lambda: self.create_server_group(
-                     radius_group, [s.name for s in cc.radius_servers]))
 
-        # Gateway cluster lives in its own device group (MOBILITY_GW persona)
-        gw_scope: dict[str, str] = {}
-        if cc.gw_cluster_name:
-            gw_group = f"{cc.gw_cluster_name}-gws"
-            step(f"Create gateway device group: {gw_group}",
-                 lambda: gw_scope.update(id=_make_group(gw_group, None)))
-            if gw_scope.get("id"):
-                step(f"Create GW cluster: {cc.gw_cluster_name}",
-                     lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
+        if do_config:
+            # RADIUS servers (library profiles)
+            for server in cc.radius_servers:
+                step(f"Create auth server: {server.name}",
+                     lambda s=server: self.create_auth_server(s))
+            # RADIUS server-group — enterprise (802.1X) SSIDs bind to this so
+            # they actually authenticate.
+            if radius_group:
+                step(f"Create RADIUS server-group: {radius_group}",
+                     lambda: self.create_server_group(
+                         radius_group, [s.name for s in cc.radius_servers]))
+
+            # Gateway cluster lives in its own device group (MOBILITY_GW persona)
+            if cc.gw_cluster_name:
+                gw_group = f"{cc.gw_cluster_name}-gws"
+                step(f"Create gateway device group: {gw_group}",
+                     lambda: gw_scope.update(id=_make_group(gw_group, None)))
+                if gw_scope.get("id"):
+                    step(f"Create GW cluster: {cc.gw_cluster_name}",
+                         lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
 
         for group_cfg in cc.groups:
             # serials are keyed by the AOS 8 source group name, not the
             # (possibly renamed) Central device-group name
             serials = ap_serials.get(group_cfg.source_group or group_cfg.name, [])
-            grp_scope: dict[str, str] = {}
             via = " (via Classic — hybrid)" if classic_client is not None else ""
-            if not step(f"Create device group: {group_cfg.name}"
-                        + (f" (+{len(serials)} APs)" if serials else "") + via,
-                        lambda g=group_cfg, s=serials:
-                            grp_scope.update(id=_make_group(g.name, s,
-                                                            bool(cc.gw_cluster_name)))):
-                continue  # group failed — skip its dependents
-            scope_id = grp_scope["id"]
 
-            # hybrid: move devices as a separate step so a move failure (e.g.
-            # serials not yet claimed into inventory) doesn't block WLAN/VLAN
-            if classic_client is not None and serials:
-                step(f"Move {len(serials)} APs into group: {group_cfg.name} (Classic)",
-                     lambda s=serials, g=group_cfg:
-                         classic_client.move_devices(g.name, s))
+            if do_config:
+                # create the group container (empty — APs are moved in during
+                # the devices phase, after they're claimed in GreenLake)
+                grp_scope: dict[str, str] = {}
+                if not step(f"Create device group: {group_cfg.name}" + via,
+                            lambda g=group_cfg:
+                                grp_scope.update(id=_make_group(g.name, None,
+                                                                bool(cc.gw_cluster_name)))):
+                    continue  # group failed — skip its dependents
+                scope_id = grp_scope["id"]
+            else:
+                scope_id = self._resolve_group_scope(group_cfg.name)
+                if not scope_id:
+                    results.append((f"Resolve device group: {group_cfg.name}", False,
+                                    "group not found in New Central — run the "
+                                    "config phase (Step 3) first"))
+                    if on_step:
+                        on_step(results[-1][0], False)
+                    continue
+
+            # DEVICES phase: move the claimed APs into the group. Hybrid →
+            # Classic move; native → add-devices. A move failure (serials not
+            # yet in the workspace) doesn't block anything else.
+            if do_devices and serials:
+                if classic_client is not None:
+                    step(f"Move {len(serials)} APs into group: {group_cfg.name} (Classic)",
+                         lambda s=serials, g=group_cfg:
+                             classic_client.move_devices(g.name, s))
+                else:
+                    step(f"Add {len(serials)} APs to group: {group_cfg.name}",
+                         lambda s=serials, sid=scope_id:
+                             self.add_devices_to_group(sid, s))
+
+            if not do_config:
+                # devices phase: only persona + site assignment remain
+                if serials:
+                    step(f"Assign CAMPUS_AP persona → {len(serials)} APs in {group_cfg.name}",
+                         lambda s=serials: self.assign_persona(s))
+                if serials and group_cfg.site_name in site_ids:
+                    step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
+                         lambda s=serials, sn=group_cfg.site_name:
+                             self.assign_devices_to_site(site_ids[sn], s))
+                continue  # skip the config-only VLAN/SSID/firmware block
 
             for vlan in group_cfg.vlans:
                 # VLAN 1 is New Central's built-in default ("aruba-vlan/1") —
@@ -883,19 +942,12 @@ class CentralClient:
             step(f"Set firmware compliance {group_cfg.firmware_version} → {group_cfg.name}",
                  lambda g=group_cfg, sid=scope_id:
                      self.set_firmware_compliance(sid, g.firmware_version))
-
-            if serials:
-                step(f"Assign CAMPUS_AP persona → {len(serials)} APs in {group_cfg.name}",
-                     lambda s=serials: self.assign_persona(s))
-
-            if serials and group_cfg.site_name in site_ids:
-                step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
-                     lambda s=serials, sn=group_cfg.site_name:
-                         self.assign_devices_to_site(site_ids[sn], s))
+            # (persona + site assignment happen in the devices phase, after
+            # the APs are claimed into the GreenLake workspace)
 
         # AOS 8 RADIUS secrets can't be recovered (stored hashed) — flag the
         # servers created with a placeholder so the operator sets the real one.
-        if cc.radius_servers:
+        if do_config and cc.radius_servers:
             names = ", ".join(s.name for s in cc.radius_servers if not s.secret)
             if names:
                 results.append((

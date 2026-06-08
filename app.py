@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 STEPS = [
     ("1_connect",   "Connect"),
     ("2_preflight", "Preflight"),
-    ("3_provision", "Provision"),
-    ("4_greenlake", "GreenLake"),
+    ("3_provision", "Build Config"),
+    ("4_greenlake", "Onboard APs"),
     ("5_runbook",   "Runbook"),
     ("6_validate",  "Validate"),
 ]
