@@ -240,3 +240,58 @@ class GLPClient:
             return resp.json() if resp.content else {}
         except Exception:
             return {}
+
+    # ─────────────────── Application assignment ───────────────────
+
+    def list_service_managers(self) -> list[dict]:
+        """Provisioned application instances (e.g. Aruba Central) in the
+        workspace, with their region — needed to assign a device to Central.
+        Returns [{id, name, region}]."""
+        out: list[dict] = []
+        for path in ("/service-catalog/v1/service-manager-provisions",
+                     "/service-catalog/v1beta1/service-manager-provisions"):
+            try:
+                r = self._get(path)
+            except GLPAPIError:
+                continue
+            for i in r.get("items", r.get("provisions", [])):
+                sm = i.get("serviceManager", {}) if isinstance(i.get("serviceManager"), dict) else {}
+                name = (i.get("name") or i.get("serviceManagerName")
+                        or i.get("applicationName") or sm.get("name") or "Central")
+                region = (i.get("region") or i.get("regionCode")
+                          or i.get("regionName") or "")
+                if i.get("id"):
+                    out.append({"id": i["id"], "name": name, "region": region})
+            if out:
+                return out
+        return out
+
+    def assign_application(self, serial_number: str, application_id: str,
+                           region: str,
+                           subscription_key_or_id: Optional[str] = None) -> dict:
+        """Assign a claimed device to a Central application instance + region —
+        this is what actually makes the device appear in New Central (the GLP
+        'Application' column). Sends the subscription in the SAME merge-patch
+        (GreenLake won't consume the subscription without the app assignment).
+        Async: polls the returned operation."""
+        device_id = self.resolve_device_id(serial_number)
+        if device_id is None:
+            raise GLPAPIError(
+                f"Device {serial_number} not found in the workspace — claim it first")
+        body: dict = {"application": {"id": application_id}, "region": region}
+        if subscription_key_or_id:
+            body["subscription"] = [
+                {"id": self._resolve_subscription_id(subscription_key_or_id)}]
+        resp = self._request(
+            "PATCH", "/devices/v2beta1/devices",
+            params={"id": device_id},
+            json=body,
+            headers={"Content-Type": "application/merge-patch+json"},
+        )
+        location = resp.headers.get("Location", "")
+        if resp.status_code == 202 and location:
+            self.poll_task(location.rstrip("/").split("/")[-1])
+        try:
+            return resp.json() if resp.content else {}
+        except Exception:
+            return {}

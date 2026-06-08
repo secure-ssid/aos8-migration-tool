@@ -213,8 +213,13 @@ def render():
                         break
                     offset += 100
                 subs = client.list_subscriptions()
+                try:
+                    sms = client.list_service_managers()
+                except Exception:
+                    sms = []
             st.session_state["glp_existing"] = sorted(existing)
             st.session_state["glp_subscriptions"] = subs
+            st.session_state["glp_service_managers"] = sms
             st.rerun()
         except Exception as e:
             st.error(f"GreenLake error: {e}")
@@ -282,11 +287,19 @@ def render():
 
     st.divider()
 
-    # ── Subscriptions ──────────────────────────────────────────────────────
-    section_label("Assign subscriptions", color=HPE_GREEN)
+    # ── Assign to Central (application + region) + subscription ─────────────
+    section_label("Assign to Central + subscription", color=HPE_GREEN)
+    st.markdown(
+        f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.4rem;">'
+        f'A claimed AP only appears in New Central once it\'s assigned to the '
+        f'Central <b>application + region</b> — GreenLake won\'t consume the '
+        f'subscription without it (that\'s the <code>--</code> Application column). '
+        f'This assigns the app, region, and subscription in one operation.</div>',
+        unsafe_allow_html=True)
     subs = st.session_state.get("glp_subscriptions")
+    sms = st.session_state.get("glp_service_managers")
     if subs is None:
-        mono_caption('RUN "CHECK WORKSPACE" FIRST TO LOAD AVAILABLE SUBSCRIPTIONS')
+        mono_caption('RUN "CHECK WORKSPACE" FIRST TO LOAD APPLICATIONS + SUBSCRIPTIONS')
     else:
         def _label(s: dict) -> str:
             key = s.get("key", s.get("id", "?"))
@@ -296,7 +309,6 @@ def render():
             end = str(s.get("endTime", ""))[:10]
             return f"{key} · {tier} · avail {qty} · ends {end}"
 
-        # active subs only, AP-type first (CENTRAL_AP / FOUNDATION_AP tiers)
         def _is_ap(s: dict) -> bool:
             return "AP" in str(s.get("subscriptionType", "")) or \
                    "AP" in str(s.get("tier", ""))
@@ -304,17 +316,30 @@ def render():
                   if str(s.get("subscriptionStatus", "STARTED")).upper() != "ENDED"]
         active.sort(key=lambda s: (not _is_ap(s), str(s.get("tier", ""))))
 
+        # application instance (Central) selector
+        app_id, region = "", ""
+        if not sms:
+            st.warning("No Central application instance found in the workspace "
+                       "(GET service-manager-provisions returned none). Assign the "
+                       "APs to the Central application + region in the GreenLake UI, "
+                       "or re-run Check workspace.")
+        else:
+            ai = st.selectbox(
+                "Central application instance (region)",
+                options=range(len(sms)),
+                format_func=lambda i: f"{sms[i]['name']} · {sms[i]['region'] or 'region?'}",
+                help="The provisioned Central instance the APs will be managed by")
+            app_id, region = sms[ai]["id"], sms[ai]["region"]
+
         if not active:
-            st.warning("No active subscriptions found in the workspace — add subscription "
-                       "keys in GreenLake before APs can be managed by Central.")
+            st.warning("No active subscriptions found — add subscription keys in "
+                       "GreenLake before APs can be managed by Central.")
         else:
             subs = active
             choice = st.selectbox("Subscription to apply to all claimed APs",
                                   options=range(len(subs)),
                                   format_func=lambda i: _label(subs[i]),
                                   help="Active subscriptions only; AP subscriptions listed first")
-            # target only APs actually in the workspace: claim results first,
-            # then the workspace snapshot, falling back to all claimable
             claim_ok = {str(s).upper()
                         for s in (st.session_state.get("glp_claim_result") or {}).get("ok", [])}
             in_workspace = claim_ok | existing
@@ -323,8 +348,9 @@ def render():
                                   if ap.serial.upper() in in_workspace]
             else:
                 assign_serials = [ap.serial for ap in claimable]
-            if st.button(f"Assign subscription to {len(assign_serials)} claimed APs",
-                         type="primary", disabled=not assign_serials):
+            ready = bool(assign_serials and app_id and region)
+            if st.button(f"Assign {len(assign_serials)} APs to Central + subscription",
+                         type="primary", disabled=not ready):
                 sub = subs[choice]
                 key_or_id = sub.get("id") or sub.get("key")
                 try:
@@ -336,7 +362,8 @@ def render():
                     serials = assign_serials
                     for i, serial in enumerate(serials):
                         try:
-                            client.assign_subscription(serial, key_or_id)
+                            client.assign_application(serial, app_id, region,
+                                                      subscription_key_or_id=key_or_id)
                             results.append((serial, True, ""))
                         except Exception as e:
                             results.append((serial, False, str(e)))
@@ -344,7 +371,9 @@ def render():
                     st.session_state["glp_sub_results"] = results
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Subscription assignment failed: {e}")
+                    st.error(f"Assignment failed: {e}")
+            if assign_serials and not (app_id and region):
+                mono_caption("SELECT A CENTRAL APPLICATION INSTANCE ABOVE TO ENABLE ASSIGNMENT")
 
     sub_results = st.session_state.get("glp_sub_results")
     if sub_results:
