@@ -136,6 +136,19 @@ def render():
         elif sanitized:
             central_cfg.gw_cluster_name = sanitized
 
+    # Hybrid credential status — group create/move route through Classic on a
+    # hybrid tenant; make it obvious whether that's wired before provisioning.
+    if central_cfg.destination == "new":
+        if have_classic_creds():
+            st.success(f"Hybrid mode armed — groups/moves will use Classic API "
+                       f"`{st.session_state.get('central_base_classic','')}`. "
+                       "SSIDs/VLANs stay on New Central.")
+        else:
+            st.warning("No Classic API Gateway token registered. On a HYBRID tenant "
+                       "device-group create/move will be blocked — add the base URL + "
+                       "token in Step 1 → 'Hybrid cluster?' (the status line there must "
+                       "read ✓ token registered).")
+
     st.divider()
     col_back, _, col_run = st.columns([1, 3, 1])
     col_back.button("← Back", on_click=lambda: st.session_state.update({"step": 1}))

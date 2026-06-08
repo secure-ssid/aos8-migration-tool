@@ -396,30 +396,44 @@ def render():
                 f'Classic; SSIDs/VLANs/scope-maps stay on New Central.</div>',
                 unsafe_allow_html=True,
             )
-            # key-only (no value=) — passing both makes Streamlit ignore typed
-            # edits and snap back to the default. Seed the default once.
-            st.session_state.setdefault(
-                "central_base_classic",
-                "https://apigw-uswest4.central.arubanetworks.com")
-            st.text_input("Classic API gateway base URL",
-                          key="central_base_classic",
-                          help="e.g. https://internal-apigw.central.arubanetworks.com "
-                               "(host only — no /swagger or /apps path)")
+            # Store in PLAIN session keys (no widget key=) and write the value
+            # back every render. Widget-key state is garbage-collected when the
+            # widget isn't rendered (e.g. while on Step 2/3), which was wiping
+            # the typed gateway URL on navigation back to Step 1.
+            _cb = st.text_input(
+                "Classic API gateway base URL",
+                value=st.session_state.get(
+                    "central_base_classic",
+                    "https://apigw-uswest4.central.arubanetworks.com"),
+                help="e.g. https://internal-apigw.central.arubanetworks.com "
+                     "(host only — no /swagger or /apps path)")
+            if _cb.strip():
+                st.session_state["central_base_classic"] = _cb.strip()
             hh1, hh2 = st.columns(2)
             htok = hh1.text_input(
                 "Classic access token", type="password",
                 placeholder="•••••••• (saved)" if st.session_state.get("classic_access_token") else "",
-                key="_hybrid_token_in",
                 help="API Gateway → System Apps & Tokens → Generate Token",
             )
             if htok:
                 st.session_state["classic_access_token"] = htok.strip()
             href = hh2.text_input(
                 "Classic refresh token (optional)", type="password",
-                key="_hybrid_refresh_in",
             )
             if href:
                 st.session_state["classic_refresh_token"] = href.strip()
+
+            # visible status so it's never ambiguous whether the creds stuck
+            _have_tok = bool(st.session_state.get("classic_access_token"))
+            _base = st.session_state.get("central_base_classic", "")
+            st.markdown(
+                f'<div style="font-size:12px;font-family:\'IBM Plex Mono\',monospace;'
+                f'margin-top:0.4rem;">'
+                f'<span style="color:{OK if _have_tok else FAIL};">'
+                f'{"✓ token registered" if _have_tok else "✕ no token"}</span>'
+                f'<span style="color:{FAINT};">  ·  gateway: {esc(_base)}</span></div>',
+                unsafe_allow_html=True,
+            )
     else:
         c1, c2 = st.columns([3, 1])
         central_base = c1.text_input(
@@ -429,6 +443,8 @@ def render():
             help="Classic Central → API Gateway → the cluster base URL "
                  "(e.g. apigw-uswest4 / apigw-eucentral3)",
         )
+        if central_base.strip():  # persist immediately (survives navigation)
+            st.session_state["central_base_classic"] = central_base.strip()
         aos10_fw = c2.text_input("Target AOS 10", value=st.session_state.get("aos10_fw", "10.7.0.0"))
 
         t1, t2 = st.columns(2)
