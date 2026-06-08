@@ -48,25 +48,38 @@ def _is_duplicate(err: Exception) -> bool:
     return "already exists" in msg or "duplicate" in msg
 
 
-# A few common IANA zones → the {timezoneName, rawOffset, timezoneId} object
-# New Central's site-create requires. UTC is the safe universal default; the
-# API mainly validates that timezoneId is a real IANA zone.
-_TZ = {
-    "UTC": ("UTC", 0),
-    "America/New_York": ("Eastern Standard Time", -18000000),
-    "America/Chicago": ("Central Standard Time", -21600000),
-    "America/Denver": ("Mountain Standard Time", -25200000),
-    "America/Los_Angeles": ("Pacific Standard Time", -28800000),
-    "Europe/London": ("Greenwich Mean Time", 0),
-    "Europe/Berlin": ("Central European Time", 3600000),
+def _timezone(timezone_id: str) -> dict:
+    """Build the {rawOffset, timezoneId, timezoneName} object New Central's
+    site-create requires — computed from a real IANA zone exactly the way
+    pycentral's Site class does (offset in ms, tzname abbreviation)."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(timezone_id)
+    except Exception:
+        from zoneinfo import ZoneInfo
+        timezone_id = "UTC"
+        tz = ZoneInfo("UTC")
+    now = datetime.now(tz)
+    return {
+        "rawOffset": int(now.utcoffset().total_seconds() * 1000),
+        "timezoneId": timezone_id,
+        "timezoneName": now.tzname(),
+    }
+
+
+# New Central validates country against ISO 3166 short names — a bare code
+# like "US" is risky, so normalize the common ones to the canonical name.
+_COUNTRY_NORM = {
+    "us": "United States", "usa": "United States", "u.s.": "United States",
+    "uk": "United Kingdom", "gb": "United Kingdom",
+    "ca": "Canada", "au": "Australia", "de": "Germany",
 }
 
 
-def _timezone(timezone_id: str) -> dict:
-    name, offset = _TZ.get(timezone_id, _TZ["UTC"])
-    if timezone_id not in _TZ:
-        timezone_id = "UTC"
-    return {"timezoneName": name, "rawOffset": offset, "timezoneId": timezone_id}
+def _norm_country(country: str) -> str:
+    c = (country or "").strip()
+    return _COUNTRY_NORM.get(c.lower(), c) if c else "United States"
 
 
 class CentralClient:
@@ -250,12 +263,19 @@ class CentralClient:
         for site in self.list_sites():
             if self._site_name(site) == name:
                 return self._site_id(site) or name
-        body: dict = {"name": name, "timezone": _timezone(timezone_id)}
-        if address:
-            for key, val in (("address", address), ("city", city), ("state", state),
-                             ("country", country), ("zipcode", zipcode)):
-                if val:
-                    body[key] = val
+        # New Central requires the FULL geographic body (pycentral Site:
+        # name+address+city+state+country+zipcode+timezone are all required and
+        # country/state are ISO-3166 validated). Fall back to valid placeholders
+        # for a lab/test site when the operator didn't supply an address.
+        body: dict = {
+            "name": name,
+            "address": address or "1 Lab Street",
+            "city": city or "San Jose",
+            "state": state or "California",
+            "country": _norm_country(country),
+            "zipcode": zipcode or "95002",
+            "timezone": _timezone(timezone_id),
+        }
         # v1alpha1 is the create route HPE's workflows use; fall back to v1 /
         # monitoring on a routing (404) error only.
         resp = None

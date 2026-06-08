@@ -374,12 +374,15 @@ def render():
                 f'Classic; SSIDs/VLANs/scope-maps stay on New Central.</div>',
                 unsafe_allow_html=True,
             )
-            st.text_input(
-                "Classic API gateway base URL",
-                key="central_base_classic",
-                value=st.session_state.get("central_base_classic",
-                                           "https://apigw-uswest4.central.arubanetworks.com"),
-            )
+            # key-only (no value=) — passing both makes Streamlit ignore typed
+            # edits and snap back to the default. Seed the default once.
+            st.session_state.setdefault(
+                "central_base_classic",
+                "https://apigw-uswest4.central.arubanetworks.com")
+            st.text_input("Classic API gateway base URL",
+                          key="central_base_classic",
+                          help="e.g. https://internal-apigw.central.arubanetworks.com "
+                               "(host only — no /swagger or /apps path)")
             hh1, hh2 = st.columns(2)
             htok = hh1.text_input(
                 "Classic access token", type="password",
