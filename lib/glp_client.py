@@ -37,10 +37,21 @@ class GLPAPIError(Exception):
     pass
 
 
+
+def _normalize_base(url: str) -> str:
+    """Ensure the base URL has a scheme and no trailing slash. Operators often
+    paste a bare host (internal.api.central.arubanetworks.com) — default to
+    https:// so requests don't fail with 'No scheme supplied'."""
+    url = (url or "").strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 class GLPClient:
     def __init__(self, client_id: str, client_secret: str,
                  base_url: str = GLP_BASE_URL, timeout: int = 30):
-        self.base = base_url.rstrip("/")
+        self.base = _normalize_base(base_url)
         self.client_id = client_id
         self.client_secret = client_secret
         self.timeout = timeout

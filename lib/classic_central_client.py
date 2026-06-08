@@ -111,11 +111,22 @@ def _is_duplicate(err: Exception) -> bool:
     return "already exists" in msg or "duplicate" in msg
 
 
+
+def _normalize_base(url: str) -> str:
+    """Ensure the base URL has a scheme and no trailing slash. Operators often
+    paste a bare host (internal.api.central.arubanetworks.com) — default to
+    https:// so requests don't fail with 'No scheme supplied'."""
+    url = (url or "").strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 class ClassicCentralClient:
     def __init__(self, base_url: str, access_token: str,
                  client_id: str = "", client_secret: str = "",
                  refresh_token: str = "", timeout: int = 30):
-        self.base = base_url.rstrip("/")
+        self.base = _normalize_base(base_url)
         self.access_token = access_token
         self.client_id = client_id
         self.client_secret = client_secret
