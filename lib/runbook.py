@@ -315,6 +315,11 @@ def _generate_instant(customer: CustomerConfig, central: CentralConfig,
         "✓ Every AP needs DHCP + DNS + HTTPS reachability to Activate and Central",
         "✓ Complete Steps 1–4 in the migration tool first:",
         "    Central provisioned (Step 3) + APs claimed & subscribed in GreenLake (Step 4)",
+        "",
+        "NOTE — auto-conversion: Step 4 'Move APs into groups' assigns the APs to",
+        "their AOS 10 device group, and Central then PUSHES the conversion — each AP",
+        "reboots into AOS 10 (~10-20 min offline). That move IS the cutover; run it",
+        "only inside a maintenance window.",
     ]
     if customer.radius_servers:
         lines.append(
