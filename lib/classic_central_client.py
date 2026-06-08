@@ -184,6 +184,17 @@ class ClassicCentralClient:
                                          f"apigw base URL ({type(e).__name__})")
         if resp.status_code == 401 and not _retried and self.refresh():
             return self._request(method, path, json_body, params, _retried=True)
+        if resp.status_code == 401:
+            have_refresh = bool(self.client_id and self.client_secret
+                                and self.refresh_token)
+            hint = ("the token auto-refresh failed — generate a fresh token"
+                    if have_refresh else
+                    "generate a fresh token in Classic API Gateway → System Apps & "
+                    "Tokens, or add the refresh token + client id/secret in Step 1's "
+                    "hybrid expander so the tool auto-refreshes (classic tokens "
+                    "expire after ~2 hours)")
+            raise ClassicCentralAPIError(
+                f"Classic API token expired/invalid (401). {hint}.")
         if resp.status_code == 429 and not _retried:
             time.sleep(min(int(resp.headers.get("Retry-After", 10)), 60))
             return self._request(method, path, json_body, params, _retried=True)
