@@ -205,10 +205,30 @@ def render():
                 client.authenticate()
             with st.spinner("Reading workspace inventory..."):
                 existing = set()
+                assigned_app = None  # app id+region from a device already assigned
                 offset = 0
                 while True:
                     page = client.list_devices(limit=100, offset=offset)
-                    existing |= {str(d.get("serialNumber", "")).upper() for d in page}
+                    for d in page:
+                        sn = str(d.get("serialNumber", "")).upper()
+                        if sn:
+                            existing.add(sn)
+                        if assigned_app is None:
+                            app = d.get("application")
+                            aid = None
+                            if isinstance(app, dict):
+                                aid = app.get("id") or app.get("applicationId")
+                            elif isinstance(app, str) and app:
+                                aid = app
+                            aid = aid or d.get("applicationId")
+                            if aid:
+                                region = (d.get("region")
+                                          or (app.get("region") if isinstance(app, dict) else "")
+                                          or "")
+                                nm = (app.get("name") if isinstance(app, dict) else "") \
+                                    or f"Central (from {d.get('deviceType','assigned device')})"
+                                assigned_app = {"id": aid, "name": nm, "region": region,
+                                                "verified": True}
                     if len(page) < 100:
                         break
                     offset += 100
@@ -217,6 +237,11 @@ def render():
                     sms = client.list_service_managers()
                 except Exception:
                     sms = []
+            # an id read off an already-assigned device is GROUND TRUTH (GreenLake
+            # accepted it) — prefer it over the service-catalog provision id
+            if assigned_app:
+                sms = [assigned_app] + [s for s in sms
+                                        if s.get("id") != assigned_app["id"]]
             st.session_state["glp_existing"] = sorted(existing)
             st.session_state["glp_subscriptions"] = subs
             st.session_state["glp_service_managers"] = sms
@@ -327,8 +352,12 @@ def render():
             ai = st.selectbox(
                 "Central application instance (region)",
                 options=range(len(sms)),
-                format_func=lambda i: f"{sms[i]['name']} · {sms[i]['region'] or 'region?'}",
-                help="The provisioned Central instance the APs will be managed by")
+                format_func=lambda i: (
+                    f"{'✓ ' if sms[i].get('verified') else ''}{sms[i]['name']} · "
+                    f"{sms[i]['region'] or 'region?'}"
+                    + (" — verified from an assigned device" if sms[i].get('verified') else "")),
+                help="Pick the ✓ option (read off a device GreenLake already "
+                     "assigned — guaranteed-valid application id)")
             app_id, region = sms[ai]["id"], sms[ai]["region"]
 
         if not active:
