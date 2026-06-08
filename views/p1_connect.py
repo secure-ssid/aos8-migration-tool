@@ -11,10 +11,11 @@ from lib.aos8_client import AOS8Client, AOS8APIError, is_model_compatible
 from lib.aos8_parser import parse_customer_config, parse_instant_config
 from lib.translator import translate
 from lib.styles import (
-    OK, FAIL, WARN, MUTED, TEXT, FAINT,
+    OK, FAIL, WARN, MUTED, TEXT, FAINT, HPE_GREEN,
     page_header, section_label, badge, ssid_tag, esc, mono_row, mono_caption,
     telemetry_chip,
 )
+from lib import api_probe
 
 PASTE_COMMANDS = [
     ("running_config", "show running-config",
@@ -79,6 +80,36 @@ def render():
     st.divider()
 
     # ── AOS 8 source ───────────────────────────────────────────────────────
+    # ── Lab/test data — exercise the full path with no controller ──────────
+    with st.expander("🧪 Load test customer (lab testing — no controller needed)"):
+        st.markdown(
+            f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.4rem;">'
+            f'Generates synthetic discovery named <code>zztest-…</code> so everything '
+            f'created in the tenant is obviously disposable and easy to delete. '
+            f'Pick a scenario, then continue through the wizard as normal.</div>',
+            unsafe_allow_html=True,
+        )
+        tcol1, tcol2 = st.columns([2, 1])
+        scenario = tcol1.selectbox(
+            "Scenario",
+            ["mixed — 2 groups, tunnel+bridge, enterprise+PSK+open, L2 cluster",
+             "bridge — single group, all bridge (clean New-Central case)",
+             "instant — IAP cluster, bridge only"],
+            label_visibility="collapsed",
+        )
+        if tcol2.button("Load test customer", use_container_width=True):
+            from lib import testdata
+            key = scenario.split(" ")[0]
+            cfg = testdata.make_test_config(key)
+            st.session_state["source_type"] = cfg.source_type
+            st.session_state["customer_name"] = "zztest-lab"
+            st.session_state["mc_ip"] = cfg.mc_ip
+            st.session_state["customer_config"] = cfg
+            st.session_state["_reset_downstream"]()
+            st.success(f"Loaded zztest-lab ({key}) — {len(cfg.ssids)} SSIDs, "
+                       f"{len(cfg.aps)} APs. Set the destination below and continue.")
+            st.rerun()
+
     section_label("Source — AOS 8 platform")
     source_type = st.radio(
         "Source platform",
@@ -407,6 +438,51 @@ def render():
     fw_valid = bool(_FW_RE.match(aos10_fw.strip()))
     if aos10_fw and not fw_valid:
         st.warning(f"'{aos10_fw}' doesn't look like an AOS 10 version (expected e.g. 10.7.0.0)")
+
+    # ── Tenant API connectivity probe (read-only) ─────────────────────────
+    st.markdown('<div style="height:0.4rem;"></div>', unsafe_allow_html=True)
+    section_label("Validate tenant access (read-only)")
+    st.markdown(
+        f'<div style="font-size:12px;color:{FAINT};margin:-0.2rem 0 0.5rem;">'
+        f'Auth + read checks against this tenant, plus one disposable '
+        f'<code>zzprobe-</code> group-create to detect a hybrid cluster '
+        f'(auto-deleted if it succeeds). Reports what the tenant supports '
+        f'before any real provisioning.</div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Test API connectivity"):
+        rows: list = []
+        with st.spinner("Probing tenant (read-only)..."):
+            if dest_type == "new":
+                rows += api_probe.probe_new_central(
+                    central_base, central_client_id,
+                    st.session_state.get("central_secret", ""))
+                rows += api_probe.probe_glp(
+                    central_client_id, st.session_state.get("central_secret", ""))
+                if st.session_state.get("classic_access_token"):
+                    rows += api_probe.probe_classic(
+                        st.session_state.get("central_base_classic", ""),
+                        st.session_state.get("classic_access_token", ""),
+                        central_client_id, st.session_state.get("central_secret", ""),
+                        st.session_state.get("classic_refresh_token", ""))
+            else:
+                rows += api_probe.probe_classic(
+                    central_base, st.session_state.get("classic_access_token", ""),
+                    central_client_id, st.session_state.get("central_secret", ""),
+                    st.session_state.get("classic_refresh_token", ""))
+        st.session_state["probe_results"] = [(r.name, r.status, r.detail) for r in rows]
+
+    for name, status, detail in st.session_state.get("probe_results", []):
+        icon, col = {"ok": ("✓", OK), "warn": ("!", WARN),
+                     "fail": ("✕", FAIL), "skip": ("·", FAINT)}.get(status, ("·", FAINT))
+        st.markdown(
+            f'<div style="display:flex;gap:10px;padding:4px 2px;border-bottom:1px solid #1F2D4A;">'
+            f'<span style="color:{col};font-family:\'IBM Plex Mono\',monospace;">{icon}</span>'
+            f'<span style="color:{TEXT};font-size:12.5px;min-width:330px;">{esc(name)}</span>'
+            f'<span style="color:{MUTED};font-size:12px;font-family:\'IBM Plex Mono\',monospace;">'
+            f'{esc(detail)}</span></div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Gateway strategy (only relevant when tunnel SSIDs exist) ───────────
     has_tunnel = bool(customer_cfg) and any(
