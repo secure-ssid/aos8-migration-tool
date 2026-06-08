@@ -6,6 +6,7 @@ import streamlit as st
 
 from lib.session_clients import (
     build_central_client, build_classic_client, persist_rotated_refresh_token,
+    have_classic_creds,
 )
 from lib.styles import (
     BORDER, FAINT, MUTED, TEXT,
@@ -185,10 +186,14 @@ def render():
             st.success("Authenticated with New Central")
             # hybrid clusters need the Classic API for device-group create/move
             classic_client = None
-            if st.session_state.get("classic_access_token"):
+            if have_classic_creds():
                 classic_client = build_classic_client()
                 st.caption("Hybrid mode: device groups + moves will route through "
                            "the Classic API Gateway.")
+            elif st.session_state.get("classic_access_token"):
+                st.warning("A Classic access token is set but the Classic API Gateway "
+                           "base URL is empty — set it in Step 1 → 'Hybrid cluster?' "
+                           "before provisioning, or device-group create will fail.")
             with st.spinner("Provisioning..."):
                 results = client.provision(central_cfg, ap_serials=ap_serials,
                                            on_step=on_step, classic_client=classic_client)
