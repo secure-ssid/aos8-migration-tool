@@ -4,7 +4,67 @@ Step 2: Preflight compatibility checks.
 import streamlit as st
 
 from lib import compatibility
-from lib.styles import page_header, section_label, check_card, mono_caption
+from lib.models import VLAN
+from lib.translator import translate
+from lib.styles import (page_header, section_label, check_card, mono_caption,
+                        FAINT, TEXT, esc)
+
+
+def _named_vlan_editor(customer, central) -> None:
+    """SSIDs whose AOS 8 VLAN is a NAMED pool with no numeric id default to
+    VLAN 1. Let the operator map each named token to a real VLAN id, then
+    re-translate so the SSID lands on the right VLAN."""
+    named: dict[str, list[str]] = {}
+    for s in customer.ssids:
+        if getattr(s, "vlan_raw", None):
+            named.setdefault(s.vlan_raw, []).append(s.display_name)
+    if not named:
+        return
+
+    section_label("Named VLAN mapping — fix before provisioning")
+    st.markdown(
+        f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.5rem;">'
+        f'{len(named)} SSID(s) reference a <b>named</b> VLAN with no numeric ID, so '
+        f'they defaulted to VLAN 1. Enter the real VLAN ID so each SSID lands on the '
+        f'correct VLAN.</div>', unsafe_allow_html=True)
+
+    mapping: dict[str, int] = {}
+    for token, ssid_names in named.items():
+        c1, c2 = st.columns([2, 1])
+        c1.markdown(
+            f'<div style="padding-top:6px;color:{TEXT};font-size:13px;">'
+            f'<code>{esc(token)}</code> '
+            f'<span style="color:{FAINT};">→ {esc(", ".join(ssid_names))}</span></div>',
+            unsafe_allow_html=True)
+        mapping[token] = c2.number_input(
+            f"VLAN for {token}", min_value=1, max_value=4094, value=1, step=1,
+            key=f"vlanmap_{token}", label_visibility="collapsed")
+
+    if st.button("Apply VLAN mapping", type="primary"):
+        for s in customer.ssids:
+            tok = getattr(s, "vlan_raw", None)
+            if tok in mapping:
+                s.vlan = int(mapping[tok])
+                if not any(v.id == s.vlan for v in customer.vlans):
+                    customer.vlans.append(VLAN(s.vlan, tok))
+                s.vlan_raw = None
+        # re-translate, preserving fields translate() doesn't set
+        gw_mode = "retire" if getattr(central, "gateways_retired", False) else "keep"
+        new_central = translate(
+            customer,
+            customer_name=st.session_state.get("customer_name", central.customer_name),
+            central_base_url=st.session_state.get("central_base", central.base_url),
+            aos10_firmware=st.session_state.get("aos10_fw", "10.7.0.0"),
+            site_name=(central.sites[0] if central.sites else ""),
+            gateway_mode=gw_mode)
+        for f in ("destination", "site_address", "site_city", "site_state",
+                  "site_country", "site_zipcode", "site_timezone", "gw_serial"):
+            setattr(new_central, f, getattr(central, f, getattr(new_central, f)))
+        st.session_state["customer_config"] = customer
+        st.session_state["central_config"] = new_central
+        st.session_state.pop("preflight_results", None)
+        st.success("VLAN mapping applied — re-running preflight.")
+        st.rerun()
 
 
 def render():
@@ -60,6 +120,10 @@ def render():
         with st.expander(f"✓  {len(passes)} checks passed", expanded=False):
             for r in passes:
                 check_card("✓", r.name, r.message, variant="green")
+
+    # ── Named VLAN mapping (fix non-numeric VLANs before provisioning) ──────
+    st.divider()
+    _named_vlan_editor(customer, central)
 
     st.divider()
 
