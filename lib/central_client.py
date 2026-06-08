@@ -30,6 +30,13 @@ TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
 PSK_PLACEHOLDER = "ChangeMe-SetInCentral"
 
 
+def cp_profile_name(ssid: SSID) -> str:
+    """Deterministic external-captive-portal profile name for an SSID, so the
+    create and the SSID binding agree."""
+    base = re.sub(r"[^A-Za-z0-9-]+", "-", (ssid.essid or ssid.name)).strip("-")
+    return f"{base or 'guest'}-ecp"
+
+
 def secret_looks_unusable(s: Optional[str]) -> bool:
     """True when a captured PSK/secret can't be pushed as-is: empty, longer
     than a WPA passphrase can be (so it must be a hash), or an encrypted hex
@@ -581,7 +588,27 @@ class CentralClient:
                 body["auth-server-group"] = server_group
                 body["acct-server-group"] = server_group
                 body["radius-accounting"] = True
+        # External captive portal — layered on top of OPEN (verified wlan.json:
+        # captive-portal-type EXTERNAL_CP + captive-portal=<profile name>; the
+        # RADIUS group binds on the SSID since the profile field is GW-only)
+        if getattr(ssid, "captive_portal_url", ""):
+            body["captive-portal-type"] = "EXTERNAL_CP"
+            body["captive-portal"] = cp_profile_name(ssid)
+            if server_group:
+                body["auth-server-group"] = server_group
+                body["radius-accounting"] = True
         return body
+
+    def create_captive_portal(self, name: str, external_url: str,
+                              redirect_url: str = "") -> None:
+        """Create a SHARED external captive-portal profile (verified body:
+        {name, external-cp-server-url, redirect-url}). SHARED → no scope-map."""
+        body = {"name": name, "external-cp-server-url": external_url}
+        if redirect_url:
+            body["redirect-url"] = redirect_url
+        self._swallow_duplicate(lambda: self._post(
+            f"/network-config/v1alpha1/captive-portal/{quote(name, safe='')}",
+            json=body))
 
     def _upsert_ssid(self, encoded: str, body: dict) -> None:
         """Create the wlan-ssid, or if it already exists PATCH it with the same
@@ -950,6 +977,14 @@ class CentralClient:
                     ))
                     continue
                 seen_essids.add(ssid.display_name)
+                # external captive portal profile must exist before the SSID
+                # references it by name
+                if getattr(ssid, "captive_portal_url", ""):
+                    step(f"Create external captive portal: {cp_profile_name(ssid)} "
+                         f"→ {ssid.display_name}",
+                         lambda s=ssid: self.create_captive_portal(
+                             cp_profile_name(s), s.captive_portal_url,
+                             s.captive_portal_redirect))
                 if ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
                         and cc.gw_cluster_name and gw_scope.get("id"):
                     step(f"Create overlay SSID: {ssid.display_name} → {group_cfg.name}",
@@ -995,6 +1030,19 @@ class CentralClient:
                     f"MANUAL FOLLOW-UP: set the WPA passphrase for SSID '{nm}' in "
                     f"Central (created with placeholder '{PSK_PLACEHOLDER}' — the AOS 8 "
                     "key was encrypted/not captured)", True, ""))
+                if on_step:
+                    on_step(results[-1][0], True)
+            # external captive portal: the redirect + RADIUS bind are migrated,
+            # but the pre-auth allowlist (walled garden) is tenant-specific and
+            # not auto-built — flag it.
+            cp_ssids = sorted({s.display_name for g in cc.groups for s in g.ssids
+                               if getattr(s, "captive_portal_url", "")})
+            for nm in cp_ssids:
+                results.append((
+                    f"MANUAL FOLLOW-UP: SSID '{nm}' has an external captive portal — "
+                    "verify the pre-auth allowlist (walled garden: DNS + the portal "
+                    "host) in Central; the redirect URL + RADIUS group were migrated",
+                    True, ""))
                 if on_step:
                     on_step(results[-1][0], True)
 

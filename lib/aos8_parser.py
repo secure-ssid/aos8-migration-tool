@@ -285,8 +285,46 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     return profiles
 
 
+def _mc_captive_portals(running: str) -> dict[str, dict]:
+    """Resolve the MC external-captive-portal chain to aaa-profile → {url,
+    redirect}: virtual-ap names an aaa-profile → its initial-role → that
+    user-role's `captive-portal <cp>` → the `aaa authentication captive-portal`
+    profile (external when its login-page is an off-box URL)."""
+    cps: dict[str, dict] = {}                       # cp-profile → {url, redirect}
+    for name, block in _iter_blocks(running, r"aaa authentication captive-portal"):
+        url, redirect = "", ""
+        for line in block:
+            m = re.match(r'login-page\s+"?(\S+?)"?\s*$', line, re.IGNORECASE)
+            if m and m.group(1).lower().startswith(("http://", "https://")):
+                url = m.group(1)
+            m = re.match(r'redirect-url\s+"?(\S+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                redirect = m.group(1)
+        if url:                                     # off-box login-page ⇒ external
+            cps[name] = {"url": url, "redirect": redirect}
+    role_cp: dict[str, str] = {}                    # user-role → cp-profile
+    for name, block in _iter_blocks(running, r"user-role"):
+        for line in block:
+            m = re.match(r'captive-portal\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                role_cp[name] = m.group(1)
+    aaa_role: dict[str, str] = {}                   # aaa-profile → initial-role
+    for name, block in _iter_blocks(running, r"aaa profile"):
+        for line in block:
+            m = re.match(r'initial-role\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                aaa_role[name] = m.group(1)
+    aaa_cp: dict[str, dict] = {}                    # aaa-profile → {url, redirect}
+    for aaa, role in aaa_role.items():
+        cp = cps.get(role_cp.get(role, ""))
+        if cp:
+            aaa_cp[aaa] = cp
+    return aaa_cp
+
+
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
+    mc_cps = _mc_captive_portals(running)
     for name, block in _iter_blocks(running, r"wlan virtual-ap"):
         vlan = 1
         vlan_raw = None
@@ -314,6 +352,7 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
 
         prof = ssid_profiles.get(prof_ref, {})
         auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
+        cp = mc_cps.get(aaa_ref, {})
         ssids.append(SSID(
             name=name,
             vlan=vlan,
@@ -327,6 +366,8 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             rf_band=prof.get("rf_band", ""),
             dtim_period=prof.get("dtim_period", 0),
             max_clients=prof.get("max_clients", 0),
+            captive_portal_url=cp.get("url", ""),
+            captive_portal_redirect=cp.get("redirect", ""),
         ))
     return ssids
 
@@ -553,8 +594,38 @@ def parse_instant_config(pasted_outputs: dict[str, str], vc_ip: str = "") -> Cus
     )
 
 
+def _parse_instant_external_cp(running: str) -> dict[str, dict]:
+    """`wlan external-captive-portal "<name>"` blocks → {name: {url, redirect}}.
+    Builds the full portal URL from server/url/port."""
+    cps: dict[str, dict] = {}
+    for name, block in _iter_blocks(running, r"wlan external-captive-portal"):
+        server, path, port, redirect = "", "", 0, ""
+        for line in block:
+            m = re.match(r"server\s+(\S+)", line, re.IGNORECASE)
+            if m:
+                server = m.group(1)
+            m = re.match(r"url\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
+            if m:
+                path = m.group(1)
+            m = re.match(r"port\s+(\d+)", line, re.IGNORECASE)
+            if m:
+                port = int(m.group(1))
+            m = re.match(r"redirect-url\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
+            if m:
+                redirect = m.group(1)
+        if server:
+            scheme = "http" if port and port not in (443, 8443) else "https"
+            portpart = f":{port}" if port else ""
+            if path and not path.startswith("/"):
+                path = "/" + path
+            cps[name] = {"url": f"{scheme}://{server}{portpart}{path}",
+                         "redirect": redirect}
+    return cps
+
+
 def _parse_instant_ssids(running: str) -> list[SSID]:
     ssids = []
+    ext_cps = _parse_instant_external_cp(running)
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
         essid = name
         opmode = ""
@@ -562,6 +633,7 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
         vlan, vlan_raw = 1, None
         auth_server = None
         enabled = True
+        cp_ref, cp_external = "", False
         for line in block:
             m = re.match(r"essid\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
             if m:
@@ -579,9 +651,25 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             m = re.match(r"auth-server\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
             if m:
                 auth_server = m.group(1)
+            # external captive portal: `captive-portal external [profile "X"]`
+            # or `captive-portal-profile "X"`
+            m = re.match(r"captive-portal\s+external(?:\s+profile\s+\"?(.+?)\"?)?\s*$",
+                         line, re.IGNORECASE)
+            if m:
+                cp_external = True
+                cp_ref = m.group(1) or cp_ref
+            m = re.match(r"captive-portal-profile\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
+            if m:
+                cp_external = True
+                cp_ref = m.group(1)
             if re.match(r"^disable\s*$", line, re.IGNORECASE):
                 enabled = False
         auth, auth_known = _opmode_to_auth(opmode)
+        cp_url, cp_redirect = "", ""
+        if cp_external:
+            cp = ext_cps.get(cp_ref) or (next(iter(ext_cps.values())) if ext_cps else None)
+            if cp:
+                cp_url, cp_redirect = cp["url"], cp["redirect"]
         ssids.append(SSID(
             name=name,
             essid=essid,
@@ -593,6 +681,8 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             psk=passphrase,
             auth_server_group=auth_server,
             broadcast=enabled,
+            captive_portal_url=cp_url,
+            captive_portal_redirect=cp_redirect,
         ))
     return ssids
 

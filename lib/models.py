@@ -35,6 +35,9 @@ class SSID:
     rf_band: str = ""               # New Central rf-band enum (BAND_ALL, 5GHZ_6GHZ, …)
     dtim_period: int = 0
     max_clients: int = 0
+    # external captive portal (guest SSID redirecting to an off-box portal)
+    captive_portal_url: str = ""        # external portal URL → enables EXTERNAL_CP
+    captive_portal_redirect: str = ""   # post-auth redirect URL (optional)
 
     @property
     def display_name(self) -> str:
