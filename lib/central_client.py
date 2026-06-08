@@ -323,10 +323,13 @@ class CentralClient:
         if not serials:
             return
         errors = []
+        # New Central config route (verified): POST /network-config/v1/site-add-devices
+        # {"desScopeId": <site scopeId>, "devices": [serials]}. Older routes as fallback.
         candidates = [
+            ("POST", "/network-config/v1/site-add-devices",
+             lambda: {"desScopeId": str(site_id), "devices": serials}),
             ("POST", f"/network-monitoring/v1/sites/{site_id}/devices",
              lambda: {"serials": serials}),
-            # classic fallback needs a numeric site id — skipped if not numeric
             ("POST", "/central/v2/sites/associate",
              lambda: {"site_id": int(site_id), "device_id": serials,
                       "device_type": device_type}),
@@ -337,6 +340,11 @@ class CentralClient:
                 return
             except (CentralAPIError, ValueError) as e:
                 errors.append(str(e))
+                # if the route exists but rejected the request (not a 404),
+                # don't keep trying other routes — surface the real error
+                if "404" not in str(e) and "not found" not in str(e).lower() \
+                        and not isinstance(e, ValueError):
+                    raise CentralAPIError(f"Site assignment failed: {e}")
         raise CentralAPIError("Site assignment failed: " + " | ".join(errors))
 
     # ─────────────────── Device groups ───────────────────
@@ -635,9 +643,11 @@ class CentralClient:
 
     def create_server_group(self, name: str, server_names: list[str],
                             group_type: str = "RADIUS") -> None:
-        """Create a server-group binding the named auth-servers (verified body:
-        {"name","type","servers":[{"server-name": …}]})."""
-        members = [{"server-name": s} for s in server_names if s]
+        """Create a server-group binding the named auth-servers. `position` is
+        required on AP (the tenant enforces it even though the spec tags it
+        GW-only) — 1 = top."""
+        members = [{"server-name": s, "position": i}
+                   for i, s in enumerate((x for x in server_names if x), start=1)]
         if not members:
             return
         self._swallow_duplicate(lambda: self._post(
