@@ -483,7 +483,8 @@ class CentralClient:
 
     # ─────────────────── SSIDs ───────────────────
 
-    def _ssid_body(self, ssid: SSID, forward_mode: str) -> dict:
+    def _ssid_body(self, ssid: SSID, forward_mode: str,
+                   server_group: str = "") -> dict:
         # Full WLAN attribute set so the migrated SSID is a complete, functional
         # WLAN — data rates, radio capabilities, DTIM, broadcast filters, WMM,
         # 802.11k. Defaults match the shape New Central uses on this tenant;
@@ -532,9 +533,16 @@ class CentralClient:
             }
         if ssid.auth_type in ENTERPRISE_AUTH:
             body["dot1x"] = True
+            # AP-persona 802.1X: bind the RADIUS server-group directly on the
+            # SSID (verified wlan.json fields; the group wins over primary/backup)
+            if server_group:
+                body["auth-server-group"] = server_group
+                body["acct-server-group"] = server_group
+                body["radius-accounting"] = True
         return body
 
-    def create_underlay_ssid(self, ssid: SSID, scope_id: str) -> None:
+    def create_underlay_ssid(self, ssid: SSID, scope_id: str,
+                             server_group: str = "") -> None:
         name = ssid.display_name
         encoded = quote(name, safe="")
         # Duplicate = the SSID object already exists (idempotent re-run, or the
@@ -542,18 +550,19 @@ class CentralClient:
         # this group still gets the WLAN.
         self._swallow_duplicate(lambda: self._post(
             f"/network-config/v1/wlan-ssids/{encoded}",
-            json=self._ssid_body(ssid, "FORWARD_MODE_BRIDGE")))
+            json=self._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group)))
         self.map_to_scope(f"wlan-ssids/{name}", scope_id, "CAMPUS_AP")
 
     def create_overlay_ssid(self, ssid: SSID, group_scope: str, global_scope: str,
-                            cluster_name: str, cluster_scope_id: str) -> None:
+                            cluster_name: str, cluster_scope_id: str,
+                            server_group: str = "") -> None:
         name = ssid.display_name
         encoded = quote(name, safe="")
 
         self._ensure_role(name, global_scope, group_scope)
         self._ensure_allow_all_policy(name, name, global_scope)
 
-        body = self._ssid_body(ssid, "FORWARD_MODE_L2")
+        body = self._ssid_body(ssid, "FORWARD_MODE_L2", server_group)
         body.update({
             "type": "EMPLOYEE",
             "default-role": name,
@@ -601,6 +610,11 @@ class CentralClient:
 
     # ─────────────────── Auth servers ───────────────────
 
+    # AOS 8 stores RADIUS/TACACS secrets hashed — they can't be recovered, so
+    # we create the server with this placeholder and tell the operator to set
+    # the real secret in Central/GreenLake (surfaced as a manual follow-up).
+    SECRET_PLACEHOLDER = "CHANGEME-set-real-secret-in-central"
+
     def create_auth_server(self, server: RadiusServer) -> None:
         body = {
             "name": server.name,
@@ -610,18 +624,25 @@ class CentralClient:
             "auth-port": server.auth_port,
             "acct-port": server.acct_port,
             "enable": True,
-        }
-        if server.secret:
-            body["shared-secret-config"] = {
+            "shared-secret-config": {
                 "secret-type": "PLAIN_TEXT",
-                "plaintext-value": server.secret,
-            }
-        try:
-            self._post(f"/network-config/v1alpha1/auth-servers/{quote(server.name, safe='')}",
-                       json=body)
-        except CentralAPIError as e:
-            if "duplicate" not in str(e).lower() and "exists" not in str(e).lower():
-                raise
+                "plaintext-value": server.secret or self.SECRET_PLACEHOLDER,
+            },
+        }
+        self._swallow_duplicate(lambda: self._post(
+            f"/network-config/v1alpha1/auth-servers/{quote(server.name, safe='')}",
+            json=body))
+
+    def create_server_group(self, name: str, server_names: list[str],
+                            group_type: str = "RADIUS") -> None:
+        """Create a server-group binding the named auth-servers (verified body:
+        {"name","type","servers":[{"server-name": …}]})."""
+        members = [{"server-name": s} for s in server_names if s]
+        if not members:
+            return
+        self._swallow_duplicate(lambda: self._post(
+            f"/network-config/v1alpha1/server-groups/{quote(name, safe='')}",
+            json={"name": name, "type": group_type, "servers": members}))
 
     # ─────────────────── Firmware ───────────────────
 
@@ -744,6 +765,21 @@ class CentralClient:
             step(f"Create auth server: {server.name}",
                  lambda s=server: self.create_auth_server(s))
 
+        # RADIUS server-group — enterprise (802.1X) SSIDs bind to this so they
+        # actually authenticate. One group from all discovered servers; bound
+        # to every enterprise SSID below.
+        import re as _re
+        _slug = _re.sub(r"[^a-z0-9-]+", "-", cc.customer_name.lower()).strip("-") or "migrated"
+        radius_group = ""
+        has_enterprise = any(s.auth_type in (AuthType.WPA2_ENTERPRISE,
+                                             AuthType.WPA3_ENTERPRISE)
+                             for g in cc.groups for s in g.ssids)
+        if cc.radius_servers and has_enterprise:
+            radius_group = f"{_slug}-radius"
+            step(f"Create RADIUS server-group: {radius_group}",
+                 lambda: self.create_server_group(
+                     radius_group, [s.name for s in cc.radius_servers]))
+
         # Gateway cluster lives in its own device group (MOBILITY_GW persona)
         gw_scope: dict[str, str] = {}
         if cc.gw_cluster_name:
@@ -798,7 +834,7 @@ class CentralClient:
                          lambda s=ssid, sid=scope_id:
                              self.create_overlay_ssid(s, sid, global_scope,
                                                       cc.gw_cluster_name,
-                                                      gw_scope["id"]))
+                                                      gw_scope["id"], radius_group))
                 elif ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
                         and cc.gw_cluster_name:
                     results.append((
@@ -809,7 +845,7 @@ class CentralClient:
                 else:
                     step(f"Create underlay SSID: {ssid.display_name} → {group_cfg.name}",
                          lambda s=ssid, sid=scope_id:
-                             self.create_underlay_ssid(s, sid))
+                             self.create_underlay_ssid(s, sid, radius_group))
 
             step(f"Set firmware compliance {group_cfg.firmware_version} → {group_cfg.name}",
                  lambda g=group_cfg, sid=scope_id:
@@ -823,6 +859,18 @@ class CentralClient:
                 step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
                      lambda s=serials, sn=group_cfg.site_name:
                          self.assign_devices_to_site(site_ids[sn], s))
+
+        # AOS 8 RADIUS secrets can't be recovered (stored hashed) — flag the
+        # servers created with a placeholder so the operator sets the real one.
+        if cc.radius_servers:
+            names = ", ".join(s.name for s in cc.radius_servers if not s.secret)
+            if names:
+                results.append((
+                    f"MANUAL FOLLOW-UP: set the real shared secret for RADIUS server(s) "
+                    f"{names} in Central (created with a placeholder — AOS 8 secrets "
+                    "are hashed and can't be migrated)", True, ""))
+                if on_step:
+                    on_step(results[-1][0], True)
 
         return results
 
