@@ -330,6 +330,40 @@ def render():
         if secret_input:
             st.session_state["central_secret"] = secret_input
             have_secret = True
+
+        # Hybrid clusters block New Central device-group create/move — those
+        # two steps must go through the Classic API Gateway (HPE's onboarding
+        # pattern). Optional: only needed if provisioning hit a hybrid error.
+        with st.expander("Hybrid cluster? Classic API Gateway for device-group "
+                         "create/move (optional)"):
+            st.markdown(
+                f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.5rem;">'
+                f'If provisioning fails with <code>API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER</code>, '
+                f'add a Classic API Gateway token here. Groups + device moves will use '
+                f'Classic; SSIDs/VLANs/scope-maps stay on New Central.</div>',
+                unsafe_allow_html=True,
+            )
+            st.text_input(
+                "Classic API gateway base URL",
+                key="central_base_classic",
+                value=st.session_state.get("central_base_classic",
+                                           "https://apigw-uswest4.central.arubanetworks.com"),
+            )
+            hh1, hh2 = st.columns(2)
+            htok = hh1.text_input(
+                "Classic access token", type="password",
+                placeholder="•••••••• (saved)" if st.session_state.get("classic_access_token") else "",
+                key="_hybrid_token_in",
+                help="API Gateway → System Apps & Tokens → Generate Token",
+            )
+            if htok:
+                st.session_state["classic_access_token"] = htok.strip()
+            href = hh2.text_input(
+                "Classic refresh token (optional)", type="password",
+                key="_hybrid_refresh_in",
+            )
+            if href:
+                st.session_state["classic_refresh_token"] = href.strip()
     else:
         c1, c2 = st.columns([3, 1])
         central_base = c1.text_input(

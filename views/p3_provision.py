@@ -183,9 +183,18 @@ def render():
                             "Aruba Central (network-config) access in GreenLake.")
                     return
             st.success("Authenticated with New Central")
+            # hybrid clusters need the Classic API for device-group create/move
+            classic_client = None
+            if st.session_state.get("classic_access_token"):
+                classic_client = build_classic_client()
+                st.caption("Hybrid mode: device groups + moves will route through "
+                           "the Classic API Gateway.")
             with st.spinner("Provisioning..."):
                 results = client.provision(central_cfg, ap_serials=ap_serials,
-                                           on_step=on_step)
+                                           on_step=on_step, classic_client=classic_client)
+            if classic_client is not None and persist_rotated_refresh_token(classic_client):
+                st.info("The Classic refresh token rotated during this run — the new "
+                        "one is saved in this session.")
 
         st.session_state["provision_results"] = results
         st.session_state["provision_done"]    = True

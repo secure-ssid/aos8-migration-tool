@@ -136,6 +136,17 @@ def _row_get(row: dict[str, str], *names: str) -> str:
     return ""
 
 
+# `show ap database` shows a placeholder in the Group column for APs that are
+# in the default group / unprovisioned — never let that become a literal
+# device-group name like "-" in Central.
+_GROUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none"}
+
+
+def _clean_group(token: str) -> str:
+    t = (token or "").strip()
+    return "default" if t.lower() in _GROUP_PLACEHOLDERS else t
+
+
 # ─────────────────── AP inventory ───────────────────
 
 def _parse_ap_database(text: str) -> list[AP]:
@@ -161,7 +172,7 @@ def _parse_ap_database(text: str) -> list[AP]:
             model=_normalize_model(_row_get(row, "AP Type", "Model")),
             mac=mac,
             name=name,
-            ap_group=_row_get(row, "Group"),
+            ap_group=_clean_group(_row_get(row, "Group")),
             ip=_row_get(row, "IP Address", "IP-Address", "IP"),
             status="Up" if status_raw.lower().startswith("up") else (status_raw or "unknown"),
         ))
@@ -182,7 +193,7 @@ def _parse_ap_active(text: str) -> list[AP]:
             model=_normalize_model(_row_get(row, "AP Type", "Model", "Type")),
             mac="",
             name=name,
-            ap_group=_row_get(row, "Group"),
+            ap_group=_clean_group(_row_get(row, "Group")),
             ip=ip,
             status="Up",
         ))
@@ -618,7 +629,7 @@ def _parse_instant_aps(text: str) -> list[AP]:
             model=_normalize_model(_row_get(row, "Type", "AP Type", "Model")),
             mac=mac,
             name=name,
-            ap_group=_row_get(row, "Zone").strip(),
+            ap_group=_clean_group(_row_get(row, "Zone")),
             ip=ip,
             status="Up",
         ))

@@ -186,32 +186,61 @@ class CentralClient:
 
     # ─────────────────── Sites ───────────────────
 
+    @staticmethod
+    def _site_name(site: dict) -> str:
+        return site.get("scopeName") or site.get("siteName") or site.get("name", "")
+
+    @staticmethod
+    def _site_id(site: dict) -> Optional[str]:
+        sid = site.get("scopeId") or site.get("siteId") or site.get("id")
+        return str(sid) if sid is not None else None
+
     def list_sites(self, refresh: bool = False) -> list[dict]:
+        # The config surface (/network-config/v1/sites) is the read path that
+        # works across tenants (incl. hybrid clusters); the monitoring route
+        # 404s on some. It ignores limit/offset, so fetch it whole.
         if self._sites_cache is None or refresh:
-            self._sites_cache = self._paginate("/network-monitoring/v1/sites", page_size=100)
+            try:
+                data = self._get("/network-config/v1/sites")
+                self._sites_cache = data.get("items") or data.get("sites") or []
+            except CentralAPIError:
+                # fall back to the monitoring route for older tenants
+                self._sites_cache = self._paginate("/network-monitoring/v1/sites",
+                                                   page_size=100)
         return self._sites_cache
 
     def create_site(self, name: str, address: str = "", city: str = "",
                     state: str = "", country: str = "", zipcode: str = "") -> str:
         """Idempotent: returns the existing site's id when the name matches."""
         for site in self.list_sites():
-            existing = site.get("name") or site.get("siteName") or site.get("scopeName")
-            if existing == name:
-                return str(site.get("siteId") or site.get("scopeId") or name)
+            if self._site_name(site) == name:
+                return self._site_id(site) or name
         body = {"name": name}
         for key, val in (("address", address), ("city", city), ("state", state),
                          ("country", country), ("zipcode", zipcode)):
             if val:
                 body[key] = val
-        resp = self._post("/network-monitoring/v1/sites", json=body)
+        # try the config surface first, fall back to monitoring
+        resp = None
+        for path in ("/network-config/v1/sites", "/network-monitoring/v1/sites"):
+            try:
+                resp = self._post(path, json=body)
+                break
+            except CentralAPIError as e:
+                if "404" in str(e) or "not found" in str(e).lower():
+                    continue
+                raise
+        if resp is None:
+            raise CentralAPIError("Site create failed — neither the config nor "
+                                  "monitoring sites route is available on this tenant")
         self._sites_cache = None  # invalidate after create
         site_id = resp.get("scopeId") or resp.get("siteId") or resp.get("id")
         if site_id:
             return str(site_id)
         # POST bodies don't always echo the id — re-list to resolve it
         for site in self.list_sites(refresh=True):
-            if (site.get("name") or site.get("siteName") or site.get("scopeName")) == name:
-                return str(site.get("scopeId") or site.get("siteId") or site.get("id") or name)
+            if self._site_name(site) == name:
+                return self._site_id(site) or name
         return name
 
     def assign_devices_to_site(self, site_id: str, serials: list[str],
@@ -253,11 +282,22 @@ class CentralClient:
                 if serials:
                     self.add_devices_to_group(scope_id, serials)
                 return scope_id
-        if serials:
-            self._post("/network-config/v1/device-groups-create-and-add-devices",
-                       json={"scopeName": name, "devices": serials})
-        else:
-            self._post("/network-config/v1/device-groups", json={"scopeName": name})
+        try:
+            if serials:
+                self._post("/network-config/v1/device-groups-create-and-add-devices",
+                           json={"scopeName": name, "devices": serials})
+            else:
+                self._post("/network-config/v1/device-groups", json={"scopeName": name})
+        except CentralAPIError as e:
+            if "HYBRID_CLUSTER" in str(e) or "API_ACCESS_RESTRICTED" in str(e):
+                raise CentralAPIError(
+                    "This tenant is a HYBRID CLUSTER — New Central device-group "
+                    "creation is blocked here (API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER). "
+                    "Create device groups through CLASSIC Central instead: go back to "
+                    "Step 1 and set the destination to 'Classic Central' (it uses "
+                    "/configuration/v3/groups, which hybrid tenants allow)."
+                ) from e
+            raise
         for grp in self.list_device_groups(refresh=True):
             if grp.get("scopeName") == name:
                 return str(grp.get("scopeId"))
@@ -505,18 +545,47 @@ class CentralClient:
 
     # ─────────────────── Full provision flow ───────────────────
 
+    def _create_group_hybrid(self, classic, name: str,
+                             serials: Optional[list[str]],
+                             include_gateways: bool) -> str:
+        """Hybrid-cluster path: create the device group + move devices via the
+        CLASSIC API (New Central blocks those writes on hybrid tenants), then
+        resolve the group's New Central scope-id so SSIDs/VLANs can still be
+        scope-mapped to it."""
+        classic.create_group(name, include_gateways=include_gateways)
+        if serials:
+            classic.move_devices(name, serials)
+        for grp in self.list_device_groups(refresh=True):
+            if grp.get("scopeName") == name:
+                return str(grp.get("scopeId"))
+        raise CentralAPIError(
+            f"Group '{name}' was created via Classic but is not yet visible in "
+            "New Central — wait a moment and re-run, or verify the group in Central.")
+
     def provision(
         self,
         central_config: CentralConfig,
         ap_serials: dict[str, list[str]],
         on_step: Optional[Callable[[str, bool], None]] = None,
+        classic_client=None,
     ) -> list[tuple[str, bool, str]]:
         """Run the full New Central provisioning sequence.
+
+        classic_client: optional ClassicCentralClient. On HYBRID-CLUSTER
+        tenants New Central blocks device-group create/move, so when this is
+        supplied those two operations route through the Classic API (HPE's own
+        onboarding pattern); WLANs/VLANs/scope-maps stay on New Central.
 
         Returns [(step_label, ok, error_detail)]. Failures are recorded and
         the flow continues so the operator gets a complete picture.
         """
         results: list[tuple[str, bool, str]] = []
+
+        def _make_group(name, serials, include_gateways=False) -> str:
+            if classic_client is not None:
+                return self._create_group_hybrid(classic_client, name, serials,
+                                                  include_gateways)
+            return self.create_device_group(name, serials)
 
         # fresh caches per run — lists are fetched once, not per object
         self._groups_cache = None
@@ -563,7 +632,7 @@ class CentralClient:
         if cc.gw_cluster_name:
             gw_group = f"{cc.gw_cluster_name}-gws"
             step(f"Create gateway device group: {gw_group}",
-                 lambda: gw_scope.update(id=self.create_device_group(gw_group)))
+                 lambda: gw_scope.update(id=_make_group(gw_group, None)))
             if gw_scope.get("id"):
                 step(f"Create GW cluster: {cc.gw_cluster_name}",
                      lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
@@ -571,10 +640,12 @@ class CentralClient:
         for group_cfg in cc.groups:
             serials = ap_serials.get(group_cfg.name, [])
             grp_scope: dict[str, str] = {}
+            via = " (via Classic — hybrid)" if classic_client is not None else ""
             if not step(f"Create device group: {group_cfg.name}"
-                        + (f" (+{len(serials)} APs)" if serials else ""),
+                        + (f" (+{len(serials)} APs)" if serials else "") + via,
                         lambda g=group_cfg, s=serials:
-                            grp_scope.update(id=self.create_device_group(g.name, s))):
+                            grp_scope.update(id=_make_group(g.name, s,
+                                                            bool(cc.gw_cluster_name)))):
                 continue  # group failed — skip its dependents
             scope_id = grp_scope["id"]
 
