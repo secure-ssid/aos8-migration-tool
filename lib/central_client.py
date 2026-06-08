@@ -949,10 +949,21 @@ class CentralClient:
                 if serials:
                     step(f"Assign CAMPUS_AP persona → {len(serials)} APs in {group_cfg.name}",
                          lambda s=serials: self.assign_persona(s))
-                if serials and group_cfg.site_name in site_ids:
-                    step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
-                         lambda s=serials, sn=group_cfg.site_name:
-                             self.assign_devices_to_site(site_ids[sn], s))
+                # site-device assignment is blocked on hybrid (API_ACCESS_RESTRICTED)
+                # just like group create/move — route it through Classic there
+                if serials and group_cfg.site_name:
+                    if classic_client is not None:
+                        def _site_hybrid(s=serials, sn=group_cfg.site_name):
+                            sid = classic_client.create_site(
+                                sn, cc.site_address, cc.site_city, cc.site_state,
+                                cc.site_country, cc.site_zipcode)
+                            classic_client.associate_site(sid, s)
+                        step(f"Assign {len(serials)} APs to site: {group_cfg.site_name} (Classic)",
+                             _site_hybrid)
+                    elif group_cfg.site_name in site_ids:
+                        step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
+                             lambda s=serials, sn=group_cfg.site_name:
+                                 self.assign_devices_to_site(site_ids[sn], s))
                 continue  # skip the config-only VLAN/SSID/firmware block
 
             for vlan in group_cfg.vlans:
