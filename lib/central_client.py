@@ -162,6 +162,9 @@ class CentralClient:
     def _get(self, path, params=None):
         return self._request("GET", path, params=params)
 
+    def _delete(self, path, json=None, params=None):
+        return self._request("DELETE", path, json=json, params=params)
+
     def _post(self, path, json=None, params=None):
         return self._request("POST", path, json=json, params=params)
 

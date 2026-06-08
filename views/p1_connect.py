@@ -132,6 +132,49 @@ def render():
                        f"{len(cfg.aps)} APs. Set the destination below and continue.")
             st.rerun()
 
+        # ── Teardown: delete zztest-* objects from the tenant ──────────────
+        st.divider()
+        st.markdown(
+            f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.3rem;">'
+            f'<b>Clean up test objects</b> — deletes every tenant object named '
+            f'<code>zztest-*</code> (SSIDs, overlays, device groups, sites, '
+            f'auth-servers, + Classic groups). Uses the destination creds below; '
+            f'add the Classic token in the hybrid expander to also clear Classic '
+            f'groups. Destructive — prefix-scoped.</div>',
+            unsafe_allow_html=True,
+        )
+        cc1, cc2 = st.columns([2, 1])
+        confirm = cc1.checkbox("I understand this deletes all zztest-* objects",
+                               key="_cleanup_confirm")
+        if cc2.button("🧹 Clean up test objects", use_container_width=True,
+                      disabled=not confirm):
+            from lib import cleanup as _cleanup
+            from lib.session_clients import (build_central_client, build_classic_client,
+                                             have_classic_creds)
+            nc = cl = None
+            try:
+                if st.session_state.get("dest_type", "new") == "new":
+                    nc = build_central_client(); nc.authenticate()
+                if have_classic_creds():
+                    cl = build_classic_client()
+            except Exception as e:
+                st.error(f"Auth failed: {e}")
+                nc = cl = None
+            if nc is not None or cl is not None:
+                with st.spinner("Deleting zztest-* objects..."):
+                    res = _cleanup.cleanup("zztest", central=nc, classic=cl)
+                st.session_state["cleanup_results"] = res
+            st.rerun()
+
+        for label, ok, detail in st.session_state.get("cleanup_results", []):
+            icon, col = ("✓", OK) if ok else ("✕", FAIL)
+            st.markdown(
+                f'<div style="font-family:\'IBM Plex Mono\',monospace;font-size:12px;'
+                f'padding:2px 0;"><span style="color:{col};">{icon}</span> '
+                f'<span style="color:{TEXT};">{esc(label)}</span>'
+                f'<span style="color:{FAINT};">{("  — "+esc(detail)) if detail else ""}</span>'
+                f'</div>', unsafe_allow_html=True)
+
     section_label("Source — AOS 8 platform")
     source_type = st.radio(
         "Source platform",

@@ -302,6 +302,11 @@ class ClassicCentralClient:
         self._post("/configuration/v1/devices/move",
                    json_body={"group": group, "serials": serials})
 
+    def delete_group(self, name: str) -> None:
+        self._request("DELETE", f"/configuration/v1/groups/{quote(name, safe='')}")
+        if self._group_names_cache is not None and name in self._group_names_cache:
+            self._group_names_cache.remove(name)
+
     # ─────────────────── Sites ───────────────────
 
     def list_sites(self, refresh: bool = False) -> list[dict]:
