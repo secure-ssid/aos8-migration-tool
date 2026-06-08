@@ -344,6 +344,11 @@ class CentralClient:
                 # don't keep trying other routes — surface the real error
                 if "404" not in str(e) and "not found" not in str(e).lower() \
                         and not isinstance(e, ValueError):
+                    if "DEVICE_MOVEMENT_FAILED" in str(e) or "not present" in str(e).lower():
+                        raise CentralAPIError(
+                            "APs aren't in the New Central workspace yet — claim + "
+                            "subscribe them in Step 4 (GreenLake), then Reset & re-run "
+                            "provisioning to finish site assignment.")
                     raise CentralAPIError(f"Site assignment failed: {e}")
         raise CentralAPIError("Site assignment failed: " + " | ".join(errors))
 
@@ -405,8 +410,15 @@ class CentralClient:
                 ],
             })
         except CentralAPIError as e:
-            if not _is_duplicate(e):
-                raise
+            if _is_duplicate(e):
+                return
+            if "not present" in str(e).lower() or "device entry" in str(e).lower():
+                raise CentralAPIError(
+                    "APs aren't in the New Central workspace yet — claim + subscribe "
+                    "them in Step 4 (GreenLake), then Reset & re-run provisioning "
+                    "(completed objects are reused) to finish persona assignment. "
+                    f"[{', '.join(serials)}]")
+            raise
 
     @staticmethod
     def _swallow_duplicate(fn) -> bool:
@@ -822,6 +834,17 @@ class CentralClient:
                          classic_client.move_devices(g.name, s))
 
             for vlan in group_cfg.vlans:
+                # VLAN 1 is New Central's built-in default ("aruba-vlan/1") —
+                # it always exists and can't be created. SSIDs can still
+                # reference it; just don't try to create it.
+                if vlan.id <= 1:
+                    results.append((
+                        f"Create VLAN {vlan.id} ({vlan.name}) → {group_cfg.name} — "
+                        "SKIPPED (VLAN 1 is the built-in default; already exists)",
+                        True, ""))
+                    if on_step:
+                        on_step(results[-1][0], True)
+                    continue
                 step(f"Create VLAN {vlan.id} ({vlan.name}) → {group_cfg.name}",
                      lambda v=vlan, sid=scope_id:
                          self.create_vlan(v.id, v.name, sid))
