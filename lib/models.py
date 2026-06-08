@@ -128,9 +128,10 @@ class CustomerConfig:
 
 @dataclass
 class CentralGroupConfig:
-    name: str
+    name: str                       # Central device-group name (what we create)
     firmware_version: str
     site_name: str
+    source_group: str = ""          # AOS 8 ap-group name (for `ap convert` + serial lookup)
     ssids: list[SSID] = field(default_factory=list)
     vlans: list[VLAN] = field(default_factory=list)
     roles: list[Role] = field(default_factory=list)

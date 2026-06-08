@@ -220,19 +220,23 @@ class CentralClient:
                          ("country", country), ("zipcode", zipcode)):
             if val:
                 body[key] = val
-        # try the config surface first, fall back to monitoring
+        # CREATE goes to the monitoring route (HPE's pipeline creates sites
+        # there with a minimal {"name"} body); the config route is read-only
+        # on these tenants and 400s a create. Fall back to config on a routing
+        # error only. Read-back uses the config route (see list_sites).
         resp = None
-        for path in ("/network-config/v1/sites", "/network-monitoring/v1/sites"):
+        errs = []
+        for path in ("/network-monitoring/v1/sites", "/network-config/v1/sites"):
             try:
                 resp = self._post(path, json=body)
                 break
             except CentralAPIError as e:
+                errs.append(str(e))
                 if "404" in str(e) or "not found" in str(e).lower():
                     continue
                 raise
         if resp is None:
-            raise CentralAPIError("Site create failed — neither the config nor "
-                                  "monitoring sites route is available on this tenant")
+            raise CentralAPIError("Site create failed: " + " | ".join(errs))
         self._sites_cache = None  # invalidate after create
         site_id = resp.get("scopeId") or resp.get("siteId") or resp.get("id")
         if site_id:
@@ -291,11 +295,12 @@ class CentralClient:
         except CentralAPIError as e:
             if "HYBRID_CLUSTER" in str(e) or "API_ACCESS_RESTRICTED" in str(e):
                 raise CentralAPIError(
-                    "This tenant is a HYBRID CLUSTER — New Central device-group "
-                    "creation is blocked here (API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER). "
-                    "Create device groups through CLASSIC Central instead: go back to "
-                    "Step 1 and set the destination to 'Classic Central' (it uses "
-                    "/configuration/v3/groups, which hybrid tenants allow)."
+                    "This tenant is a HYBRID CLUSTER — New Central blocks device-group "
+                    "creation here (API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER). Add a "
+                    "Classic API Gateway token in Step 1 → 'Hybrid cluster? Classic API "
+                    "Gateway' (base URL + token): group create/move will route through "
+                    "Classic while SSIDs/VLANs stay on New Central. (You don't need to "
+                    "switch the destination to Classic.)"
                 ) from e
             raise
         for grp in self.list_device_groups(refresh=True):
@@ -638,7 +643,9 @@ class CentralClient:
                      lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
 
         for group_cfg in cc.groups:
-            serials = ap_serials.get(group_cfg.name, [])
+            # serials are keyed by the AOS 8 source group name, not the
+            # (possibly renamed) Central device-group name
+            serials = ap_serials.get(group_cfg.source_group or group_cfg.name, [])
             grp_scope: dict[str, str] = {}
             via = " (via Classic — hybrid)" if classic_client is not None else ""
             if not step(f"Create device group: {group_cfg.name}"

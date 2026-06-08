@@ -25,6 +25,17 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
     if not site_name:
         site_name = customer_name.replace(" ", "-").lower() + "-site"
 
+    slug = re.sub(r"[^a-z0-9-]+", "-", customer_name.lower()).strip("-") or "migrated"
+
+    # AOS 8 groups like "default"/"NoAuthApGroup" are generic — migrate their
+    # APs into a NEW, customer-specific Central device group rather than reusing
+    # a bare "default" group in the tenant. The AOS 8 name is preserved as
+    # source_group for the `ap convert` runbook and the serial lookup.
+    _GENERIC = {"default", "default-aps", "noauthapgroup", ""}
+
+    def central_group_name(aos8_name: str) -> str:
+        return f"{slug}-aps" if aos8_name.strip().lower() in _GENERIC else aos8_name
+
     central = CentralConfig(
         customer_name=customer_name,
         base_url=central_base_url.rstrip("/"),
@@ -41,7 +52,6 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
         ])
     elif any(s.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) for s in cc.ssids):
         # GW cluster names must not contain spaces or start with "auto_"
-        slug = re.sub(r"[^a-z0-9-]+", "-", customer_name.lower()).strip("-") or "migrated"
         central.gw_cluster_name = f"{slug}-cluster"
 
     groups = {}
@@ -65,7 +75,8 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
         group_vlans = [v for v in cc.vlans if v.id in used_vlan_ids]
 
         cgc = CentralGroupConfig(
-            name=ap_group.name,
+            name=central_group_name(ap_group.name),
+            source_group=ap_group.name,
             firmware_version=aos10_firmware,
             site_name=site_name,
             ssids=group_ssids,
@@ -79,7 +90,8 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
     if not central.groups and cc.ssids:
         all_vlans = cc.vlans
         cgc = CentralGroupConfig(
-            name=f"{customer_name.lower().replace(' ', '-')}-aps",
+            name=f"{slug}-aps",
+            source_group="",
             firmware_version=aos10_firmware,
             site_name=site_name,
             ssids=cc.ssids,
