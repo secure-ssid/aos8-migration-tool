@@ -484,6 +484,16 @@ class CentralClient:
     # ─────────────────── SSIDs ───────────────────
 
     def _ssid_body(self, ssid: SSID, forward_mode: str) -> dict:
+        # Full WLAN attribute set so the migrated SSID is a complete, functional
+        # WLAN — data rates, radio capabilities, DTIM, broadcast filters, WMM,
+        # 802.11k. Defaults match the shape New Central uses on this tenant;
+        # per-SSID source values (band/dtim/max-clients/rates) override below.
+        rf_band = getattr(ssid, "rf_band", "") or "BAND_ALL"
+        legacy = {
+            "basic-rates": ["RATE_12MB", "RATE_24MB"],
+            "tx-rates": ["RATE_12MB", "RATE_18MB", "RATE_24MB", "RATE_36MB",
+                         "RATE_48MB", "RATE_54MB"],
+        }
         body = {
             "ssid": ssid.display_name,
             "enable": True,
@@ -491,11 +501,29 @@ class CentralClient:
             "opmode": OPMODE.get(ssid.auth_type, "WPA2_PERSONAL"),
             "vlan-selector": "VLAN_RANGES",
             "vlan-id-range": [str(ssid.vlan)],
-            "rf-band": "BAND_ALL",
+            "rf-band": rf_band,
             "essid": {"use-alias": False, "name": ssid.display_name},
             "hide-ssid": not ssid.broadcast,
             "wpa3-transition-mode-enable": ssid.auth_type in
                 (AuthType.WPA2_PSK, AuthType.WPA3_SAE),
+            # radio data rates (2.4GHz + 5GHz legacy basic/tx sets)
+            "g-legacy-rates": dict(legacy),
+            "a-legacy-rates": dict(legacy),
+            # radio capabilities
+            "high-throughput": {"enable": True, "very-high-throughput": True},
+            "high-efficiency": {"enable": True},
+            "extremely-high-throughput": {"enable": True, "mlo": False,
+                                          "beacon-protection": False},
+            # airtime / behaviour
+            "dtim-period": int(getattr(ssid, "dtim_period", 0) or 1),
+            "max-clients-threshold": int(getattr(ssid, "max_clients", 0) or 128),
+            "inactivity-timeout": 1000,
+            "broadcast-filter-ipv4": "BCAST_FILTER_ARP",
+            "broadcast-filter-ipv6": "UCAST_FILTER_RA",
+            "wmm-cfg": {"uapsd": True},
+            "dot11k": True,
+            "dmo": {"enable": False, "channel-utilization-threshold": 90,
+                    "clients-threshold": 6},
         }
         if ssid.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE) and ssid.psk:
             body["personal-security"] = {

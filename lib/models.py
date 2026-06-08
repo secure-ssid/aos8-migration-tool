@@ -31,6 +31,10 @@ class SSID:
     broadcast: bool = True
     auth_known: bool = True         # False = auth type could not be determined
     vlan_raw: Optional[str] = None  # original VLAN token when non-numeric (named VLAN)
+    # additional WLAN attributes migrated to New Central (0/"" = use default)
+    rf_band: str = ""               # New Central rf-band enum (BAND_ALL, 5GHZ_6GHZ, …)
+    dtim_period: int = 0
+    max_clients: int = 0
 
     @property
     def display_name(self) -> str:

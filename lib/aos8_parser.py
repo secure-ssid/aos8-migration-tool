@@ -253,8 +253,12 @@ def _iter_blocks(text: str, opener: str):
 
 def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     profiles = {}
+    # AOS8 'a-band'/'g-band'/'wmm' → New Central rf-band enum
+    _BAND = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
-        info = {"essid": "", "opmode": "", "passphrase": None}
+        info = {"essid": "", "opmode": "", "passphrase": None,
+                "rf_band": "", "dtim_period": 0, "max_clients": 0}
+        bands = set()
         for line in block:
             m = re.match(r"essid\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
             if m:
@@ -265,6 +269,18 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             m = re.match(r"wpa-passphrase\s+(\S+)", line, re.IGNORECASE)
             if m:
                 info["passphrase"] = m.group(1)
+            m = re.match(r"dtim-period\s+(\d+)", line, re.IGNORECASE)
+            if m:
+                info["dtim_period"] = int(m.group(1))
+            m = re.match(r"max-clients-threshold\s+(\d+)", line, re.IGNORECASE)
+            if m:
+                info["max_clients"] = int(m.group(1))
+            # AOS8 radio enablement: 'allowed-band a g' or 'a-basic-rates …'
+            m = re.match(r"allowed-band\s+(.+)$", line, re.IGNORECASE)
+            if m:
+                bands = {b for b in m.group(1).lower().split() if b in ("a", "g")}
+        if bands:
+            info["rf_band"] = _BAND.get(tuple(sorted(bands)), "BAND_ALL")
         profiles[name] = info
     return profiles
 
@@ -308,6 +324,9 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             essid=prof.get("essid") or None,
             psk=prof.get("passphrase"),
             auth_server_group=aaa_ref or None,
+            rf_band=prof.get("rf_band", ""),
+            dtim_period=prof.get("dtim_period", 0),
+            max_clients=prof.get("max_clients", 0),
         ))
     return ssids
 

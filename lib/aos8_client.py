@@ -173,6 +173,8 @@ class AOS8Client:
             profiles[name] = {
                 "essid": str(self._field(item, "essid")),
                 "opmode": opmode,
+                "dtim_period": _safe_int(self._field(item, "dtim-period", default=0), 0),
+                "max_clients": _safe_int(self._field(item, "max-clients-threshold", default=0), 0),
                 "passphrase": str(self._field(item, "wpa-passphrase", "wpa-hexkey", default="")) or None,
             }
         return profiles
@@ -216,6 +218,8 @@ class AOS8Client:
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
                 auth_server_group=str(self._field(item, "aaa_prof", default="")) or None,
+                dtim_period=int(prof.get("dtim_period", 0) or 0),
+                max_clients=int(prof.get("max_clients", 0) or 0),
             ))
         return ssids
 
