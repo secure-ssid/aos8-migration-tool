@@ -266,32 +266,35 @@ class GLPClient:
                 return out
         return out
 
-    def assign_application(self, serial_number: str, application_id: str,
-                           region: str,
-                           subscription_key_or_id: Optional[str] = None) -> dict:
-        """Assign a claimed device to a Central application instance + region —
-        this is what actually makes the device appear in New Central (the GLP
-        'Application' column). Sends the subscription in the SAME merge-patch
-        (GreenLake won't consume the subscription without the app assignment).
-        Async: polls the returned operation."""
-        device_id = self.resolve_device_id(serial_number)
-        if device_id is None:
-            raise GLPAPIError(
-                f"Device {serial_number} not found in the workspace — claim it first")
-        body: dict = {"application": {"id": application_id}, "region": region}
-        if subscription_key_or_id:
-            body["subscription"] = [
-                {"id": self._resolve_subscription_id(subscription_key_or_id)}]
+    def _patch_device(self, device_id: str, body: dict) -> None:
+        """One device merge-patch, async-aware (202 + Location → poll)."""
         resp = self._request(
             "PATCH", "/devices/v2beta1/devices",
-            params={"id": device_id},
-            json=body,
+            params={"id": device_id}, json=body,
             headers={"Content-Type": "application/merge-patch+json"},
         )
         location = resp.headers.get("Location", "")
         if resp.status_code == 202 and location:
             self.poll_task(location.rstrip("/").split("/")[-1])
-        try:
-            return resp.json() if resp.content else {}
-        except Exception:
-            return {}
+
+    def assign_application(self, serial_number: str, application_id: str,
+                           region: str,
+                           subscription_key_or_id: Optional[str] = None) -> dict:
+        """Assign a claimed device to a Central application instance + region —
+        this is what makes the device appear in New Central (the GLP
+        'Application' column). GreenLake rejects combining a device-update and a
+        subscription op in one PATCH ("...should not be together"), so this is
+        TWO sequential merge-patches: application+region first, then the
+        subscription. Async: each is polled."""
+        device_id = self.resolve_device_id(serial_number)
+        if device_id is None:
+            raise GLPAPIError(
+                f"Device {serial_number} not found in the workspace — claim it first")
+        # 1. device update — application + region
+        self._patch_device(device_id, {"application": {"id": application_id},
+                                        "region": region})
+        # 2. subscription — separate operation
+        if subscription_key_or_id:
+            sub_id = self._resolve_subscription_id(subscription_key_or_id)
+            self._patch_device(device_id, {"subscription": [{"id": sub_id}]})
+        return {}
