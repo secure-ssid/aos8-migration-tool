@@ -546,15 +546,14 @@ class CentralClient:
     # ─────────────────── Full provision flow ───────────────────
 
     def _create_group_hybrid(self, classic, name: str,
-                             serials: Optional[list[str]],
                              include_gateways: bool) -> str:
-        """Hybrid-cluster path: create the device group + move devices via the
-        CLASSIC API (New Central blocks those writes on hybrid tenants), then
-        resolve the group's New Central scope-id so SSIDs/VLANs can still be
-        scope-mapped to it."""
+        """Hybrid-cluster path: create the device group via the CLASSIC API
+        (New Central blocks that write on hybrid tenants) and resolve its New
+        Central scope-id so SSIDs/VLANs can still be scope-mapped to it.
+
+        Device MOVE is a SEPARATE provision step — a move failure (e.g. serials
+        not yet in inventory) must not block WLAN/VLAN config for the group."""
         classic.create_group(name, include_gateways=include_gateways)
-        if serials:
-            classic.move_devices(name, serials)
         for grp in self.list_device_groups(refresh=True):
             if grp.get("scopeName") == name:
                 return str(grp.get("scopeId"))
@@ -582,9 +581,10 @@ class CentralClient:
         results: list[tuple[str, bool, str]] = []
 
         def _make_group(name, serials, include_gateways=False) -> str:
+            # hybrid: create group only (move is a separate, independently
+            # failable step). native: atomic create-and-add.
             if classic_client is not None:
-                return self._create_group_hybrid(classic_client, name, serials,
-                                                  include_gateways)
+                return self._create_group_hybrid(classic_client, name, include_gateways)
             return self.create_device_group(name, serials)
 
         # fresh caches per run — lists are fetched once, not per object
@@ -648,6 +648,13 @@ class CentralClient:
                                                             bool(cc.gw_cluster_name)))):
                 continue  # group failed — skip its dependents
             scope_id = grp_scope["id"]
+
+            # hybrid: move devices as a separate step so a move failure (e.g.
+            # serials not yet claimed into inventory) doesn't block WLAN/VLAN
+            if classic_client is not None and serials:
+                step(f"Move {len(serials)} APs into group: {group_cfg.name} (Classic)",
+                     lambda s=serials, g=group_cfg:
+                         classic_client.move_devices(g.name, s))
 
             for vlan in group_cfg.vlans:
                 step(f"Create VLAN {vlan.id} ({vlan.name}) → {group_cfg.name}",
