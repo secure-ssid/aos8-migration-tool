@@ -747,7 +747,9 @@ class CentralClient:
             self._post("/network-config/v1alpha1/firmware-compliance",
                        json=body, params=params)
         except CentralAPIError as e:
-            if "412" not in str(e):
+            # compliance already set for this scope → PATCH to update the
+            # version (412 precondition OR a 400 "duplicate/already exists")
+            if "412" not in str(e) and not _is_duplicate(e):
                 raise
             self._patch("/network-config/v1alpha1/firmware-compliance",
                         json=body, params=params)
