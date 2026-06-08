@@ -588,10 +588,14 @@ class CentralClient:
                 body["auth-server-group"] = server_group
                 body["acct-server-group"] = server_group
                 body["radius-accounting"] = True
-        # External captive portal — layered on top of OPEN (verified wlan.json:
-        # captive-portal-type EXTERNAL_CP + captive-portal=<profile name>; the
-        # RADIUS group binds on the SSID since the profile field is GW-only)
+        # External captive portal — layered on top of an OPEN SSID (verified).
+        # Force OPEN and drop any L2-auth fields: the portal does the auth, and
+        # the API rejects the data-rate/vlan-id-range fields under a non-OPEN
+        # opmode ("when opmode ∈ {OPEN,WPA2_PERSONAL,…}" condition unmet).
         if getattr(ssid, "captive_portal_url", ""):
+            body["opmode"] = "OPEN"
+            body.pop("dot1x", None)
+            body.pop("personal-security", None)
             body["captive-portal-type"] = "EXTERNAL_CP"
             body["captive-portal"] = cp_profile_name(ssid)
             if server_group:
