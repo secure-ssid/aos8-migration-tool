@@ -12,8 +12,31 @@ image from Aruba Activate, so it is the primary path in this runbook.
 """
 from datetime import date
 
-from .models import CustomerConfig, CentralConfig, ForwardMode
+from .models import CustomerConfig, CentralConfig, ForwardMode, AuthType
 from .compatibility import _fw_ok
+
+
+def _manual_secrets_block(customer: CustomerConfig) -> list[str]:
+    """Checklist of secrets that AOS 8 stores encrypted (RADIUS keys, hashed
+    PSKs) — created with placeholders and MUST be set by hand in Central."""
+    from .central_client import secret_looks_unusable
+    radius = [s.name for s in customer.radius_servers]
+    psk = sorted({(s.essid or s.name) for s in customer.ssids
+                  if s.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE)
+                  and secret_looks_unusable(s.psk)})
+    if not radius and not psk:
+        return []
+    out = ["", "MANUAL — SET SECRETS IN CENTRAL", "─" * 40,
+           "AOS 8 stores these encrypted, so the tool created them with",
+           "placeholders. Set the real values in New Central before go-live:"]
+    for r in radius:
+        out.append(f"  [ ] RADIUS '{r}': set shared secret "
+                   "(Config → Authentication → Servers)")
+    for p in psk:
+        out.append(f"  [ ] SSID '{p}': set WPA passphrase "
+                   "(Config → WLANs → {SSID} → Security)")
+    out.append("")
+    return out
 
 # AP model → AOS 10 image family codename, used only for the manual-server
 # alternative. Only confidently-known families are mapped; anything else gets
@@ -86,6 +109,8 @@ def generate(customer: CustomerConfig, central: CentralConfig, customer_name: st
         _write_l3_cluster_steps(lines, customer, central, cluster)
     else:
         _write_single_mc_steps(lines, customer, central)
+
+    lines += _manual_secrets_block(customer)
 
     lines += [
         "",
@@ -306,6 +331,9 @@ def _generate_instant(customer: CustomerConfig, central: CentralConfig,
         "",
         "  show swarm state            # (on the VC) monitor APs leaving the swarm",
         "",
+    ]
+    lines += _manual_secrets_block(customer)
+    lines += [
         "POST-CONVERSION",
         "─" * 40,
         "1. Verify APs appear in Central → Devices → Access Points (10–20 min per AP)",

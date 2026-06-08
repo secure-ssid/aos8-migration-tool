@@ -14,6 +14,7 @@ Call patterns mirror the working centralmcp pipeline. Errors are NEVER
 swallowed here — every failure raises CentralAPIError so the provisioning
 orchestrator records and displays it.
 """
+import re
 import time
 from typing import Callable, Optional
 from urllib.parse import quote
@@ -23,6 +24,24 @@ import requests
 from .models import CentralConfig, ForwardMode, AuthType, RadiusServer, SSID
 
 TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
+
+# AOS 8 stores PSK/RADIUS secrets hashed — a valid placeholder lets the object
+# be created, and the operator is told to set the real secret in Central.
+PSK_PLACEHOLDER = "ChangeMe-SetInCentral"
+
+
+def secret_looks_unusable(s: Optional[str]) -> bool:
+    """True when a captured PSK/secret can't be pushed as-is: empty, longer
+    than a WPA passphrase can be (so it must be a hash), or an encrypted hex
+    blob. Real WPA passphrases are 8–63 printable ASCII chars."""
+    s = (s or "").strip()
+    if not s:
+        return True
+    if len(s) > 63:
+        return True
+    if len(s) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", s):
+        return True
+    return False
 
 # AuthType → New Central wlan-ssid opmode. Verified against the WLAN
 # OpenAPI spec enum and live tenant SSIDs (2026-06). 802.1X SSIDs still
@@ -546,10 +565,13 @@ class CentralClient:
             "dmo": {"enable": False, "channel-utilization-threshold": 90,
                     "clients-threshold": 6},
         }
-        if ssid.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE) and ssid.psk:
+        if ssid.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE):
+            # use the real passphrase when it's usable; otherwise a placeholder
+            # (AOS 8 shows the PSK hashed) — flagged as a manual follow-up
+            usable = not secret_looks_unusable(ssid.psk)
             body["personal-security"] = {
                 "passphrase-format": "STRING",
-                "wpa-passphrase": ssid.psk,
+                "wpa-passphrase": ssid.psk if usable else PSK_PLACEHOLDER,
             }
         if ssid.auth_type in ENTERPRISE_AUTH:
             body["dot1x"] = True
@@ -953,15 +975,26 @@ class CentralClient:
             # (persona + site assignment happen in the devices phase, after
             # the APs are claimed into the GreenLake workspace)
 
-        # AOS 8 RADIUS secrets can't be recovered (stored hashed) — flag the
-        # servers created with a placeholder so the operator sets the real one.
-        if do_config and cc.radius_servers:
-            names = ", ".join(s.name for s in cc.radius_servers if not s.secret)
-            if names:
+        # AOS 8 stores PSK/RADIUS secrets hashed — they can't be migrated, so
+        # everything created with a placeholder is listed here as an explicit
+        # manual step. (Also rendered on the Runbook as a checklist.)
+        if do_config:
+            radius_names = [s.name for s in cc.radius_servers if not s.secret]
+            psk_ssids = sorted({s.display_name for g in cc.groups for s in g.ssids
+                                if s.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE)
+                                and secret_looks_unusable(s.psk)})
+            for nm in radius_names:
                 results.append((
-                    f"MANUAL FOLLOW-UP: set the real shared secret for RADIUS server(s) "
-                    f"{names} in Central (created with a placeholder — AOS 8 secrets "
-                    "are hashed and can't be migrated)", True, ""))
+                    f"MANUAL FOLLOW-UP: set the RADIUS shared secret for '{nm}' in "
+                    "Central (created with a placeholder — AOS 8 secrets are hashed)",
+                    True, ""))
+                if on_step:
+                    on_step(results[-1][0], True)
+            for nm in psk_ssids:
+                results.append((
+                    f"MANUAL FOLLOW-UP: set the WPA passphrase for SSID '{nm}' in "
+                    f"Central (created with placeholder '{PSK_PLACEHOLDER}' — the AOS 8 "
+                    "key was encrypted/not captured)", True, ""))
                 if on_step:
                     on_step(results[-1][0], True)
 
