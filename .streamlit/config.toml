@@ -11,3 +11,6 @@ toolbarMode = "minimal"
 
 [server]
 headless = false
+# hot-reload on file change so code edits don't need a server restart
+runOnSave = true
+fileWatcherType = "auto"

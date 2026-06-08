@@ -627,13 +627,24 @@ class CentralClient:
 
         Device MOVE is a SEPARATE provision step — a move failure (e.g. serials
         not yet in inventory) must not block WLAN/VLAN config for the group."""
-        classic.create_group(name, include_gateways=include_gateways)
-        for grp in self.list_device_groups(refresh=True):
-            if grp.get("scopeName") == name:
-                return str(grp.get("scopeId"))
+        # new_central=True flags the group "Allow New Central to overwrite" so
+        # it becomes New-Central-managed and shows up in device-collections.
+        classic.create_group(name, include_gateways=include_gateways,
+                             new_central=True)
+        # Classic→New-Central propagation isn't instant — poll the New Central
+        # device-collections for the group to appear before resolving scope-id.
+        import time
+        for attempt in range(6):
+            for grp in self.list_device_groups(refresh=True):
+                if grp.get("scopeName") == name:
+                    return str(grp.get("scopeId"))
+            if attempt < 5:
+                time.sleep(5)
         raise CentralAPIError(
-            f"Group '{name}' was created via Classic but is not yet visible in "
-            "New Central — wait a moment and re-run, or verify the group in Central.")
+            f"Group '{name}' was created via Classic (NewCentral=true) but hasn't "
+            "appeared in New Central after ~25s. It usually lands within a minute — "
+            "use 'Reset & re-run provisioning' shortly and it'll resolve (the group "
+            "already exists, so create is a no-op).")
 
     def provision(
         self,

@@ -231,15 +231,21 @@ class ClassicCentralClient:
                 self._group_names_cache = names
                 return names
 
-    def create_group(self, name: str, include_gateways: bool = False) -> str:
-        """Idempotent AOS 10 UI-group create; verifies Architecture readback."""
+    def create_group(self, name: str, include_gateways: bool = False,
+                     new_central: bool = False) -> str:
+        """Idempotent AOS 10 UI-group create; verifies Architecture readback.
+
+        new_central=True sets the 'Allow New Central to overwrite' flag so the
+        group becomes New-Central-managed and appears in New Central's
+        device-collections — required for the hybrid path where SSIDs/VLANs are
+        then configured on the New Central side. False = pure classic group."""
         if name in self.list_group_names():
             return name
         props = {
             "AllowedDevTypes": ["AccessPoints"] + (["Gateways"] if include_gateways else []),
             "Architecture": "AOS10",
             "ApNetworkRole": "Standard",
-            "NewCentral": False,
+            "NewCentral": bool(new_central),
         }
         if include_gateways:
             # "BranchGateway" is the only documented GwNetworkRole group
