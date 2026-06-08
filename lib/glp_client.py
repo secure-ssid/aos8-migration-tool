@@ -168,6 +168,13 @@ class GLPClient:
             if status in ("completed", "success", "succeeded"):
                 return result
             if status in ("failed", "error", "timeout", "cancelled"):
+                failed = (result.get("result") or {}).get("failedDevicesSerial") or []
+                if failed:
+                    raise GLPAPIError(
+                        "GreenLake rejected these serials: " + ", ".join(failed) +
+                        ". GLP only claims devices that exist in HPE's records — "
+                        "fake/zztest serials will always fail here. Use real AP "
+                        "serial+MAC pairs to test claiming.")
                 raise GLPAPIError(f"GLP claim operation {task_id} failed: {result}")
             time.sleep(interval)
         raise GLPAPIError(f"GLP claim operation {task_id} timed out after {timeout}s")

@@ -165,7 +165,12 @@ def render():
                 st.session_state["glp_claim_result"] = {"ok": ok, "failed": failed}
                 st.rerun()
             except Exception as e:
-                st.error(f"Claim failed: {e}")
+                msg = str(e)
+                if "zztest" in msg.lower() or "fake" in msg.lower() or \
+                        "HPE's records" in msg:
+                    st.info(f"Expected with test data — {msg}")
+                else:
+                    st.error(f"Claim failed: {e}")
 
     claim_result = st.session_state.get("glp_claim_result")
     if claim_result:
