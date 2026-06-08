@@ -160,3 +160,4 @@ class CentralConfig:
     site_state: str = ""
     site_country: str = ""
     site_zipcode: str = ""
+    site_timezone: str = "UTC"   # IANA zone id; New Central site-create requires it

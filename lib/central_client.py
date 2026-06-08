@@ -683,7 +683,8 @@ class CentralClient:
             step(f"Create site: {site_name}",
                  lambda s=site_name: site_ids.update({s: self.create_site(
                      s, cc.site_address, cc.site_city, cc.site_state,
-                     cc.site_country, cc.site_zipcode)}))
+                     cc.site_country, cc.site_zipcode,
+                     timezone_id=getattr(cc, "site_timezone", "UTC"))}))
 
         # RADIUS servers (library profiles)
         for server in cc.radius_servers:

@@ -68,14 +68,29 @@ def render():
         value=st.session_state.get("site_name", ""),
         placeholder="auto-generated from customer name",
     )
-    with st.expander("Site address (used for the Central site — optional)"):
+    with st.expander("Site address & timezone (New Central requires a full, "
+                     "ISO-valid address + timezone)"):
         a1, a2 = st.columns([2, 1])
         site_address = a1.text_input("Street address", value=st.session_state.get("site_address", ""))
         site_city    = a2.text_input("City",  value=st.session_state.get("site_city", ""))
         a3, a4, a5 = st.columns(3)
-        site_state   = a3.text_input("State",    value=st.session_state.get("site_state", ""))
-        site_country = a4.text_input("Country",  value=st.session_state.get("site_country", "US"))
+        site_state   = a3.text_input("State", value=st.session_state.get("site_state", ""),
+                                     help="ISO subdivision name, e.g. California")
+        site_country = a4.text_input("Country", value=st.session_state.get("site_country", "United States"),
+                                     help="ISO 3166 short name, e.g. United States")
         site_zip     = a5.text_input("ZIP code", value=st.session_state.get("site_zipcode", ""))
+        _TZ_CHOICES = ["UTC", "America/Los_Angeles", "America/Denver",
+                       "America/Chicago", "America/New_York", "Europe/London",
+                       "Europe/Berlin", "Asia/Dubai", "Asia/Singapore",
+                       "Australia/Sydney"]
+        _tz_cur = st.session_state.get("site_timezone", "UTC")
+        site_tz = st.selectbox("Timezone", _TZ_CHOICES,
+                               index=_TZ_CHOICES.index(_tz_cur) if _tz_cur in _TZ_CHOICES else 0,
+                               help="IANA zone — required by New Central site-create")
+        st.markdown(
+            f'<div style="font-size:11.5px;color:{FAINT};margin-top:0.3rem;">'
+            f'Leave blank to use valid lab placeholders (1 Lab Street, San Jose, CA, '
+            f'United States, 95002).</div>', unsafe_allow_html=True)
 
     st.divider()
 
@@ -105,6 +120,13 @@ def render():
             st.session_state["customer_name"] = "zztest-lab"
             st.session_state["mc_ip"] = cfg.mc_ip
             st.session_state["customer_config"] = cfg
+            # pre-fill valid fake site info so the site provisions cleanly
+            st.session_state["site_address"] = "1 Lab Street"
+            st.session_state["site_city"] = "San Jose"
+            st.session_state["site_state"] = "California"
+            st.session_state["site_country"] = "United States"
+            st.session_state["site_zipcode"] = "95002"
+            st.session_state["site_timezone"] = "America/Los_Angeles"
             st.session_state["_reset_downstream"]()
             st.success(f"Loaded zztest-lab ({key}) — {len(cfg.ssids)} SSIDs, "
                        f"{len(cfg.aps)} APs. Set the destination below and continue.")
@@ -546,6 +568,7 @@ def render():
             central_cfg.site_state   = site_state.strip()
             central_cfg.site_country = site_country.strip()
             central_cfg.site_zipcode = site_zip.strip()
+            central_cfg.site_timezone = site_tz
             central_cfg.destination  = dest_type
 
             # Re-Continuing with a CHANGED target invalidates everything the
@@ -573,6 +596,7 @@ def render():
                 "site_state":        site_state,
                 "site_country":      site_country,
                 "site_zipcode":      site_zip,
+                "site_timezone":     site_tz,
                 "central_client_id": central_client_id.strip(),
                 "aos10_fw":          aos10_fw.strip(),
                 "central_config":    central_cfg,
