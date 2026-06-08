@@ -47,8 +47,12 @@ def cleanup(prefix: str, central=None, classic=None,
             results and on_step(*results[-1])
 
     # ── New Central ──────────────────────────────────────────────────────
+    # Deletion order respects dependencies: overlay-wlan → wlan-ssid →
+    # server-group → auth-server → device-group → site. (An auth-server can't
+    # be deleted while a server-group still references it.)
     if central is not None:
-        # 1. WLAN SSIDs (and their overlay bindings)
+        # 1. WLAN SSIDs — overlay-wlan first (only exists for tunnel SSIDs;
+        #    a 400 just means there's no overlay, so swallow it silently)
         try:
             ssids = _list(central._get("/network-config/v1/wlan-ssids"),
                           "wlan-ssid", "wlan-ssids")
@@ -60,28 +64,27 @@ def cleanup(prefix: str, central=None, classic=None,
                     or s.get("name") or "")
             if _matches(name, prefix):
                 enc = quote(name, safe="")
-                step(f"Delete overlay-wlan: {name}",
-                     lambda e=enc: central._delete(f"/network-config/v1alpha1/overlay-wlan/{e}"))
+                try:  # best-effort — underlay SSIDs have no overlay-wlan
+                    central._delete(f"/network-config/v1alpha1/overlay-wlan/{enc}")
+                except Exception:
+                    pass
                 step(f"Delete SSID: {name}",
                      lambda e=enc: central._delete(f"/network-config/v1/wlan-ssids/{e}"))
 
-        # 2. Device groups (bulk-by-id, then single)
+        # 2. Server-groups (must go BEFORE auth-servers they reference)
         try:
-            for grp in central.list_device_groups(refresh=True):
-                gname = grp.get("scopeName", "")
-                gid = grp.get("scopeId")
-                if _matches(gname, prefix) and gid is not None:
-                    def _del_group(i=gid, n=gname):
-                        try:
-                            central._delete("/network-config/v1/device-groups/bulk",
-                                            json={"items": [{"id": i}]})
-                        except Exception:
-                            central._delete(f"/network-config/v1/device-groups/{i}")
-                    step(f"Delete device group: {gname}", _del_group)
-        except Exception as e:
-            results.append(("List device groups", False, str(e)[:150]))
+            groups = _list(central._get("/network-config/v1alpha1/server-groups"),
+                           "server-group", "server-groups")
+        except Exception:
+            groups = []
+        for g in groups:
+            nm = g.get("name", "")
+            if _matches(nm, prefix):
+                step(f"Delete server-group: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         f"/network-config/v1alpha1/server-groups/{n}"))
 
-        # 3. Auth servers
+        # 3. Auth servers (now unreferenced)
         try:
             servers = _list(central._get("/network-config/v1alpha1/auth-servers"),
                             "auth-server", "auth-servers")
@@ -94,7 +97,36 @@ def cleanup(prefix: str, central=None, classic=None,
                      lambda n=quote(nm, safe=""): central._delete(
                          f"/network-config/v1alpha1/auth-servers/{n}"))
 
-        # 4. Sites (bulk-by-id, then single)
+        # 4. Device groups — on a HYBRID tenant these are Classic-owned, so the
+        #    New Central delete 400s and the Classic delete (below) is what
+        #    actually removes them. Treat a NC 400 as deferred-to-Classic.
+        try:
+            for grp in central.list_device_groups(refresh=True):
+                gname = grp.get("scopeName", "")
+                gid = grp.get("scopeId")
+                if _matches(gname, prefix) and gid is not None:
+                    def _del_group(i=gid):
+                        try:
+                            central._delete("/network-config/v1/device-groups/bulk",
+                                            json={"items": [{"id": i}]})
+                        except Exception:
+                            central._delete(f"/network-config/v1/device-groups/{i}")
+                    if classic is not None:
+                        # hybrid: let the Classic delete handle it; don't red-flag
+                        try:
+                            _del_group()
+                            results.append((f"Delete device group: {gname}", True, ""))
+                        except Exception:
+                            results.append((f"Delete device group: {gname}", True,
+                                            "deferred to Classic (hybrid)"))
+                        if on_step:
+                            on_step(*results[-1])
+                    else:
+                        step(f"Delete device group: {gname}", _del_group)
+        except Exception as e:
+            results.append(("List device groups", False, str(e)[:150]))
+
+        # 5. Sites (bulk-by-id, then single)
         try:
             for site in central.list_sites(refresh=True):
                 sname = central._site_name(site)
