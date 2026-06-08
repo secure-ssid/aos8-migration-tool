@@ -431,19 +431,30 @@ def render():
             and st.session_state.get("provision_done"):
         st.divider()
         section_label("Move APs into device groups + assign", color=HPE_GREEN)
+        info_banner(
+            "⚠️ <b>This is the cutover — it CONVERTS your APs now.</b> Moving a live "
+            "AOS 8 AP into its AOS 10 group makes Central push the AOS 10 conversion: "
+            "<b>each AP reboots and goes offline ~10–20 min</b>, then comes up on AOS 10 "
+            "in New Central. You do <b>not</b> need to run <code>ap convert</code> "
+            "separately. Only run this inside your maintenance/cutover window.",
+            color=WARN)
         st.markdown(
             f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.5rem;">'
-            f'Moves the <b>claimed</b> APs into their New Central device groups '
-            f'(Classic on hybrid), assigns the CAMPUS_AP persona, and adds them to '
-            f'the site. Run this <b>after</b> the APs are claimed + subscribed above. '
-            f'This is the step that converts the APs over.</div>',
+            f'Moves the claimed APs into their device groups (Classic on hybrid), '
+            f'assigns the CAMPUS_AP persona, and adds them to the site. Requires the '
+            f'APs to be claimed + subscribed above first.</div>',
             unsafe_allow_html=True)
         if not reviewed:
             info_banner("Tick the review checklist at the top first.", color=WARN)
         ap_serials = {grp.name: [s for s in grp.ap_serials if s]
                       for grp in customer.ap_groups}
+        _n_aps = sum(len(v) for v in ap_serials.values())
+        cutover_ok = st.checkbox(
+            f"I'm in my cutover window — convert these {_n_aps} AP(s) now "
+            "(they will reboot into AOS 10 and drop offline)",
+            key="cutover_confirm")
         if st.button("Move APs into groups + assign persona/site",
-                     type="primary", disabled=not reviewed):
+                     type="primary", disabled=not (reviewed and cutover_ok)):
             box = st.empty()
             lines: list[tuple[str, bool]] = []
 

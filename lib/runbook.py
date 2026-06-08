@@ -100,6 +100,13 @@ def generate(customer: CustomerConfig, central: CentralConfig, customer_name: st
         "✓ Complete Steps 1–4 in the migration tool first:",
         "    Central provisioned (Step 3) + APs claimed & subscribed in GreenLake (Step 4)",
         "",
+        "NOTE — auto-conversion: assigning the APs to their AOS 10 device group in",
+        "Central (Step 4 'Move APs into groups') makes Central PUSH the conversion",
+        "automatically — the APs reboot into AOS 10 (~10-20 min offline) WITHOUT you",
+        "running 'ap convert'. The commands below are the controller-driven path for",
+        "APs that don't auto-convert (e.g. unreachable from Central). Do one or the",
+        "other, inside a maintenance window.",
+        "",
     ]
 
     cluster = customer.cluster
