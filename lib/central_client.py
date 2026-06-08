@@ -561,16 +561,25 @@ class CentralClient:
                 body["radius-accounting"] = True
         return body
 
+    def _upsert_ssid(self, encoded: str, body: dict) -> None:
+        """Create the wlan-ssid, or if it already exists PATCH it with the same
+        body so bindings (auth-server-group, VLAN, data rates) reflect the
+        CURRENT config on re-runs — a plain duplicate-swallow would leave a
+        stale binding (e.g. an SSID still pointing at a previous server-group)."""
+        try:
+            self._post(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+        except CentralAPIError as e:
+            if not _is_duplicate(e):
+                raise
+            self._patch(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+
     def create_underlay_ssid(self, ssid: SSID, scope_id: str,
                              server_group: str = "") -> None:
         name = ssid.display_name
         encoded = quote(name, safe="")
-        # Duplicate = the SSID object already exists (idempotent re-run, or the
-        # same ESSID bound to a second AP group) — proceed to scope-map it so
-        # this group still gets the WLAN.
-        self._swallow_duplicate(lambda: self._post(
-            f"/network-config/v1/wlan-ssids/{encoded}",
-            json=self._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group)))
+        # Upsert so a re-run updates the binding/attrs; then scope-map so this
+        # group gets the WLAN (also covers the same-ESSID-in-two-groups case).
+        self._upsert_ssid(encoded, self._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group))
         self.map_to_scope(f"wlan-ssids/{name}", scope_id, "CAMPUS_AP")
 
     def create_overlay_ssid(self, ssid: SSID, group_scope: str, global_scope: str,
@@ -589,10 +598,9 @@ class CentralClient:
             "out-of-service": "TUNNEL_DOWN",
             "cluster-preemption": False,
         })
-        # Duplicates are fine — re-runs and same-ESSID-in-multiple-groups both
-        # reuse the existing objects; the scope-maps below still bind this group.
-        self._swallow_duplicate(lambda: self._post(
-            f"/network-config/v1/wlan-ssids/{encoded}", json=body))
+        # Upsert so re-runs refresh the binding/attrs (and same-ESSID-in-multiple
+        # -groups reuses the object); scope-maps below still bind this group.
+        self._upsert_ssid(encoded, body)
         # the API silently drops default-role on POST — re-apply
         self._patch(f"/network-config/v1/wlan-ssids/{encoded}",
                     json={"default-role": name})
