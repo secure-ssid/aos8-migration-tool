@@ -107,9 +107,10 @@ def render():
         tcol1, tcol2 = st.columns([2, 1])
         scenario = tcol1.selectbox(
             "Scenario",
-            ["mixed — 2 groups, tunnel+bridge, enterprise+PSK+open, L2 cluster",
+            ["iap-full — IAP, 2 zones→groups, enterprise+PSK+open, VLANs, RADIUS (builds everything, no gateways)",
              "bridge — single group, all bridge (clean New-Central case)",
-             "instant — IAP cluster, bridge only"],
+             "mixed — 2 groups, tunnel+bridge, L2 cluster (exercises gateway/overlay)",
+             "instant — IAP cluster, single bridge SSID (minimal)"],
             label_visibility="collapsed",
         )
         if tcol2.button("Load test customer", use_container_width=True):

@@ -26,6 +26,8 @@ def make_test_config(scenario: str = "mixed") -> CustomerConfig:
         return _bridge_only()
     if scenario == "instant":
         return _instant_like()
+    if scenario == "iap-full":
+        return _instant_full()
     return _mixed()
 
 
@@ -111,4 +113,43 @@ def _instant_like() -> CustomerConfig:
         mc_ip="10.90.3.5", mc_firmware="8.10.0.6", controller_vlan=1,
         source_type="instant", ap_groups=groups, ssids=ssids, aps=aps,
         vlans=[VLAN(100, f"{TEST_PREFIX}-corp")], radius_servers=[], cluster=None,
+    )
+
+
+def _instant_full() -> CustomerConfig:
+    """Comprehensive IAP scenario — exercises the WHOLE config build on the
+    Instant (all-bridge, no gateway/overlay) path: two zones → two device
+    groups, all three auth types, three VLANs, a RADIUS auth-server."""
+    ssids = [
+        _ssid("zztest-corp", f"{TEST_PREFIX}-corp", 100, ForwardMode.BRIDGE,
+              AuthType.WPA2_ENTERPRISE, server="zztest-clearpass"),
+        _ssid("zztest-staff", f"{TEST_PREFIX}-staff", 200, ForwardMode.BRIDGE,
+              AuthType.WPA2_PSK, psk="Zztest-PSK-1234"),
+        _ssid("zztest-guest", f"{TEST_PREFIX}-guest", 300, ForwardMode.BRIDGE,
+              AuthType.OPEN),
+    ]
+    groups = [
+        APGroup(name=f"{TEST_PREFIX}-floor1",
+                ssids=["zztest-corp", "zztest-staff", "zztest-guest"],
+                ap_serials=["ZZTESTIAP001", "ZZTESTIAP002"], ap_models=["AP-635"]),
+        APGroup(name=f"{TEST_PREFIX}-floor2",
+                ssids=["zztest-staff", "zztest-guest"],
+                ap_serials=["ZZTESTIAP003"], ap_models=["AP-505"]),
+    ]
+    aps = [
+        AP("ZZTESTIAP001", "AP-635", "aa:bb:cc:00:02:01", "zztest-iap-01",
+           f"{TEST_PREFIX}-floor1", "10.90.3.11", "Up"),
+        AP("ZZTESTIAP002", "AP-635", "aa:bb:cc:00:02:02", "zztest-iap-02",
+           f"{TEST_PREFIX}-floor1", "10.90.3.12", "Up"),
+        AP("ZZTESTIAP003", "AP-505", "aa:bb:cc:00:02:03", "zztest-iap-03",
+           f"{TEST_PREFIX}-floor2", "10.90.4.11", "Up"),
+    ]
+    vlans = [VLAN(100, f"{TEST_PREFIX}-corp"), VLAN(200, f"{TEST_PREFIX}-staff"),
+             VLAN(300, f"{TEST_PREFIX}-guest")]
+    return CustomerConfig(
+        mc_ip="10.90.3.5", mc_firmware="8.10.0.6", controller_vlan=1,
+        source_type="instant", ap_groups=groups, ssids=ssids, aps=aps,
+        vlans=vlans,
+        radius_servers=[RadiusServer("zztest-clearpass", "10.90.0.50")],
+        cluster=None,
     )
