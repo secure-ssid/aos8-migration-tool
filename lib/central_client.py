@@ -48,6 +48,27 @@ def _is_duplicate(err: Exception) -> bool:
     return "already exists" in msg or "duplicate" in msg
 
 
+# A few common IANA zones → the {timezoneName, rawOffset, timezoneId} object
+# New Central's site-create requires. UTC is the safe universal default; the
+# API mainly validates that timezoneId is a real IANA zone.
+_TZ = {
+    "UTC": ("UTC", 0),
+    "America/New_York": ("Eastern Standard Time", -18000000),
+    "America/Chicago": ("Central Standard Time", -21600000),
+    "America/Denver": ("Mountain Standard Time", -25200000),
+    "America/Los_Angeles": ("Pacific Standard Time", -28800000),
+    "Europe/London": ("Greenwich Mean Time", 0),
+    "Europe/Berlin": ("Central European Time", 3600000),
+}
+
+
+def _timezone(timezone_id: str) -> dict:
+    name, offset = _TZ.get(timezone_id, _TZ["UTC"])
+    if timezone_id not in _TZ:
+        timezone_id = "UTC"
+    return {"timezoneName": name, "rawOffset": offset, "timezoneId": timezone_id}
+
+
 class CentralClient:
     def __init__(self, base_url: str, client_id: str, client_secret: str,
                  timeout: int = 30):
@@ -196,37 +217,51 @@ class CentralClient:
         return str(sid) if sid is not None else None
 
     def list_sites(self, refresh: bool = False) -> list[dict]:
-        # The config surface (/network-config/v1/sites) is the read path that
-        # works across tenants (incl. hybrid clusters); the monitoring route
-        # 404s on some. It ignores limit/offset, so fetch it whole.
+        # Read from the config surface (works across tenants incl. hybrid).
+        # v1alpha1 is where creates land, so prefer it, then v1, then the
+        # monitoring route. These endpoints ignore limit/offset — fetch whole.
         if self._sites_cache is None or refresh:
-            try:
-                data = self._get("/network-config/v1/sites")
-                self._sites_cache = data.get("items") or data.get("sites") or []
-            except CentralAPIError:
-                # fall back to the monitoring route for older tenants
-                self._sites_cache = self._paginate("/network-monitoring/v1/sites",
-                                                   page_size=100)
+            self._sites_cache = []
+            for path in ("/network-config/v1alpha1/sites", "/network-config/v1/sites"):
+                try:
+                    data = self._get(path)
+                    self._sites_cache = data.get("items") or data.get("sites") or []
+                    break
+                except CentralAPIError:
+                    continue
+            else:
+                try:
+                    self._sites_cache = self._paginate("/network-monitoring/v1/sites",
+                                                       page_size=100)
+                except CentralAPIError:
+                    self._sites_cache = []
         return self._sites_cache
 
     def create_site(self, name: str, address: str = "", city: str = "",
-                    state: str = "", country: str = "", zipcode: str = "") -> str:
-        """Idempotent: returns the existing site's id when the name matches."""
+                    state: str = "", country: str = "", zipcode: str = "",
+                    timezone_id: str = "UTC") -> str:
+        """Idempotent: returns the existing site's id when the name matches.
+
+        Body shape from HPE's shipping New Central workflows (wpa3-psk-overlay /
+        open-ssid-overlay Postman): POST /network-config/v1alpha1/sites with a
+        REQUIRED timezone object. The address block is only sent when a full
+        street address is given — partial/ISO-invalid address fields (e.g. a
+        bare country code) are themselves a common 400 cause."""
         for site in self.list_sites():
             if self._site_name(site) == name:
                 return self._site_id(site) or name
-        body = {"name": name}
-        for key, val in (("address", address), ("city", city), ("state", state),
-                         ("country", country), ("zipcode", zipcode)):
-            if val:
-                body[key] = val
-        # CREATE goes to the monitoring route (HPE's pipeline creates sites
-        # there with a minimal {"name"} body); the config route is read-only
-        # on these tenants and 400s a create. Fall back to config on a routing
-        # error only. Read-back uses the config route (see list_sites).
+        body: dict = {"name": name, "timezone": _timezone(timezone_id)}
+        if address:
+            for key, val in (("address", address), ("city", city), ("state", state),
+                             ("country", country), ("zipcode", zipcode)):
+                if val:
+                    body[key] = val
+        # v1alpha1 is the create route HPE's workflows use; fall back to v1 /
+        # monitoring on a routing (404) error only.
         resp = None
         errs = []
-        for path in ("/network-monitoring/v1/sites", "/network-config/v1/sites"):
+        for path in ("/network-config/v1alpha1/sites", "/network-config/v1/sites",
+                     "/network-monitoring/v1/sites"):
             try:
                 resp = self._post(path, json=body)
                 break
