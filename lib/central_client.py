@@ -319,9 +319,12 @@ class CentralClient:
         if not serials:
             return
         try:
+            # body key is "device-id" (a LIST of serials), NOT "serial" —
+            # verified against HPE's device-onboarding workflow + the
+            # persona-assignment OpenAPI spec
             self._post("/network-config/v1alpha1/persona-assignment", json={
                 "persona-device-list": [
-                    {"device-function": device_function, "serial": s} for s in serials
+                    {"device-function": device_function, "device-id": list(serials)}
                 ],
             })
         except CentralAPIError as e:
