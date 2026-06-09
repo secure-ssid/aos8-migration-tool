@@ -258,11 +258,12 @@ class ClassicCentralClient:
             "ApNetworkRole": "Standard",
             "NewCentral": bool(new_central),
         }
-        if include_gateways:
-            # "BranchGateway" is the only documented GwNetworkRole group
-            # property value in HPE's onboarding workflows/docs (the "WLAN
-            # gateway" term is a runtime cluster role, not this enum)
-            props["GwNetworkRole"] = "BranchGateway"
+        # Deliberately NO GwNetworkRole here. "BranchGateway" is the SD-Branch
+        # persona; Central 3.x rejects a WLAN/AOS10 group that carries a
+        # branch-gateway role ("WLAN with branch gateways network role for
+        # Gateways is not supported"). Wireless gateways are MOBILITY_GW and are
+        # formed as a New Central gateway-cluster object, not via a Classic
+        # group role — so this tool never stamps a gateway role on a WLAN group.
         self._post("/configuration/v3/groups", json_body={
             "group": name,
             "group_attributes": {

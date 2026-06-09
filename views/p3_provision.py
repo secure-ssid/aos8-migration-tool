@@ -59,7 +59,15 @@ def render():
             section_label("Gateway cluster")
             st.markdown(
                 badge(f"⚡ {central_cfg.gw_cluster_name}", "orange") + " " +
-                badge(f"{central_cfg.gw_cluster_name}-gws (device group)", "gray"),
+                badge("DEFERRED TO RUNBOOK — formed in New Central at cutover", "gray"),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div style="font-size:11.5px;color:{FAINT};margin-top:0.3rem;">'
+                f'The gateway cluster is a New Central object (MOBILITY_GW) formed by '
+                f'joining gateways — not a Classic group. The MCs only become AOS 10 '
+                f'gateways at the cutover, so config-phase provisioning leaves cluster '
+                f'formation + overlay/tunnel-SSID binding for the runbook.</div>',
                 unsafe_allow_html=True,
             )
         elif central_cfg.gateways_retired:

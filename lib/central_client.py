@@ -896,20 +896,23 @@ class CentralClient:
                      lambda: self.create_server_group(
                          radius_group, [s.name for s in cc.radius_servers]))
 
-            # Gateway cluster lives in its own device group (MOBILITY_GW
-            # persona). The group MUST allow Gateways (include_gateways=True) —
-            # on a hybrid tenant a Classic group defaults to AccessPoints-only,
-            # and a MOBILITY_GW gateway-cluster can't anchor to an AP-only
-            # scope (the create-cluster call is rejected), which left only an
-            # empty "<cluster>-gws" AP group behind and no actual cluster.
+            # Gateway cluster: a NATIVE New Central object (MOBILITY_GW) formed
+            # by JOINING gateways. We deliberately do NOT build it during the
+            # config phase, because:
+            #  - it must not go through Classic — a WLAN group can't carry a
+            #    branch-gateway role, so Classic v3 group-create 400s; and
+            #  - in an AOS 8→10 migration the MCs only become gateways at the
+            #    cutover, so there are no gateways to join yet.
+            # Record an explicit follow-up (also on the runbook) so it's never
+            # silently dropped; the overlay/tunnel SSIDs below defer to it.
             if cc.gw_cluster_name:
-                gw_group = f"{cc.gw_cluster_name}-gws"
-                step(f"Create gateway device group: {gw_group}",
-                     lambda: gw_scope.update(
-                         id=_make_group(gw_group, None, include_gateways=True)))
-                if gw_scope.get("id"):
-                    step(f"Create GW cluster: {cc.gw_cluster_name}",
-                         lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
+                results.append((
+                    f"MANUAL FOLLOW-UP: form gateway cluster "
+                    f"'{cc.gw_cluster_name}' in New Central and join the gateways "
+                    f"at cutover — overlay/tunnel SSIDs bind to it (see runbook)",
+                    True, ""))
+                if on_step:
+                    on_step(results[-1][0], True)
 
         for group_cfg in cc.groups:
             # serials are keyed by the AOS 8 source group name, not the
@@ -923,9 +926,11 @@ class CentralClient:
                 grp_scope: dict[str, str] = {}
                 if not step(f"Create device group: {group_cfg.name}" + via,
                             lambda g=group_cfg:
-                                grp_scope.update(id=_make_group(g.name, None,
-                                                                bool(cc.gw_cluster_name)))):
+                                grp_scope.update(id=_make_group(g.name, None))):
                     continue  # group failed — skip its dependents
+                # NB: AP/wireless groups are AccessPoints-only — gateways never
+                # share a WLAN group (Central 3.x rejects a WLAN group that also
+                # carries a gateway role). Gateways live in their own cluster.
                 scope_id = grp_scope["id"]
             else:
                 scope_id = self._resolve_group_scope(group_cfg.name)
@@ -1018,10 +1023,12 @@ class CentralClient:
                 elif ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
                         and cc.gw_cluster_name:
                     results.append((
-                        f"Create overlay SSID: {ssid.display_name} → {group_cfg.name}",
-                        False,
-                        "Skipped — gateway device group/cluster creation failed earlier",
-                    ))
+                        f"Overlay SSID {ssid.display_name} → {group_cfg.name} — "
+                        f"DEFERRED: bind after gateway cluster "
+                        f"'{cc.gw_cluster_name}' is formed at cutover (see runbook)",
+                        True, ""))
+                    if on_step:
+                        on_step(results[-1][0], True)
                 else:
                     step(f"Create underlay SSID: {ssid.display_name} → {group_cfg.name}",
                          lambda s=ssid, sid=scope_id:
