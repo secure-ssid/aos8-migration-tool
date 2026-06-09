@@ -132,6 +132,8 @@ def render():
             "Scenario",
             list(scenarios.keys()),
             format_func=lambda k: scenarios[k],
+            key="test_scenario",  # bound so the pick survives reruns (no-key
+                                  # selectboxes can snap back to the default)
             label_visibility="collapsed",
         )
         if tcol2.button("Load test customer", use_container_width=True):
@@ -217,9 +219,10 @@ def render():
     prev_source = st.session_state.get("source_type")
     st.session_state["source_type"] = source_type
     if prev_source is not None and prev_source != source_type:
-        # switching platforms invalidates the previous discovery — never show
-        # (or let the user continue on) data from the other source type
-        st.session_state.pop("customer_config", None)
+        # Switching platforms refreshes derived provisioning state, but must NOT
+        # destroy customer_config — a loaded test would vanish on a toggle and
+        # never come back. The guard below hides a now-mismatched discovery (and
+        # disables Continue); switching back to its platform re-reveals it.
         st.session_state["_reset_downstream"]()
 
     customer_cfg = st.session_state.get("customer_config")
