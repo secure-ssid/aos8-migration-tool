@@ -119,17 +119,23 @@ def render():
             unsafe_allow_html=True,
         )
         tcol1, tcol2 = st.columns([2, 1])
-        scenario = tcol1.selectbox(
+        # key → label. Tag each label with its source platform: the selectbox
+        # defaults to iap-full and the Mobility Controller scenarios are named
+        # "bridge"/"mixed", so without the tag a controller test looked absent.
+        scenarios = {
+            "iap-full": "Instant · iap-full — 2 zones→groups, enterprise+PSK+open, VLANs, RADIUS (builds everything, no gateways)",
+            "bridge":   "Mobility Controller · bridge — single group, all bridge (clean New-Central case)",
+            "mixed":    "Mobility Controller · mixed — 2 groups, tunnel+bridge, L2 cluster (gateway/overlay)",
+            "instant":  "Instant · instant — IAP cluster, single bridge SSID (minimal)",
+        }
+        key = tcol1.selectbox(
             "Scenario",
-            ["iap-full — IAP, 2 zones→groups, enterprise+PSK+open, VLANs, RADIUS (builds everything, no gateways)",
-             "bridge — single group, all bridge (clean New-Central case)",
-             "mixed — 2 groups, tunnel+bridge, L2 cluster (exercises gateway/overlay)",
-             "instant — IAP cluster, single bridge SSID (minimal)"],
+            list(scenarios.keys()),
+            format_func=lambda k: scenarios[k],
             label_visibility="collapsed",
         )
         if tcol2.button("Load test customer", use_container_width=True):
             from lib import testdata
-            key = scenario.split(" ")[0]
             cfg = testdata.make_test_config(key)
             st.session_state["source_type"] = cfg.source_type
             # move the bound radio too, or it stays on the previous platform
