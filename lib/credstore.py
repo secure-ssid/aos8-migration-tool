@@ -27,6 +27,11 @@ FIELDS = (
     "classic_refresh_token",  # rotates; access token is intentionally NOT saved
 )
 
+# The actual credentials — at least one must be present before we write a file.
+# Base URLs auto-populate from defaults, so saving on those alone would create a
+# file that looks "saved" but holds no credential ("didn't save the APIs").
+CREDENTIAL_FIELDS = ("central_client_id", "central_secret", "classic_refresh_token")
+
 
 def exists() -> bool:
     return CRED_PATH.is_file()
@@ -44,10 +49,17 @@ def load() -> dict:
 
 
 def save_from_session(session) -> None:
-    """Write the persistable fields from a mapping (Streamlit session_state)."""
-    data = {k: session.get(k) for k in FIELDS if session.get(k)}
-    if not data:
-        return
+    """Write the persistable fields from a mapping (Streamlit session_state).
+
+    No-ops unless a real credential is present (base URLs alone don't count),
+    and MERGES onto any existing file so a field that's momentarily blank this
+    render never erases a previously-saved value (e.g. the password box reads
+    empty after a reload even though the secret is held in session)."""
+    fresh = {k: session.get(k) for k in FIELDS if session.get(k)}
+    if not any(session.get(k) for k in CREDENTIAL_FIELDS):
+        return  # only defaults/URLs present — nothing worth saving yet
+    data = load()        # merge: keep already-saved fields not in this render
+    data.update(fresh)
     CRED_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = CRED_PATH.with_name("credentials.json.tmp")
     # restrictive perms from creation, then atomic rename into place

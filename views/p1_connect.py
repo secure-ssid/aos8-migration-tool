@@ -60,6 +60,17 @@ def _source_label(source_type: str) -> str:
     return SOURCE_OPTS[1] if source_type == "instant" else SOURCE_OPTS[0]
 
 
+def _test_prefix(customer_name: str) -> str:
+    """Per-run object prefix for the test data, derived from the customer name
+    so each run's groups/SSIDs/VLANs are distinct (no duplicate objects in the
+    tenant). Always 'zztest'-stemmed: the cleanup teardown scopes to 'zztest*',
+    so the prefix stays both unique AND safe (can't match real tenant objects)."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", (customer_name or "").lower()).strip("-")
+    if not slug:
+        return "zztest-lab"
+    return slug if slug.startswith("zztest") else f"zztest-{slug}"
+
+
 def _store_discovery(cfg) -> None:
     st.session_state["customer_config"] = cfg
     st.session_state["_reset_downstream"]()
@@ -77,7 +88,10 @@ def render():
         saved = credstore.load()
         for k, v in saved.items():
             st.session_state.setdefault(k, v)
-        if saved:
+        # only treat it as "remembered" if a real credential was saved — a
+        # base-URL-only file shouldn't auto-check the box (and the save guard
+        # then clears that stale partial file).
+        if any(saved.get(k) for k in credstore.CREDENTIAL_FIELDS):
             st.session_state.setdefault("remember_creds", True)
 
     # ── Customer ───────────────────────────────────────────────────────────
@@ -150,12 +164,15 @@ def render():
         )
         if tcol2.button("Load test customer", use_container_width=True):
             from lib import testdata
-            cfg = testdata.make_test_config(key)
+            # name every object after the customer so distinct runs don't
+            # collide; defaults to zztest-lab when the name field is empty
+            prefix = _test_prefix(customer_name)
+            cfg = testdata.make_test_config(key, prefix=prefix)
             st.session_state["source_type"] = cfg.source_type
             # move the bound radio too, or it stays on the previous platform
             # and the post-load source-type check wipes this config
             st.session_state["source_radio"] = _source_label(cfg.source_type)
-            st.session_state["customer_name"] = "zztest-lab"
+            st.session_state["customer_name"] = prefix
             st.session_state["mc_ip"] = cfg.mc_ip
             st.session_state["customer_config"] = cfg
             # pre-fill valid fake site info so the site provisions cleanly
@@ -166,7 +183,7 @@ def render():
             st.session_state["site_zipcode"] = "95002"
             st.session_state["site_timezone"] = "America/Los_Angeles"
             st.session_state["_reset_downstream"]()
-            st.success(f"Loaded zztest-lab ({key}) — {len(cfg.ssids)} SSIDs, "
+            st.success(f"Loaded {prefix} ({key}) — {len(cfg.ssids)} SSIDs, "
                        f"{len(cfg.aps)} APs. Set the destination below and continue.")
             st.rerun()
 
