@@ -492,7 +492,9 @@ class ClassicCentralClient:
         keep_gws = bool(cc.gw_cluster_name)
 
         for group_cfg in cc.groups:
-            serials = ap_serials.get(group_cfg.name, [])
+            # serials are keyed by the AOS 8 source group name, not the
+            # (possibly renamed) Central group name
+            serials = ap_serials.get(group_cfg.source_group or group_cfg.name, [])
             if not step(f"Create AOS10 group: {group_cfg.name}"
                         + (" (APs+Gateways)" if keep_gws else " (APs)"),
                         lambda g=group_cfg: self.create_group(g.name, keep_gws)):

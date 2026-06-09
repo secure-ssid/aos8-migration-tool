@@ -7,9 +7,10 @@ import streamlit as st
 
 from lib.glp_client import GLPClient
 from lib.session_clients import (
-    build_central_client, build_classic_client, have_classic_creds,
+    build_central_client, build_classic_client, use_classic_for_moves,
     persist_rotated_refresh_token,
 )
+from lib.testdata import TEST_PREFIX
 from lib.styles import (
     OK, WARN, MUTED, TEXT, FAINT, HPE_GREEN,
     page_header, section_label, badge, esc, mono_row, mono_caption, info_banner,
@@ -162,13 +163,25 @@ def render():
                     else:
                         bad.append(f"{ap.serial}: '{v}'")
                 st.session_state["customer_config"] = customer
-                if bad:
+                if applied:
+                    # stash-then-rerun (like glp_claim_result) so the messages
+                    # survive the rerun that refreshes the claimable metrics
+                    st.session_state["macedit_result"] = {"applied": applied,
+                                                          "bad": bad}
+                    st.rerun()
+                elif bad:
+                    # nothing changed — a rerun would wipe the error and leave
+                    # the operator with zero feedback; render it in place
                     st.error("Invalid MAC format (need aa:bb:cc:dd:ee:ff): "
                              + "; ".join(bad))
-                if applied:
-                    st.success(f"Applied {applied} wired MAC(s) — these APs are now "
-                               "claimable.")
-                st.rerun()
+
+    macedit = st.session_state.pop("macedit_result", None)
+    if macedit:
+        if macedit["bad"]:
+            st.error("Invalid MAC format (need aa:bb:cc:dd:ee:ff): "
+                     + "; ".join(macedit["bad"]))
+        st.success(f"Applied {macedit['applied']} wired MAC(s) — these APs are "
+                   "now claimable.")
 
     # ── Credentials ────────────────────────────────────────────────────────
     section_label("GLP API credentials", color=HPE_GREEN)
@@ -292,10 +305,13 @@ def render():
                 st.session_state["glp_claim_result"] = {"ok": ok, "failed": failed}
                 st.rerun()
             except Exception as e:
-                msg = str(e)
-                if "zztest" in msg.lower() or "fake" in msg.lower() or \
-                        "HPE's records" in msg:
-                    st.info(f"Expected with test data — {msg}")
+                # Soft-fail only when the SUBMITTED serials are synthetic test
+                # data (zztest prefix) — sniffing the error text downgraded
+                # real claim failures (glp_client's failed-serial message
+                # always mentions zztest/fake/HPE's records).
+                if all(ap.serial.upper().startswith(TEST_PREFIX.upper())
+                       for ap in targets):
+                    st.info(f"Expected with test data — {e}")
                 else:
                     st.error(f"Claim failed: {e}")
 
@@ -309,6 +325,16 @@ def render():
             st.code("\n".join(str(s) for s in failed), language="text")
         else:
             st.success(f"Verified: all {len(ok_list)} device(s) are in the workspace.")
+
+    # Only CLAIMING is skippable (CSV / GreenLake UI) — for New Central the
+    # group-move cutover further down this page is still mandatory.
+    if central_cfg and getattr(central_cfg, "destination", "new") == "new":
+        mono_caption("ALREADY CLAIMED VIA CSV/GREENLAKE UI? CLAIMING IS OPTIONAL — "
+                     "THE 'MOVE APS INTO DEVICE GROUPS' CUTOVER BELOW IS STILL "
+                     "REQUIRED")
+    else:
+        mono_caption("ALREADY CLAIMED VIA CSV/GREENLAKE UI? JUST CONTINUE — "
+                     "THIS STEP IS OPTIONAL FOR CLASSIC")
 
     st.divider()
 
@@ -444,6 +470,10 @@ def render():
             f'assigns the CAMPUS_AP persona, and adds them to the site. Requires the '
             f'APs to be claimed + subscribed above first.</div>',
             unsafe_allow_html=True)
+        if use_classic_for_moves():
+            st.caption("Hybrid mode armed — the group moves below route through "
+                       "the Classic API Gateway "
+                       f"`{st.session_state.get('central_base_classic','')}`.")
         if not reviewed:
             info_banner("Tick the review checklist at the top first.", color=WARN)
         ap_serials = {grp.name: [s for s in grp.ap_serials if s]
@@ -467,7 +497,7 @@ def render():
                 client = build_central_client()
                 with st.spinner("Authenticating with New Central..."):
                     client.authenticate()
-                classic = build_classic_client() if have_classic_creds() else None
+                classic = build_classic_client() if use_classic_for_moves() else None
                 with st.spinner("Moving APs and assigning persona/site..."):
                     results = client.provision(central_cfg, ap_serials=ap_serials,
                                                on_step=on_step, classic_client=classic,
@@ -496,11 +526,8 @@ def render():
                     provision_step_line(label, success)
 
     st.divider()
-    col_back, col_mid, col_next = st.columns([1, 3, 1])
+    col_back, _, col_next = st.columns([1, 3, 1])
     col_back.button("← Back", on_click=lambda: st.session_state.update({"step": 2}))
-    with col_mid:
-        mono_caption("ALREADY CLAIMED VIA CSV/GREENLAKE UI? JUST CONTINUE — "
-                     "THIS STEP IS OPTIONAL")
     if col_next.button("Runbook →", type="primary", use_container_width=True):
         st.session_state["step"] = 4
         st.rerun()

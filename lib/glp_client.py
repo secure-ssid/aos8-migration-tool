@@ -95,7 +95,11 @@ class GLPClient:
             self.authenticate()
             return self._request(method, path, json, params, headers, _retried=True)
         if resp.status_code == 429 and not _retried:
-            time.sleep(min(int(resp.headers.get("Retry-After", 30)), 120))
+            # Retry-After may be an HTTP-date (RFC 7231) — fall back to 30s
+            # rather than crashing on int().
+            retry_after = resp.headers.get("Retry-After", "30").strip()
+            wait = int(retry_after) if retry_after.isdigit() else 30
+            time.sleep(min(wait, 120))
             return self._request(method, path, json, params, headers, _retried=True)
         if not resp.ok and resp.status_code != 202:
             try:
@@ -145,18 +149,51 @@ class GLPClient:
         if not location:
             # some responses return the operation inline
             try:
-                return resp.json().get("transactionId", "")
+                task_id = resp.json().get("transactionId", "")
             except Exception:
-                raise GLPAPIError("Claim accepted but no async-operation Location returned")
+                task_id = ""
+            if not task_id:
+                raise GLPAPIError("Claim accepted but no async-operation id "
+                                  "(Location header or transactionId) returned")
+            return task_id
         return location.rstrip("/").split("/")[-1]
+
+    @staticmethod
+    def failed_serials(result: dict) -> list[str]:
+        """Serials GLP rejected in an async-operation result (the dict
+        poll_task returns) — a 'completed' claim can still reject some."""
+        return [str(s) for s in
+                (result.get("result") or {}).get("failedDevicesSerial") or []]
+
+    @staticmethod
+    def _rejected_msg(failed: list[str]) -> str:
+        msg = ("GreenLake rejected these serials: " + ", ".join(failed) +
+               ". GLP only claims devices that exist in HPE's records — ")
+        # only blame test data when the serials ARE test data; telling a field
+        # engineer their production APs are "fake" buries the real problem
+        if failed and all(str(s).upper().startswith("ZZTEST") for s in failed):
+            msg += ("fake/zztest serials always fail here. Use real AP "
+                    "serial+MAC pairs to test claiming.")
+        else:
+            msg += ("check each serial + wired-MAC pairing and that the "
+                    "device isn't already owned by another workspace.")
+        return msg
 
     def poll_task(self, task_id: str, timeout: int = _POLL_TIMEOUT,
                   interval: int = _POLL_INTERVAL, on_poll=None) -> dict:
-        """Poll an async-operation until it completes; raises on failure/timeout.
+        """Poll an async-operation until it completes.
+
+        Returns the final async-op result dict on completion. A 'completed'
+        claim can still reject individual serials — check failed_serials() on
+        the return value. Raises GLPAPIError when the operation status is
+        failed/error/timeout/cancelled, when polling times out, or when a
+        'completed' operation rejected EVERY submitted device.
 
         on_poll(attempt:int, status:str) is called after each poll so the UI
         can show progress while this blocks.
         """
+        if not task_id:
+            raise GLPAPIError("poll_task called with an empty async-operation id")
         deadline = time.time() + timeout
         attempt = 0
         while time.time() < deadline:
@@ -165,16 +202,17 @@ class GLPClient:
             status = str(result.get("status", "")).lower()
             if on_poll:
                 on_poll(attempt, status or "pending")
+            failed = self.failed_serials(result)
             if status in ("completed", "success", "succeeded"):
+                succeeded = (result.get("result") or {}).get(
+                    "successfulDevicesSerial") or []
+                if failed and not succeeded:
+                    # 'completed' body, but every submitted device was rejected
+                    raise GLPAPIError(self._rejected_msg(failed))
                 return result
             if status in ("failed", "error", "timeout", "cancelled"):
-                failed = (result.get("result") or {}).get("failedDevicesSerial") or []
                 if failed:
-                    raise GLPAPIError(
-                        "GreenLake rejected these serials: " + ", ".join(failed) +
-                        ". GLP only claims devices that exist in HPE's records — "
-                        "fake/zztest serials will always fail here. Use real AP "
-                        "serial+MAC pairs to test claiming.")
+                    raise GLPAPIError(self._rejected_msg(failed))
                 raise GLPAPIError(f"GLP claim operation {task_id} failed: {result}")
             time.sleep(interval)
         raise GLPAPIError(f"GLP claim operation {task_id} timed out after {timeout}s")

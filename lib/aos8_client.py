@@ -138,6 +138,16 @@ class AOS8Client:
                 return val
         return default
 
+    @staticmethod
+    def _profile_ref(item: dict, name: str) -> str:
+        """Resolve a sub-profile reference. Unlike scalar params, AOS returns
+        these as dicts keyed by 'profile-name' (same shape as the virtual_ap
+        and auth_server members), so _field's {key: {key: val}} unwrap misses."""
+        ref = item.get(name)
+        if isinstance(ref, dict):
+            return str(ref.get("profile-name", "") or "")
+        return str(ref or "")
+
     # ─────────────────── Discovery ───────────────────
 
     def get_ap_groups(self) -> tuple[list[APGroup], dict[str, list[str]]]:
@@ -204,7 +214,7 @@ class AOS8Client:
             else:
                 fwd = ForwardMode.TUNNEL
 
-            prof_name = str(self._field(item, "ssid_prof", default=""))
+            prof_name = self._profile_ref(item, "ssid_prof")
             prof = ssid_profiles.get(prof_name, {})
             auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
 
@@ -217,7 +227,7 @@ class AOS8Client:
                 auth_known=auth_known,
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
-                auth_server_group=str(self._field(item, "aaa_prof", default="")) or None,
+                auth_server_group=self._profile_ref(item, "aaa_prof") or None,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
             ))
@@ -432,6 +442,9 @@ def _opmode_to_auth(opmode: str) -> tuple[AuthType, bool]:
     if not op:
         return AuthType.WPA2_ENTERPRISE, False
     if "opensystem" in op or op == "open":
+        return AuthType.OPEN, True
+    if "enhanced-open" in op or "owe" in op:
+        # OWE (Enhanced Open) — no AuthType member for it, so map to OPEN
         return AuthType.OPEN, True
     if "sae" in op or "wpa3-personal" in op:
         return AuthType.WPA3_SAE, True

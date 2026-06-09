@@ -46,6 +46,19 @@ def cleanup(prefix: str, central=None, classic=None,
         if on_step:
             results and on_step(*results[-1])
 
+    # Classic group names, fetched once on first use — used to decide whether
+    # a failed New Central group delete can really be deferred to Classic.
+    _classic_names: Optional[list] = None
+
+    def _classic_group_names() -> list:
+        nonlocal _classic_names
+        if _classic_names is None:
+            try:
+                _classic_names = classic.list_group_names(refresh=True)
+            except Exception:
+                _classic_names = []
+        return _classic_names
+
     # ── New Central ──────────────────────────────────────────────────────
     # Deletion order respects dependencies: overlay-wlan → wlan-ssid →
     # server-group → auth-server → device-group → site. (An auth-server can't
@@ -112,13 +125,26 @@ def cleanup(prefix: str, central=None, classic=None,
                         except Exception:
                             central._delete(f"/network-config/v1/device-groups/{i}")
                     if classic is not None:
-                        # hybrid: let the Classic delete handle it; don't red-flag
+                        # hybrid: let the Classic delete handle it — but only
+                        # when the failure IS the hybrid restriction (or Classic
+                        # really owns the group). Anything else (auth/5xx/
+                        # timeout) is a real failure and must stay red-flagged.
                         try:
                             _del_group()
                             results.append((f"Delete device group: {gname}", True, ""))
-                        except Exception:
-                            results.append((f"Delete device group: {gname}", True,
-                                            "deferred to Classic (hybrid)"))
+                        except Exception as e:
+                            msg = str(e)
+                            if "404" in msg or "not found" in msg.lower() \
+                                    or "does not exist" in msg.lower():
+                                results.append((f"Delete device group: {gname}",
+                                                True, "already gone"))
+                            elif ("HYBRID_CLUSTER" in msg or "API_ACCESS_RESTRICTED" in msg
+                                    or gname in _classic_group_names()):
+                                results.append((f"Delete device group: {gname}", True,
+                                                "deferred to Classic (hybrid)"))
+                            else:
+                                results.append((f"Delete device group: {gname}", False,
+                                                msg[:200]))
                         if on_step:
                             on_step(*results[-1])
                     else:

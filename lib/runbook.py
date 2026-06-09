@@ -227,7 +227,10 @@ def _write_single_mc_steps(lines: list, customer: CustomerConfig, central: Centr
 def _write_l2_cluster_steps(lines: list, customer: CustomerConfig,
                             central: CentralConfig, cluster) -> None:
     mc1 = cluster.members[0] if cluster.members else "<mc1-ip>"
-    mc2 = cluster.members[1] if len(cluster.members) > 1 else "<mc2-ip>"
+    # Every non-anchor member — L2 clusters support up to 12 members, and ALL
+    # of them must be converted/decommissioned, not just MC2.
+    others = cluster.members[1:] if len(cluster.members) > 1 else ["<mc2-ip>"]
+    others_label = " · ".join(others)
 
     if central.gateways_retired:
         lines += [
@@ -238,7 +241,7 @@ def _write_l2_cluster_steps(lines: list, customer: CustomerConfig,
             f"  apmove all target-v4 {mc1}",
             "  show ap active                  # confirm all APs are on MC1",
             "",
-            f"STEP 2 — Leave MC2 ({mc2}) online but idle — it is the rollback target",
+            f"STEP 2 — Leave the other member(s) ({others_label}) online but idle — rollback targets",
             "  (convert-aos-ap cap needs a live AOS 8 MC). No GW conversion needed.",
             "",
             f"STEP 3 — Run ap convert on MC1 ({mc1}):",
@@ -247,20 +250,21 @@ def _write_l2_cluster_steps(lines: list, customer: CustomerConfig,
         lines += _convert_block(customer, central)
         lines += [
             f"STEP 4 — After all APs are online in Central and validated (Step 6):",
-            f"  decommission MC1 ({mc1}) and MC2 ({mc2}).",
+            f"  decommission MC1 ({mc1}) and the other member(s) ({others_label}).",
             "",
         ]
         return
     lines += [
         f"L2 CLUSTER UPGRADE SEQUENCE ({len(cluster.members)} members)",
         "─" * 40,
-        "Follow this order exactly — converting both members at once strands APs.",
+        "Follow this order exactly — converting all members at once strands APs.",
         "",
         f"STEP 1 — Move all APs to MC1 ({mc1}):",
         f"  apmove all target-v4 {mc1}",
         "  show ap active                  # confirm all APs are on MC1",
         "",
-        f"STEP 2 — Convert MC2 ({mc2}) to Gateway:",
+        "STEP 2 — Convert every member EXCEPT MC1 to Gateway:",
+        *(f"  MC{i} ({ip})" for i, ip in enumerate(others, start=2)),
         "  (Complete GW ZTP or Static Activate — see Gateway migration in Step 5)",
         "",
         f"STEP 3 — Run ap convert on MC1 ({mc1}):",

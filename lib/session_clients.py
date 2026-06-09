@@ -13,9 +13,23 @@ _DEFAULT_CLASSIC_BASE = "https://apigw-uswest4.central.arubanetworks.com"
 
 
 def have_classic_creds() -> bool:
-    """True when enough is present to build a usable Classic client."""
-    return bool(st.session_state.get("classic_access_token")
-                and st.session_state.get("central_base_classic"))
+    """True when enough is present to build a usable Classic client: an access
+    token, or a refresh token + client id/secret (the client re-mints the
+    access token on the first 401). The access token alone is enough because
+    the base URL falls back to the default API-GW host."""
+    if st.session_state.get("classic_access_token"):
+        return True
+    return bool(st.session_state.get("classic_refresh_token")
+                and st.session_state.get("central_client_id")
+                and st.session_state.get("central_secret"))
+
+
+def use_classic_for_moves() -> bool:
+    """Explicit hybrid gate for New-Central flows: route device-group
+    creates/moves through the Classic API Gateway only when the operator
+    marked the tenant hybrid AND classic creds are usable. Mere presence of a
+    saved token (e.g. from a previous engagement) no longer flips the path."""
+    return bool(st.session_state.get("hybrid_tenant")) and have_classic_creds()
 
 
 def build_central_client() -> CentralClient:

@@ -49,11 +49,37 @@ def reset_downstream_state() -> None:
     for key in ("central_config", "preflight_results", "provision_done",
                 "provision_results", "validation_results",
                 "glp_existing", "glp_subscriptions", "glp_claim_result",
-                "glp_sub_results", "validation_celebrated"):
+                "glp_sub_results", "glp_service_managers", "onboard_results",
+                "probe_results", "validation_celebrated"):
+        st.session_state.pop(key, None)
+    # the Step 6 closeout checklist is mirrored into durable chk_* keys —
+    # a new engagement starts with an unticked checklist
+    for key in [k for k in st.session_state.keys() if str(k).startswith("chk_")]:
         st.session_state.pop(key, None)
 
 
 st.session_state["_reset_downstream"] = reset_downstream_state
+
+# Widget-keyed state is garbage-collected by Streamlit at the end of any run
+# where its widget wasn't instantiated (other step / other mode). Re-asserting
+# the value each run promotes it to durable app state, so cross-page settings
+# (the Remember toggle, hybrid gate, GLP cred source, Add-devices inputs)
+# survive navigation instead of silently resetting.
+for _k in ("remember_creds", "hybrid_tenant", "glp_use_central_creds",
+           "glp_client_id", "add_input_src", "add_scope",
+           "add_apdb", "add_list"):
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
+
+# Deferred from "Forget token" (Step 1): widget keys can't be assigned in the
+# same run after their widgets rendered, so the disarm + input clearing lands
+# here, before any widget exists. Popping the keyed token inputs is what stops
+# text still sitting in the boxes from re-installing the token next render.
+if st.session_state.pop("_forget_classic", False):
+    for _k in ("classic_access_token", "classic_refresh_token",
+               "p1_classic_token_input", "p1_classic_refresh_input"):
+        st.session_state.pop(_k, None)
+    st.session_state["hybrid_tenant"] = False
 
 # ── Mode toggle ──────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -68,6 +94,14 @@ with st.sidebar:
     )
 app_mode = "add_devices" if "Add" in _mode_label else "wizard"
 st.session_state["app_mode"] = app_mode
+
+# set_page_config + the CSS inject above ran with the PREVIOUS render's mode
+# (they must precede the radio). One immediate rerun on an actual mode change
+# keeps the accent/title/icon in step with the page instead of lagging until
+# the next interaction.
+if app_mode != st.session_state.get("_last_app_mode"):
+    st.session_state["_last_app_mode"] = app_mode
+    st.rerun()
 
 brand_header(accent=HPE_GREEN if (on_greenlake or app_mode == "add_devices") else ORANGE)
 

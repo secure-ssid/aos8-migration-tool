@@ -324,8 +324,11 @@ def telemetry_chip(label: str, value: str, color: str = MUTED) -> str:
     )
 
 
-def page_header(step_no: int, title: str, subtitle: str = "",
+def page_header(step_no, title: str, subtitle: str = "",
                 accent: str = ORANGE) -> None:
+    # step_no=None → the standalone (non-wizard) pages, which aren't part of
+    # the 01-06 sequence: show a "+" glyph instead of a bogus "00"
+    num = "+" if step_no is None else f"{step_no:02d}"
     sub = (f'<div style="color:{MUTED};font-size:0.86rem;margin-top:3px;">{esc(subtitle)}</div>'
            if subtitle else "")
     st.markdown(
@@ -333,7 +336,7 @@ def page_header(step_no: int, title: str, subtitle: str = "",
         f'margin:0.4rem 0 1.1rem;">'
         f'<div aria-hidden="true" style="font-family:\'Barlow Condensed\',sans-serif;'
         f'font-size:2.6rem;font-weight:700;color:transparent;'
-        f'-webkit-text-stroke:1.5px {accent};line-height:0.9;">{step_no:02d}</div>'
+        f'-webkit-text-stroke:1.5px {accent};line-height:0.9;">{num}</div>'
         f'<div>'
         # real <h2> so screen readers get heading navigation
         f'<h2 style="font-family:\'Barlow Condensed\',sans-serif;font-size:1.55rem;'

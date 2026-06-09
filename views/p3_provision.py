@@ -6,7 +6,7 @@ import streamlit as st
 
 from lib.session_clients import (
     build_central_client, build_classic_client, persist_rotated_refresh_token,
-    have_classic_creds,
+    use_classic_for_moves,
 )
 from lib.styles import (
     BORDER, FAINT, MUTED, TEXT,
@@ -147,18 +147,20 @@ def render():
         elif sanitized:
             central_cfg.gw_cluster_name = sanitized
 
-    # Hybrid credential status — group create/move route through Classic on a
-    # hybrid tenant; make it obvious whether that's wired before provisioning.
+    # Hybrid credential status — group create/move route through Classic only
+    # when the operator marked the tenant hybrid AND classic creds are usable;
+    # a stale token from a previous engagement no longer flips the path.
     if central_cfg.destination == "new":
-        if have_classic_creds():
+        if use_classic_for_moves():
             st.success(f"Hybrid mode armed — groups/moves will use Classic API "
                        f"`{st.session_state.get('central_base_classic','')}`. "
                        "SSIDs/VLANs stay on New Central.")
-        else:
-            st.warning("No Classic API Gateway token registered. On a HYBRID tenant "
-                       "device-group create/move will be blocked — add the base URL + "
-                       "token in Step 1 → 'Hybrid cluster?' (the status line there must "
-                       "read ✓ token registered).")
+        elif st.session_state.get("hybrid_tenant"):
+            st.warning("Tenant is marked hybrid but no usable Classic API Gateway "
+                       "token is registered — device-group create/move will be "
+                       "blocked. Add the base URL + token in Step 1 → 'Hybrid "
+                       "cluster?' (the status line there must read ✓ token "
+                       "registered).")
 
     st.divider()
     col_back, _, col_run = st.columns([1, 3, 1])
@@ -209,15 +211,16 @@ def render():
                     return
             st.success("Authenticated with New Central")
             # hybrid clusters need the Classic API for device-group create/move
+            # — only when the tenant is explicitly marked hybrid
             classic_client = None
-            if have_classic_creds():
+            if use_classic_for_moves():
                 classic_client = build_classic_client()
                 st.caption("Hybrid mode: device groups + moves will route through "
                            "the Classic API Gateway.")
-            elif st.session_state.get("classic_access_token"):
-                st.warning("A Classic access token is set but the Classic API Gateway "
-                           "base URL is empty — set it in Step 1 → 'Hybrid cluster?' "
-                           "before provisioning, or device-group create will fail.")
+            elif st.session_state.get("hybrid_tenant"):
+                st.warning("Tenant is marked hybrid but no usable Classic token is "
+                           "registered — device-group create/move will fail. Add it "
+                           "in Step 1 → 'Hybrid cluster?' before provisioning.")
             with st.spinner("Building configuration (no APs are touched)..."):
                 results = client.provision(central_cfg, ap_serials=ap_serials,
                                            on_step=on_step, classic_client=classic_client,

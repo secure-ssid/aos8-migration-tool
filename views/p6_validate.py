@@ -39,12 +39,23 @@ def render():
 
     expected = {ap.serial.strip().upper() for ap in customer.aps if ap.serial}
     no_serial = [ap.name for ap in customer.aps if not ap.serial]
+    # Instant sources have no MC and no ap convert — conversion is driven from
+    # Central (firmware compliance set in Step 3), so the guidance must differ.
+    is_instant = getattr(customer, "source_type", "controller") == "instant"
 
-    info_banner(
-        "After running <code>ap convert</code> on the MC, each AP takes <b>10–20 minutes</b> "
-        "to upgrade and register. Re-run validation until the counts converge.",
-        color=OK,
-    )
+    if is_instant:
+        info_banner(
+            "<b>Conversion is driven from Central</b> — once the firmware compliance set "
+            "in Step 3 takes effect, each AP takes <b>10–20 minutes</b> to upgrade and "
+            "register. Re-run validation until the counts converge.",
+            color=OK,
+        )
+    else:
+        info_banner(
+            "After running <code>ap convert</code> on the MC, each AP takes <b>10–20 minutes</b> "
+            "to upgrade and register. Re-run validation until the counts converge.",
+            color=OK,
+        )
     if no_serial:
         info_banner(
             f"<b>{len(no_serial)} AP(s) have no serial number</b> from discovery and can't "
@@ -110,6 +121,10 @@ def render():
                 f"{len(migrated_online)} / {len(expected)} APs online ({pct:.0f}%). "
                 "Conversion takes 10–20 min per AP — wait and re-run validation."
             )
+        elif is_instant:
+            st.error("No migrated APs detected yet. Confirm the firmware compliance set "
+                     "in Step 3 took effect (check the VC or AP console if nothing is "
+                     "rebooting), give it ~15 minutes, then re-run validation.")
         else:
             st.error("No migrated APs detected yet. Confirm the ap convert commands ran "
                      "on the MC, give it ~15 minutes, then re-run validation.")
@@ -141,7 +156,13 @@ def render():
     section_label("Post-migration checklist")
     done = 0
     for key, label in CHECKLIST:
-        if st.checkbox(label, key=f"check_{key}"):
+        # Mirror into PLAIN session keys (chk_*) every render. Widget-key state
+        # (check_*) is garbage-collected when the widget isn't rendered (e.g.
+        # while back on the runbook), which was wiping checklist progress.
+        ticked = st.checkbox(label, value=st.session_state.get(f"chk_{key}", False),
+                             key=f"check_{key}")
+        st.session_state[f"chk_{key}"] = ticked
+        if ticked:
             done += 1
     st.markdown(
         f'<div style="margin-top:0.5rem;font-family:\'IBM Plex Mono\',monospace;'

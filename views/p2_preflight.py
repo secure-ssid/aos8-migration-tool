@@ -48,7 +48,8 @@ def _named_vlan_editor(customer, central) -> None:
                 if not any(v.id == s.vlan for v in customer.vlans):
                     customer.vlans.append(VLAN(s.vlan, tok))
                 s.vlan_raw = None
-        # re-translate, preserving fields translate() doesn't set
+        # re-translate, preserving fields translate() doesn't set (plus the
+        # cluster name, which the operator may have renamed in Step 3)
         gw_mode = "retire" if getattr(central, "gateways_retired", False) else "keep"
         new_central = translate(
             customer,
@@ -58,11 +59,16 @@ def _named_vlan_editor(customer, central) -> None:
             site_name=(central.sites[0] if central.sites else ""),
             gateway_mode=gw_mode)
         for f in ("destination", "site_address", "site_city", "site_state",
-                  "site_country", "site_zipcode", "site_timezone", "gw_serial"):
+                  "site_country", "site_zipcode", "site_timezone", "gw_serial",
+                  "gw_cluster_name"):
             setattr(new_central, f, getattr(central, f, getattr(new_central, f)))
         st.session_state["customer_config"] = customer
         st.session_state["central_config"] = new_central
         st.session_state.pop("preflight_results", None)
+        # the old config may already be provisioned — force Step 3 to re-run
+        # so the corrected VLANs actually reach Central
+        st.session_state.pop("provision_done", None)
+        st.session_state.pop("provision_results", None)
         st.success("VLAN mapping applied — re-running preflight.")
         st.rerun()
 

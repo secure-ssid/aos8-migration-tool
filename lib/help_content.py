@@ -73,8 +73,9 @@ reused, so re-running after a partial failure is safe.
 """),
     3: ("GreenLake Onboarding", """
 **What this step does** — makes the APs known to GreenLake so Central adopts
-them the moment they convert: claim (serial + wired MAC) and assign a
-subscription.
+them the moment they convert — claim (serial + wired MAC) and assign a
+subscription — then runs the **cutover**: moving the APs into their AOS 10
+device groups.
 
 - Claiming is async — the tool polls the operation, then **verifies against
   the actual workspace inventory** (the API's own result body isn't trusted).
@@ -83,7 +84,13 @@ subscription.
   `show ap database long`.
 - Subscriptions: active ones only, AP tiers listed first. Assignment targets
   only devices actually in the workspace.
-- Already claimed via CSV or the GreenLake UI? Skip — this step is optional.
+- Already claimed via CSV or the GreenLake UI? Skip the claim section — that
+  part is optional. The group move below it is **not**.
+- **Move APs into device groups** is the conversion trigger (New Central):
+  Central pushes the AOS 10 conversion, **each AP reboots and is offline
+  ~10–20 min**, then adopts into New Central — no separate `ap convert`
+  needed. It also assigns the CAMPUS_AP persona and the site. Only run it
+  inside the maintenance/cutover window.
 """),
     4: ("Runbook", """
 **What this step does** — generates the conversion procedure for *this*

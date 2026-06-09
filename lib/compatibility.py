@@ -162,18 +162,20 @@ def _check_dhcp(customer: CustomerConfig) -> list[CheckResult]:
 
 def _check_vlan_tunnel_conflict(customer: CustomerConfig,
                                 central: CentralConfig) -> list[CheckResult]:
-    tunnel_vlans = {
-        s.vlan for s in customer.ssids
-        if s.forward_mode in (ForwardMode.TUNNEL,)
-    }
-    bridge_vlans = {
-        s.vlan for s in customer.ssids
-        if s.forward_mode in (ForwardMode.BRIDGE, ForwardMode.SPLIT)
-    }
     if central.gateways_retired:
         # Everything becomes bridge mode — the tunnel/bridge port guidance
         # is replaced by the retirement check below.
         return []
+    # Gateways kept: split-tunnel SSIDs are provisioned as FULL L2 overlay
+    # (see _check_split_tunnel), so their client VLANs tunnel post-migration.
+    tunnel_vlans = {
+        s.vlan for s in customer.ssids
+        if s.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT)
+    }
+    bridge_vlans = {
+        s.vlan for s in customer.ssids
+        if s.forward_mode in (ForwardMode.BRIDGE,)
+    }
     conflicts = tunnel_vlans & bridge_vlans
     if conflicts:
         return [CheckResult(
@@ -189,7 +191,7 @@ def _check_vlan_tunnel_conflict(customer: CustomerConfig,
         return [CheckResult(
             name="Tunnel/Bridge VLAN Check",
             status=Status.WARN,
-            message=f"Tunnel-mode SSIDs use VLANs {sorted(tunnel_vlans)}. Ensure these VLANs do NOT appear on AP switch ports.",
+            message=f"Tunnel (and split-tunnel) SSIDs use VLANs {sorted(tunnel_vlans)}. Ensure these VLANs do NOT appear on AP switch ports.",
             detail="AP switch ports should be access ports on the AP management VLAN only (no tunnel data VLANs).",
         )]
     return [CheckResult(

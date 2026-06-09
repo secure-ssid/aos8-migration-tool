@@ -25,6 +25,8 @@ FIELDS = (
     "central_client_id",
     "central_secret",
     "classic_refresh_token",  # rotates; access token is intentionally NOT saved
+    "hybrid_tenant",          # hybrid-ness is a tenant property — a remembered
+                              # hybrid setup must stay armed across launches
 )
 
 # The actual credentials — at least one must be present before we write a file.
@@ -56,6 +58,10 @@ def save_from_session(session) -> None:
     render never erases a previously-saved value (e.g. the password box reads
     empty after a reload even though the secret is held in session)."""
     fresh = {k: session.get(k) for k in FIELDS if session.get(k)}
+    # hybrid_tenant=False is meaningful (the operator disarmed the gate) — the
+    # truthy filter above would otherwise leave a stale True merged in the file
+    if "hybrid_tenant" in session:
+        fresh["hybrid_tenant"] = bool(session.get("hybrid_tenant"))
     if not any(session.get(k) for k in CREDENTIAL_FIELDS):
         return  # only defaults/URLs present — nothing worth saving yet
     data = load()        # merge: keep already-saved fields not in this render

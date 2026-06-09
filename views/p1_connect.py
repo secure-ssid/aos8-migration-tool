@@ -206,6 +206,9 @@ def render():
             from lib import cleanup as _cleanup
             from lib.session_clients import (build_central_client, build_classic_client,
                                              have_classic_creds)
+            # old results are from a different run — never let them imply this
+            # click succeeded
+            st.session_state.pop("cleanup_results", None)
             nc = cl = None
             try:
                 if st.session_state.get("dest_type", "new") == "new":
@@ -219,7 +222,12 @@ def render():
                 with st.spinner("Deleting zztest-* objects..."):
                     res = _cleanup.cleanup("zztest", central=nc, classic=cl)
                 st.session_state["cleanup_results"] = res
-            st.rerun()
+                # rerun only after a real run — on auth failure the st.error
+                # above must stay visible
+                st.rerun()
+            elif st.session_state.get("dest_type", "new") != "new":
+                st.warning("No Classic credentials registered — add the access "
+                           "token (or refresh token + client id/secret) above first.")
 
         for label, ok, detail in st.session_state.get("cleanup_results", []):
             icon, col = ("✓", OK) if ok else ("✕", FAIL)
@@ -368,6 +376,11 @@ def render():
 
     # ── Discovery summary ──────────────────────────────────────────────────
     customer_cfg = st.session_state.get("customer_config")
+    # same mismatch guard as the top of the page — this re-read must not
+    # resurrect a discovery from the other source platform (it would render,
+    # feed the gateway-strategy gate, and satisfy Continue)
+    if customer_cfg and getattr(customer_cfg, "source_type", "controller") != source_type:
+        customer_cfg = None
     if customer_cfg:
         st.divider()
         section_label("Discovery")
@@ -508,7 +521,9 @@ def render():
             help="Kept in this browser session only — re-enter after a restart",
         )
         if secret_input:
-            st.session_state["central_secret"] = secret_input
+            # strip like every other cred field — pasted trailing whitespace
+            # fails auth with no visible reason
+            st.session_state["central_secret"] = secret_input.strip()
             have_secret = True
 
         # Hybrid clusters block New Central device-group create/move — those
@@ -537,23 +552,44 @@ def render():
             if _cb.strip():
                 st.session_state["central_base_classic"] = _cb.strip()
             hh1, hh2 = st.columns(2)
+            # keyed so "Forget token" can clear the input text itself (a
+            # key-less password box keeps its text across the rerun and would
+            # re-install the token it was asked to forget)
             htok = hh1.text_input(
                 "Classic access token", type="password",
+                key="p1_classic_token_input",
                 placeholder="•••••••• (saved)" if st.session_state.get("classic_access_token") else "",
                 help="API Gateway → System Apps & Tokens → Generate Token",
             )
             if htok:
+                # a NEWLY entered token is an explicit hybrid signal — arm the
+                # gate once (the checkbox below can disarm it; comparing first
+                # keeps text sitting in the box from re-arming every rerun)
+                if htok.strip() != st.session_state.get("classic_access_token"):
+                    st.session_state["hybrid_tenant"] = True
                 st.session_state["classic_access_token"] = htok.strip()
             href = hh2.text_input(
                 "Classic refresh token (optional)", type="password",
+                key="p1_classic_refresh_input",
             )
             if href:
                 st.session_state["classic_refresh_token"] = href.strip()
 
+            # Classic routing is an explicit choice, not a side effect of a
+            # token lingering in the session from a previous engagement.
+            st.checkbox(
+                "This tenant is hybrid — route group creates/moves via the Classic API",
+                key="hybrid_tenant",
+                help="Auto-checked when you enter a token here. Untick to keep "
+                     "provisioning and AP moves entirely on New Central without "
+                     "forgetting the token.")
+
             # visible status so it's never ambiguous whether the creds stuck
             _have_tok = bool(st.session_state.get("classic_access_token"))
+            _have_ref = bool(st.session_state.get("classic_refresh_token"))
             _base = st.session_state.get("central_base_classic", "")
-            st.markdown(
+            sc1, sc2 = st.columns([3, 1])
+            sc1.markdown(
                 f'<div style="font-size:12px;font-family:\'IBM Plex Mono\',monospace;'
                 f'margin-top:0.4rem;">'
                 f'<span style="color:{OK if _have_tok else FAIL};">'
@@ -561,6 +597,22 @@ def render():
                 f'<span style="color:{FAINT};">  ·  gateway: {esc(_base)}</span></div>',
                 unsafe_allow_html=True,
             )
+            if (_have_tok or _have_ref) and sc2.button(
+                    "Forget token", use_container_width=True,
+                    help="Clears the Classic access/refresh token from this "
+                         "session and from the saved-credentials file."):
+                for _k in ("classic_access_token", "classic_refresh_token"):
+                    st.session_state.pop(_k, None)
+                # the hybrid checkbox + token inputs were already instantiated
+                # this run, so their keys can't be assigned here — app.py
+                # finishes the disarm/clearing at the top of the next run
+                st.session_state["_forget_classic"] = True
+                # rewrite the credstore without the classic fields (save merges,
+                # so clear first)
+                credstore.clear()
+                if st.session_state.get("remember_creds"):
+                    credstore.save_from_session(st.session_state)
+                st.rerun()
     else:
         c1, c2 = st.columns([3, 1])
         central_base = c1.text_input(
@@ -602,7 +654,7 @@ def render():
             placeholder="•••••••• (saved this session)" if have_secret else "",
         )
         if secret_input:
-            st.session_state["central_secret"] = secret_input
+            st.session_state["central_secret"] = secret_input.strip()
             have_secret = True
 
     # Persist (or forget) the destination creds per the Remember toggle. Runs
@@ -637,7 +689,10 @@ def render():
                     st.session_state.get("central_secret", ""))
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
-                if st.session_state.get("classic_access_token"):
+                from lib.session_clients import have_classic_creds
+                # refresh-token + id/secret (the remembered-creds shape) is a
+                # probe-able config too — the client re-mints on the first 401
+                if have_classic_creds():
                     rows += api_probe.probe_classic(
                         st.session_state.get("central_base_classic", ""),
                         st.session_state.get("classic_access_token", ""),
@@ -729,11 +784,19 @@ def render():
             # GLP results) — otherwise the wizard reports the old destination
             # as provisioned and never provisions the new one.
             prev = st.session_state.get("central_config")
+
+            def _group_sig(cfg):
+                # group names + firmware drive provisioning too — a changed
+                # target firmware or renamed groups must invalidate as well
+                return [(g.name, g.firmware_version)
+                        for g in getattr(cfg, "groups", [])]
+
             if prev is not None and (
                 getattr(prev, "destination", None) != central_cfg.destination
                 or getattr(prev, "gateways_retired", None) != central_cfg.gateways_retired
                 or getattr(prev, "gw_cluster_name", None) != central_cfg.gw_cluster_name
                 or getattr(prev, "sites", None) != central_cfg.sites
+                or _group_sig(prev) != _group_sig(central_cfg)
             ):
                 st.session_state["_reset_downstream"]()
                 st.session_state.pop("glp_use_central_creds", None)
