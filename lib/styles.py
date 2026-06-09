@@ -571,9 +571,14 @@ def sidebar_summary() -> None:
                 f'gap:4px;align-items:flex-start;">{"".join(badges)}</div>',
                 unsafe_allow_html=True,
             )
+        if st.session_state.get("remember_creds"):
+            note = ('DEST API CREDS SAVED ON<br>THIS MACHINE (0600)<br>'
+                    '~/.aos8-migration · SOURCE<br>SECRETS NEVER WRITTEN')
+        else:
+            note = 'CREDENTIALS STAY IN THIS<br>SESSION — NOTHING IS<br>WRITTEN TO DISK'
         st.markdown(
             f'<div style="margin-top:1.2rem;font-family:\'IBM Plex Mono\',monospace;'
             f'font-size:9px;color:{FAINT};letter-spacing:0.1em;line-height:1.8;">'
-            f'CREDENTIALS STAY IN THIS<br>SESSION — NOTHING IS<br>WRITTEN TO DISK</div>',
+            f'{note}</div>',
             unsafe_allow_html=True,
         )

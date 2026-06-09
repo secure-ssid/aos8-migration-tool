@@ -15,7 +15,7 @@ from lib.styles import (
     page_header, section_label, badge, ssid_tag, esc, mono_row, mono_caption,
     telemetry_chip,
 )
-from lib import api_probe
+from lib import api_probe, credstore
 
 PASTE_COMMANDS = [
     ("running_config", "show running-config",
@@ -68,6 +68,17 @@ def _store_discovery(cfg) -> None:
 def render():
     page_header(1, "Connect & Discover",
                 "Pull the AOS 8 configuration, then point at the destination Central tenant")
+
+    # Auto-fill destination creds saved on this machine (opt-in, once per
+    # session). setdefault so we never clobber anything already typed; the
+    # presence of a saved file means the operator left "Remember" on.
+    if not st.session_state.get("_creds_loaded"):
+        st.session_state["_creds_loaded"] = True
+        saved = credstore.load()
+        for k, v in saved.items():
+            st.session_state.setdefault(k, v)
+        if saved:
+            st.session_state.setdefault("remember_creds", True)
 
     # ── Customer ───────────────────────────────────────────────────────────
     section_label("Customer")
@@ -436,6 +447,24 @@ def render():
     have_secret = bool(st.session_state.get("central_secret"))
     have_token = bool(st.session_state.get("classic_access_token"))
 
+    # ── Optional: persist destination creds on this machine (opt-in) ───────
+    remember = st.checkbox(
+        "💾 Remember these API credentials on this machine",
+        key="remember_creds",
+        help="Auto-fills the base URLs, API client ID/secret and Classic "
+             "refresh token next launch. Saved to "
+             "~/.aos8-migration/credentials.json (file perms 0600, outside the "
+             "repo so it's never committed). Plaintext on disk — only enable "
+             "on a machine you trust. Uncheck to delete the file.",
+    )
+    if remember:
+        st.markdown(
+            f'<div style="font-size:11.5px;color:{FAINT};margin:-0.4rem 0 0.6rem;">'
+            f'Auto-filled from <code>~/.aos8-migration/credentials.json</code> '
+            f'(0600, never committed). The short-lived Classic <i>access</i> '
+            f'token is never saved — re-mint it from the refresh token. '
+            f'Uncheck to forget.</div>', unsafe_allow_html=True)
+
     if dest_type == "new":
         c1, c2 = st.columns([3, 1])
         central_base = c1.text_input(
@@ -444,6 +473,8 @@ def render():
             help="New Central regional base, e.g. https://us4.api.central.arubanetworks.com — "
                  "find your region in GreenLake → API client details",
         )
+        if central_base.strip():  # persist as-you-go (survives nav / Remember)
+            st.session_state["central_base"] = central_base.strip()
         aos10_fw = c2.text_input("Target AOS 10", value=st.session_state.get("aos10_fw", "10.7.0.0"))
 
         c1b, c2b = st.columns(2)
@@ -452,6 +483,8 @@ def render():
             value=st.session_state.get("central_client_id", ""),
             help="GreenLake → Manage → API → Create client credentials (Aruba Central service)",
         )
+        if central_client_id.strip():
+            st.session_state["central_client_id"] = central_client_id.strip()
         secret_input = c2b.text_input(
             "API client secret", type="password",
             placeholder="•••••••• (saved this session)" if have_secret else "",
@@ -545,6 +578,8 @@ def render():
             "API client ID (needed for refresh)",
             value=st.session_state.get("central_client_id", ""),
         )
+        if central_client_id.strip():
+            st.session_state["central_client_id"] = central_client_id.strip()
         secret_input = c2b.text_input(
             "API client secret (needed for refresh)", type="password",
             placeholder="•••••••• (saved this session)" if have_secret else "",
@@ -552,6 +587,14 @@ def render():
         if secret_input:
             st.session_state["central_secret"] = secret_input
             have_secret = True
+
+    # Persist (or forget) the destination creds per the Remember toggle. Runs
+    # after every cred field above is captured into session_state, so the file
+    # tracks the latest values as you go.
+    if st.session_state.get("remember_creds"):
+        credstore.save_from_session(st.session_state)
+    elif credstore.exists():
+        credstore.clear()
 
     fw_valid = bool(_FW_RE.match(aos10_fw.strip()))
     if aos10_fw and not fw_valid:
