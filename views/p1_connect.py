@@ -45,6 +45,20 @@ PASTE_COMMANDS_INSTANT = [
 
 _FW_RE = re.compile(r"^\d+\.\d+(\.\d+){1,2}$")
 
+# Source-platform radio is bound to a session-state key (see render()), so any
+# programmatic change — e.g. "Load test customer" picking a controller vs an
+# instant scenario — actually moves the control. A no-key radio keeps its
+# frontend value across reruns and silently ignores a recomputed `index=`,
+# which is why loading a second test of a different platform looked like it
+# "didn't switch" (and then wiped the freshly-loaded config).
+SOURCE_OPTS = ["Mobility Controller (MM / MD)",
+               "Instant cluster (IAP virtual controller)"]
+
+
+def _source_label(source_type: str) -> str:
+    """Canonical source_type → radio label."""
+    return SOURCE_OPTS[1] if source_type == "instant" else SOURCE_OPTS[0]
+
 
 def _store_discovery(cfg) -> None:
     st.session_state["customer_config"] = cfg
@@ -118,6 +132,9 @@ def render():
             key = scenario.split(" ")[0]
             cfg = testdata.make_test_config(key)
             st.session_state["source_type"] = cfg.source_type
+            # move the bound radio too, or it stays on the previous platform
+            # and the post-load source-type check wipes this config
+            st.session_state["source_radio"] = _source_label(cfg.source_type)
             st.session_state["customer_name"] = "zztest-lab"
             st.session_state["mc_ip"] = cfg.mc_ip
             st.session_state["customer_config"] = cfg
@@ -177,14 +194,20 @@ def render():
                 f'</div>', unsafe_allow_html=True)
 
     section_label("Source — AOS 8 platform")
-    source_type = st.radio(
+    # Seed the bound widget key once from the canonical source_type, then let
+    # the widget own it. Binding (key=) is what makes the "Load test customer"
+    # button able to switch platforms — see SOURCE_OPTS note above.
+    if "source_radio" not in st.session_state:
+        st.session_state["source_radio"] = _source_label(
+            st.session_state.get("source_type", "controller"))
+    source_label = st.radio(
         "Source platform",
-        ["Mobility Controller (MM / MD)", "Instant cluster (IAP virtual controller)"],
+        SOURCE_OPTS,
         horizontal=True,
-        index=0 if st.session_state.get("source_type", "controller") == "controller" else 1,
+        key="source_radio",
         label_visibility="collapsed",
     )
-    source_type = "instant" if "Instant" in source_type else "controller"
+    source_type = "instant" if "Instant" in source_label else "controller"
     prev_source = st.session_state.get("source_type")
     st.session_state["source_type"] = source_type
     if prev_source is not None and prev_source != source_type:
