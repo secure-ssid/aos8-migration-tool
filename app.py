@@ -18,15 +18,20 @@ if "step" not in st.session_state:
     st.session_state.step = 0
 st.session_state.step = max(0, min(st.session_state.step, len(STEPS) - 1))
 
+# Mode is read from the prior render (the sidebar toggle below sets it);
+# set_page_config must be the first st command, so the radio can't precede it.
+app_mode = st.session_state.get("app_mode", "wizard")
+
 # The GreenLake step lives in HPE territory — the whole accent system
 # (title bar, buttons, labels, stepper) migrates from Aruba orange to
-# HPE green while the wizard is there.
-on_greenlake = STEPS[st.session_state.step][0] == "4_greenlake"
+# HPE green while the wizard is there (and for the Add-devices mode).
+on_greenlake = app_mode == "wizard" and STEPS[st.session_state.step][0] == "4_greenlake"
 
 st.set_page_config(
-    page_title=("HPE GreenLake Onboarding · Migration Console" if on_greenlake
+    page_title=("Add Devices · Migration Console" if app_mode == "add_devices"
+                else "HPE GreenLake Onboarding · Migration Console" if on_greenlake
                 else "AOS 8 → Central Migration Console"),
-    page_icon="🌿" if on_greenlake else "📡",
+    page_icon=("➕" if app_mode == "add_devices" else "🌿" if on_greenlake else "📡"),
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -35,7 +40,7 @@ from lib.styles import inject, brand_header, step_progress, sidebar_summary, \
     ORANGE, HPE_GREEN
 from lib.help_content import render_help
 
-inject(accent="green" if on_greenlake else "aruba")
+inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba")
 
 
 def reset_downstream_state() -> None:
@@ -50,29 +55,43 @@ def reset_downstream_state() -> None:
 
 st.session_state["_reset_downstream"] = reset_downstream_state
 
-brand_header(accent=HPE_GREEN if on_greenlake else ORANGE)
-step_progress(st.session_state.step, STEPS)
+# ── Mode toggle ──────────────────────────────────────────────────────────────
+with st.sidebar:
+    _mode_label = st.radio(
+        "Mode",
+        ["Full migration", "Add devices only"],
+        index=0 if app_mode == "wizard" else 1,
+        key="app_mode_radio",
+        help="Add devices only: onboard APs into groups that already exist in "
+             "the tenant — claim → assign → move → persona, skipping "
+             "discovery/config.",
+    )
+app_mode = "add_devices" if "Add" in _mode_label else "wizard"
+st.session_state["app_mode"] = app_mode
 
-# ── Route to current step ────────────────────────────────────────────────────
-current = STEPS[st.session_state.step][0]
+brand_header(accent=HPE_GREEN if (on_greenlake or app_mode == "add_devices") else ORANGE)
 
-if current == "1_connect":
-    import views.p1_connect as page
-elif current == "2_preflight":
-    import views.p2_preflight as page
-elif current == "3_provision":
-    import views.p3_provision as page
-elif current == "4_greenlake":
-    import views.p4_greenlake as page
-elif current == "5_runbook":
-    import views.p5_runbook as page
+if app_mode == "add_devices":
+    import views.add_devices as page
+    page.render()
 else:
-    import views.p6_validate as page
-
-page.render()
-
-st.divider()
-render_help(st.session_state.step)
+    step_progress(st.session_state.step, STEPS)
+    current = STEPS[st.session_state.step][0]
+    if current == "1_connect":
+        import views.p1_connect as page
+    elif current == "2_preflight":
+        import views.p2_preflight as page
+    elif current == "3_provision":
+        import views.p3_provision as page
+    elif current == "4_greenlake":
+        import views.p4_greenlake as page
+    elif current == "5_runbook":
+        import views.p5_runbook as page
+    else:
+        import views.p6_validate as page
+    page.render()
+    st.divider()
+    render_help(st.session_state.step)
 
 # Sidebar renders last so it reflects state changes made during this run
 sidebar_summary()
