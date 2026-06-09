@@ -119,13 +119,14 @@ def render():
             unsafe_allow_html=True,
         )
         tcol1, tcol2 = st.columns([2, 1])
-        # key → label. Tag each label with its source platform: the selectbox
-        # defaults to iap-full and the Mobility Controller scenarios are named
-        # "bridge"/"mixed", so without the tag a controller test looked absent.
+        # key → label, platform-tagged. Order is the dropdown order: Mobility
+        # Controller scenarios first (mixed is the default — index 0), Instant
+        # after. The tag matters because the scenario names alone ("mixed"/
+        # "bridge") don't say which platform they belong to.
         scenarios = {
-            "iap-full": "Instant · iap-full — 2 zones→groups, enterprise+PSK+open, VLANs, RADIUS (builds everything, no gateways)",
-            "bridge":   "Mobility Controller · bridge — single group, all bridge (clean New-Central case)",
             "mixed":    "Mobility Controller · mixed — 2 groups, tunnel+bridge, L2 cluster (gateway/overlay)",
+            "bridge":   "Mobility Controller · bridge — single group, all bridge (clean New-Central case)",
+            "iap-full": "Instant · iap-full — 2 zones→groups, enterprise+PSK+open, VLANs, RADIUS (builds everything, no gateways)",
             "instant":  "Instant · instant — IAP cluster, single bridge SSID (minimal)",
         }
         key = tcol1.selectbox(
