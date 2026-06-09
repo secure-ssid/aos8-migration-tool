@@ -896,11 +896,17 @@ class CentralClient:
                      lambda: self.create_server_group(
                          radius_group, [s.name for s in cc.radius_servers]))
 
-            # Gateway cluster lives in its own device group (MOBILITY_GW persona)
+            # Gateway cluster lives in its own device group (MOBILITY_GW
+            # persona). The group MUST allow Gateways (include_gateways=True) —
+            # on a hybrid tenant a Classic group defaults to AccessPoints-only,
+            # and a MOBILITY_GW gateway-cluster can't anchor to an AP-only
+            # scope (the create-cluster call is rejected), which left only an
+            # empty "<cluster>-gws" AP group behind and no actual cluster.
             if cc.gw_cluster_name:
                 gw_group = f"{cc.gw_cluster_name}-gws"
                 step(f"Create gateway device group: {gw_group}",
-                     lambda: gw_scope.update(id=_make_group(gw_group, None)))
+                     lambda: gw_scope.update(
+                         id=_make_group(gw_group, None, include_gateways=True)))
                 if gw_scope.get("id"):
                     step(f"Create GW cluster: {cc.gw_cluster_name}",
                          lambda: self.create_gw_cluster(cc.gw_cluster_name, gw_scope["id"]))
