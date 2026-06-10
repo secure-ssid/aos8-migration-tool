@@ -32,3 +32,9 @@ ENV/
 # UI audit artifacts
 audit-*.png
 step*.png
+
+# local TLS material from lab testing — never commit
+aruba.crt
+aruba.key
+*.pem
+*.key

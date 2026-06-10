@@ -64,6 +64,7 @@ class AOS8Client:
         self.config_path = config_path
         self.timeout = timeout
         self.uidaruba: Optional[str] = None
+        self.pull_method = "object-api"  # or "showcommand" after a fallback pull
         self.session = requests.Session()
         self.session.verify = False
 
@@ -147,6 +148,80 @@ class AOS8Client:
         if isinstance(ref, dict):
             return str(ref.get("profile-name", "") or "")
         return str(ref or "")
+
+    # ─────────────────── Config-node discovery ───────────────────
+
+    _DEFAULT_GROUPS = ("default", "default-campus-ap-group", "NoAuthApGroup")
+
+    def list_config_nodes(self) -> list[str]:
+        """Node paths from the configuration hierarchy (MM only; best-effort —
+        returns [] on standalone controllers / managed devices)."""
+        try:
+            resp = self.session.get(
+                f"{self.base}{CONFIG_PATH_PREFIX}/object/node_hierarchy",
+                params={"UIDARUBA": self.uidaruba},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            tree = resp.json()
+        except Exception:
+            return []
+        if isinstance(tree.get("_data"), dict):
+            tree = tree["_data"]
+        if isinstance(tree.get("node_hierarchy"), dict):
+            tree = tree["node_hierarchy"]
+        paths: list[str] = []
+
+        def walk(node, prefix):
+            if not isinstance(node, dict):
+                return
+            name = str(node.get("name", "")).strip("/")
+            path = f"{prefix.rstrip('/')}/{name}" if name else prefix
+            if path and path != "/":
+                paths.append(path)
+            for child in (node.get("childnodes") or node.get("children") or []):
+                walk(child, path or "/")
+
+        walk(tree, "")
+        # deepest first — real config lives at leaf nodes, not the /md root
+        paths.sort(key=lambda p: p.count("/"), reverse=True)
+        return paths
+
+    def _node_has_config(self) -> bool:
+        """True when the CURRENT config_path holds real (non-default) AP
+        groups or virtual APs."""
+        try:
+            for item in self._get_object("ap_group"):
+                if self._field(item, "profile-name") not in self._DEFAULT_GROUPS:
+                    return True
+            for item in self._get_object("wlan_virtual_ap"):
+                if self._field(item, "profile-name") not in ("default",):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def find_config_node(self) -> Optional[str]:
+        """When the configured node has no config objects — typical when the
+        operator points at a Managed Device, or at the /md root while the
+        config lives on a child node — probe the hierarchy + the standard
+        fallbacks and return the first node that actually holds config.
+        Leaves config_path untouched; returns None when nothing is found."""
+        candidates = list(self.list_config_nodes())
+        for p in ("/mm/mynode", "/mm", "/md"):
+            if p not in candidates:
+                candidates.append(p)
+        original = self.config_path
+        try:
+            for path in candidates:
+                if path == original:
+                    continue
+                self.config_path = path
+                if self._node_has_config():
+                    return path
+            return None
+        finally:
+            self.config_path = original
 
     # ─────────────────── Discovery ───────────────────
 
@@ -262,6 +337,8 @@ class AOS8Client:
         groups = []
         for item in self._get_object("server_group_prof"):
             name = self._field(item, "profile-name")
+            if name in ("default", "internal"):
+                continue  # built-in server groups — noise, not customer config
             servers = item.get("auth_server", [])
             if isinstance(servers, dict):
                 servers = [servers]
@@ -345,19 +422,20 @@ class AOS8Client:
 
     # ─────────────────── Full pull ───────────────────
 
-    def pull_config(self) -> CustomerConfig:
-        fw = self.get_mc_firmware()
-        mc_ip, ctrl_vlan = self.get_controller_ip()
+    def _pull_objects(self):
+        """The config_path-sensitive object reads (show commands run box-wide
+        and don't care about the node)."""
         ap_groups, vap_bindings = self.get_ap_groups()
         ssids = self.get_ssids()
         vlans = self.get_vlans()
         radius = self.get_radius_servers()
         sgroups = self.get_server_groups()
-        aps = self.get_active_aps()
-        cluster = self.get_cluster_info()
+        return ap_groups, vap_bindings, ssids, vlans, radius, sgroups
 
-        # Attach APs to their groups; create groups for any AP whose group
-        # wasn't in the configured list so no AP is dropped from provisioning.
+    @staticmethod
+    def _attach_aps(ap_groups: list[APGroup], aps: list[AP]) -> None:
+        """Attach APs to their groups; create groups for any AP whose group
+        wasn't in the configured list so no AP is dropped from provisioning."""
         by_name = {g.name: g for g in ap_groups}
         for ap in aps:
             grp = by_name.get(ap.ap_group)
@@ -370,6 +448,69 @@ class AOS8Client:
                     grp.ap_serials.append(ap.serial)
                 if ap.model and ap.model not in grp.ap_models:
                     grp.ap_models.append(ap.model)
+
+    def pull_config_via_show(self) -> CustomerConfig:
+        """Fallback discovery from the same CLI outputs paste mode parses,
+        fetched over the API's showcommand endpoint — show commands run on
+        any box (conductor, managed device, standalone) regardless of
+        config_path, unlike the configuration-object API."""
+        from .aos8_parser import parse_customer_config
+        outputs = {}
+        for key, cmd in (
+            ("running_config", "show running-config"),
+            ("ap_group", "show ap-group"),
+            ("ap_database", "show ap database long"),
+            ("aaa_auth_server", "show aaa authentication-server radius"),
+            ("lc_cluster", "show lc-cluster group-membership"),
+            ("controller_ip", "show controller-ip"),
+            ("version", "show version"),
+        ):
+            try:
+                outputs[key] = self._show_text(cmd)
+            except Exception:
+                outputs[key] = ""
+        return parse_customer_config(outputs, mc_ip=self.ip)
+
+    def pull_config(self) -> CustomerConfig:
+        self.pull_method = "object-api"
+        fw = self.get_mc_firmware()
+        mc_ip, ctrl_vlan = self.get_controller_ip()
+        ap_groups, vap_bindings, ssids, vlans, radius, sgroups = self._pull_objects()
+        if not ap_groups and not ssids:
+            # The node answered but holds nothing — wrong config_path for this
+            # box (e.g. /md default against a Managed Device, or config defined
+            # on a child node). Find the node that has the config and re-pull;
+            # self.config_path then tells the caller what was used.
+            detected = self.find_config_node()
+            if detected:
+                self.config_path = detected
+                ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
+                    self._pull_objects()
+        if not ap_groups and not ssids:
+            # Last resort: the object API exposes no WLAN config on this box
+            # (managed devices often don't) — parse the CLI show output
+            # instead, exactly like paste mode.
+            cfg = self.pull_config_via_show()
+            if cfg.ap_groups or cfg.ssids:
+                self.pull_method = "showcommand"
+                # the structured AP-database read is more reliable than the
+                # text table; backfill if the text parse came up empty
+                if not cfg.aps:
+                    try:
+                        cfg.aps = self.get_active_aps()
+                    except Exception:
+                        cfg.aps = []
+                    self._attach_aps(cfg.ap_groups, cfg.aps)
+                if not cfg.server_groups:
+                    cfg.server_groups = sgroups
+                if not cfg.cluster:
+                    cfg.cluster = self.get_cluster_info()
+                if cfg.mc_firmware in ("", "unknown"):
+                    cfg.mc_firmware = fw
+                return cfg
+        aps = self.get_active_aps()
+        cluster = self.get_cluster_info()
+        self._attach_aps(ap_groups, aps)
 
         # Per-group SSID membership from the discovered virtual-ap bindings;
         # fall back to "all SSIDs" only when a group has no binding data.

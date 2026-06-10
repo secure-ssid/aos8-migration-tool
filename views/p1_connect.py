@@ -330,14 +330,35 @@ def render():
                      disabled=not (mc_ip and mc_user and mc_pass)):
             with st.spinner(f"Connecting to {mc_ip} ..."):
                 try:
+                    requested_path = config_path.strip() or "/md"
                     client = AOS8Client(mc_ip, mc_user, mc_pass,
-                                        config_path=config_path.strip() or "/md")
+                                        config_path=requested_path)
                     client.connect()
                     customer_cfg = client.pull_config()
+                    # pull_config may auto-detect the real config node when the
+                    # requested one is empty — persist what was actually used
                     st.session_state.update({"mc_ip": mc_ip, "mc_user": mc_user,
-                                             "mc_config_path": config_path, "mc_mode": "api"})
+                                             "mc_config_path": client.config_path,
+                                             "mc_mode": "api"})
                     _store_discovery(customer_cfg)
                     st.success(f"Connected to {mc_ip} — configuration pulled via API")
+                    if getattr(client, "pull_method", "") == "showcommand":
+                        st.info("The configuration-object API exposes no WLAN config "
+                                "on this box (typical for a Managed Device) — pulled "
+                                "via CLI show-commands over the API instead, the same "
+                                "data paste mode parses.")
+                    elif client.config_path != requested_path:
+                        st.info(f"No config at node `{requested_path}` — found it at "
+                                f"`{client.config_path}` (auto-detected and saved to "
+                                "Advanced — API options).")
+                    if not customer_cfg.ap_groups and not customer_cfg.ssids:
+                        st.warning(
+                            "Connected, but no AP groups or SSIDs exist on any config "
+                            "node this box exposes. If this is a **Managed Device**, "
+                            "pull from the **Mobility Conductor** instead — or set the "
+                            "exact node in *Advanced — API options* (conductor: "
+                            "`/md/<node>`; standalone controller: `/mm/mynode`). "
+                            "Paste mode works on any box.")
                 except AOS8APIError as e:
                     st.error(f"AOS 8 API error: {e}")
                     st.info("If port 4343 is firewalled or the API is disabled, "
