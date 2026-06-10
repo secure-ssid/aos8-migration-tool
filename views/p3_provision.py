@@ -17,7 +17,7 @@ from lib.styles import (
 def render():
     central_cfg_hdr = st.session_state.get("central_config")
     dest = getattr(central_cfg_hdr, "destination", "new") if central_cfg_hdr else "new"
-    page_header(3, "Provision Central",
+    page_header(3, "Build Config",
                 "Create the site, AOS 10 groups, WLANs and firmware compliance in classic Central"
                 if dest == "classic" else
                 "Create the site, device groups, VLANs, SSIDs and gateway cluster in New Central")

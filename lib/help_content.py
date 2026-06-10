@@ -55,7 +55,7 @@ HELP = {
   deliberately phasing (e.g. provisioning Central now, refreshing AP-2xx
   hardware later). The blockers don't go away — plan for them.
 """),
-    2: ("Provision Central", """
+    2: ("Build Config", """
 **What this step does** — writes the target design into the Central tenant.
 Steps are idempotent: existing sites/groups/WLANs with matching names are
 reused, so re-running after a partial failure is safe.
@@ -71,7 +71,7 @@ reused, so re-running after a partial failure is safe.
 - Every failure shows per step with the raw API error — nothing is silently
   skipped.
 """),
-    3: ("GreenLake Onboarding", """
+    3: ("Onboard APs (GreenLake)", """
 **What this step does** — makes the APs known to GreenLake so Central adopts
 them the moment they convert — claim (serial + wired MAC) and assign a
 subscription — then runs the **cutover**: moving the APs into their AOS 10

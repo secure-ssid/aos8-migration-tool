@@ -65,7 +65,7 @@ def _client() -> GLPClient:
 
 
 def render():
-    page_header(4, "GreenLake Onboarding",
+    page_header(4, "Onboard APs",
                 "Claim the APs into the GLP workspace and assign subscriptions before conversion",
                 accent=HPE_GREEN)
 
@@ -375,26 +375,27 @@ def render():
                        "APs to the Central application + region in the GreenLake UI, "
                        "or re-run Check workspace.")
         else:
-            ai = st.selectbox(
+            # options are the objects themselves — positional indexes go stale
+            # when a re-run of Check workspace reorders the list
+            app_pick = st.selectbox(
                 "Central application instance (region)",
-                options=range(len(sms)),
-                format_func=lambda i: (
-                    f"{'✓ ' if sms[i].get('verified') else ''}{sms[i]['name']} · "
-                    f"{sms[i]['region'] or 'region?'}"
-                    + (" — verified from an assigned device" if sms[i].get('verified') else "")),
+                options=sms,
+                format_func=lambda m: (
+                    f"{'✓ ' if m.get('verified') else ''}{m['name']} · "
+                    f"{m['region'] or 'region?'}"
+                    + (" — verified from an assigned device" if m.get('verified') else "")),
                 help="Pick the ✓ option (read off a device GreenLake already "
                      "assigned — guaranteed-valid application id)")
-            app_id, region = sms[ai]["id"], sms[ai]["region"]
+            app_id, region = app_pick["id"], app_pick["region"]
 
         if not active:
             st.warning("No active subscriptions found — add subscription keys in "
                        "GreenLake before APs can be managed by Central.")
         else:
             subs = active
-            choice = st.selectbox("Subscription to apply to all claimed APs",
-                                  options=range(len(subs)),
-                                  format_func=lambda i: _label(subs[i]),
-                                  help="Active subscriptions only; AP subscriptions listed first")
+            sub_pick = st.selectbox("Subscription to apply to all claimed APs",
+                                    options=subs, format_func=_label,
+                                    help="Active subscriptions only; AP subscriptions listed first")
             claim_ok = {str(s).upper()
                         for s in (st.session_state.get("glp_claim_result") or {}).get("ok", [])}
             in_workspace = claim_ok | existing
@@ -406,8 +407,7 @@ def render():
             ready = bool(assign_serials and app_id and region)
             if st.button(f"Assign {len(assign_serials)} APs to Central + subscription",
                          type="primary", disabled=not ready):
-                sub = subs[choice]
-                key_or_id = sub.get("id") or sub.get("key")
+                key_or_id = sub_pick.get("id") or sub_pick.get("key")
                 try:
                     client = _client()
                     with st.spinner("Authenticating..."):

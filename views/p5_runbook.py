@@ -27,7 +27,7 @@ def render():
         return
 
     if not st.session_state.get("provision_done"):
-        st.warning("Complete **Step 3 — Provision Central** before running ap convert commands. "
+        st.warning("Complete **Step 3 — Build Config** before running ap convert commands. "
                    "Converted APs look for their config in Central — if it isn't there yet, "
                    "they come up with nothing to broadcast.")
         col_back, _ = st.columns([1, 5])
