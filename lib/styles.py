@@ -147,6 +147,11 @@ h1, h2, h3 {{ color: {TEXT} !important; }}
     letter-spacing: 0.04em !important;
 }}
 
+/* hide Streamlit's "Press Enter to apply" hint — redundant with placeholder */
+[data-testid="InputInstructions"] {{
+    display: none !important;
+}}
+
 /* ── Metrics ── */
 [data-testid="stMetric"] {{
     background: linear-gradient(180deg, {SURFACE} 0%, {SURFACE_2} 100%) !important;
@@ -196,21 +201,39 @@ h1, h2, h3 {{ color: {TEXT} !important; }}
 
 /* ── Tabs ── */
 .stTabs [data-baseweb="tab-list"] {{
-    gap: 2px;
-    background: {SURFACE_2};
-    border-radius: 8px;
-    padding: 3px;
-    border: 1px solid {BORDER};
+    gap: 8px;
+    background: transparent;
+    border-radius: 0;
+    padding: 0;
+    border: none;
+    border-bottom: 2px solid {BORDER};
 }}
 .stTabs [data-baseweb="tab"] {{
-    border-radius: 6px;
-    color: {MUTED};
-    font-weight: 600;
-    font-size: 13px;
+    border-radius: 0;
+    background: transparent !important;
+    color: {MUTED} !important;
+    font-weight: 700 !important;
+    font-size: 16px !important;
+    letter-spacing: 0.02em !important;
+    cursor: pointer;
+    padding: 10px 20px !important;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}}
+.stTabs [data-baseweb="tab"] p {{
+    font-weight: 700 !important;
+    font-size: 16px !important;
+    color: inherit !important;
 }}
 .stTabs [aria-selected="true"] {{
-    background: {SURFACE} !important;
+    background: transparent !important;
     color: {accent} !important;
+    border-bottom: 3px solid {accent} !important;
+}}
+.stTabs [aria-selected="false"]:hover {{
+    color: {TEXT} !important;
+    border-bottom: 3px solid {BORDER_HI} !important;
 }}
 
 /* ── Radio / checkbox ── */

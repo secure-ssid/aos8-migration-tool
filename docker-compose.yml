@@ -23,7 +23,7 @@ services:
   app:
     build: .
     ports:
-      - "127.0.0.1:8501:8501"   # localhost only — Caddy fronts HTTPS
+      - "8501:8501"   # externally reachable — Caddy on separate host fronts HTTPS
     environment:
       # Simplest multi-user: one shared gate password (no registration, no email).
       AOS8_AUTH_MODE: "${AOS8_AUTH_MODE:-password}"

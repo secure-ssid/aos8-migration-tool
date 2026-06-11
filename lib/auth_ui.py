@@ -106,14 +106,17 @@ def _login_register() -> None:
 
 
 def _password_screen() -> None:
-    pw = st.text_input("Access password", type="password", key="app_pw")
-    if st.button("Enter", type="primary", key="app_pw_btn"):
+    error_slot = st.empty()
+    pw = st.text_input("Access password", type="password",
+                       placeholder="Enter password and press Enter",
+                       key="app_pw")
+    if st.button("Unlock", type="primary", key="app_pw_btn"):
         if identity.check_app_password(pw):
             st.session_state["_authenticated"] = True
             st.session_state["_auth_user"] = identity.SHARED_USER
             st.rerun()
         else:
-            st.error("Incorrect password.")
+            error_slot.error("Incorrect password — try again.")
 
 
 def render_gate() -> bool:
@@ -123,7 +126,6 @@ def render_gate() -> bool:
         return True
     st.markdown("### 🔐 AOS 8 → Central Migration Console")
     if identity.auth_mode() == "password":
-        st.caption("Enter the access password to continue.")
         _password_screen()
         return False
     st.caption("Sign in to continue.")

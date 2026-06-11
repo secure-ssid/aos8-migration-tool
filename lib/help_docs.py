@@ -181,7 +181,7 @@ def render() -> None:
                 "How each page works, the scripts behind it, and how to run it by hand")
     st.divider()
     t_keys, t_walk, t_curl, t_postman = st.tabs(
-        ["🔑 API keys", "📄 What each page does", "⌨ Run it by hand (curl)", "📮 Postman"])
+        ["API Keys", "What Each Page Does", "Run it by Hand (curl)", "Postman"])
     with t_keys:
         _api_keys()
     with t_walk:
