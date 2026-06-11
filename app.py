@@ -39,8 +39,24 @@ st.set_page_config(
 from lib.styles import inject, brand_header, step_progress, sidebar_summary, \
     ORANGE, HPE_GREEN
 from lib.help_content import render_help
+from lib import identity
 
 inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba")
+
+# ── Operator identity & auth gate ────────────────────────────────────────────
+# In multi-user (proxy) mode the SSO reverse proxy injects the verified user;
+# refuse to run if it's missing (someone reached the container directly). In
+# local mode this is a fixed local principal. The identity scopes the per-user
+# encrypted credential store, so it must be resolved before any page renders.
+_user = identity.current_user()
+st.session_state["_user"] = _user
+if identity.is_multiuser() and not _user:
+    st.error(
+        "🔒 Not authenticated — no verified user identity was provided. This tool "
+        "must be reached through your organization's SSO sign-in URL, not the "
+        "container directly."
+    )
+    st.stop()
 
 
 def reset_downstream_state() -> None:

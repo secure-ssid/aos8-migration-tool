@@ -1,0 +1,43 @@
+# Keep the build context (and image) small, and never ship history or secrets.
+.git
+.gitignore
+.dockerignore
+
+# Python cruft
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Local secrets / TLS material — must never enter an image
+.streamlit/secrets.toml
+aruba.crt
+aruba.key
+*.pem
+*.key
+credentials.json
+.env
+
+# Tooling / local state / editor cruft
+.claude/
+.playwright-mcp/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# UI audit artifacts
+audit-*.png
+step*.png
+
+# Obsidian vault internals (docs themselves are fine to keep out of the image)
+docs/vault/.obsidian/

@@ -12,6 +12,7 @@ from lib.styles import (
     BORDER, FAINT, MUTED, TEXT,
     page_header, section_label, provision_step_line, badge, esc, info_banner,
 )
+from lib import audit
 
 
 def render():
@@ -229,6 +230,16 @@ def render():
                 st.info("The Classic refresh token rotated during this run — the new "
                         "one is saved in this session.")
 
+        audit.record(
+            "provision",
+            user=st.session_state.get("_user"),
+            destination=central_cfg.destination,
+            tenant=(st.session_state.get("central_base")
+                    or st.session_state.get("central_base_classic")),
+            customer=st.session_state.get("customer_name"),
+            steps=len(results),
+            failed=sum(1 for r in results if not r[1]),
+        )
         st.session_state["provision_results"] = results
         st.session_state["provision_done"]    = True
         st.rerun()

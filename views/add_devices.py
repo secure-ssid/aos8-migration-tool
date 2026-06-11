@@ -196,9 +196,10 @@ def render():
     # the standalone mode works without visiting Step 1). Mirrors p1 exactly —
     # including arming the Remember toggle when a real credential was saved,
     # so visiting this mode first can't make Step 1 delete the saved file.
+    user = st.session_state.get("_user")
     if not st.session_state.get("_creds_loaded"):
         st.session_state["_creds_loaded"] = True
-        saved = credstore.load()
+        saved = credstore.load(user)
         for k, v in saved.items():
             st.session_state.setdefault(k, v)
         if any(saved.get(k) for k in credstore.CREDENTIAL_FIELDS):
@@ -615,4 +616,4 @@ def _persist_classic(classic) -> None:
         return
     persist_rotated_refresh_token(classic)
     if st.session_state.get("remember_creds"):
-        credstore.save_from_session(st.session_state)
+        credstore.save_from_session(st.session_state, st.session_state.get("_user"))

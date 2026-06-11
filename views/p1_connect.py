@@ -15,7 +15,7 @@ from lib.styles import (
     page_header, section_label, badge, ssid_tag, esc, mono_row, mono_caption,
     telemetry_chip,
 )
-from lib import api_probe, credstore
+from lib import api_probe, audit, credstore
 
 PASTE_COMMANDS = [
     ("running_config", "show running-config",
@@ -83,9 +83,10 @@ def render():
     # Auto-fill destination creds saved on this machine (opt-in, once per
     # session). setdefault so we never clobber anything already typed; the
     # presence of a saved file means the operator left "Remember" on.
+    user = st.session_state.get("_user")
     if not st.session_state.get("_creds_loaded"):
         st.session_state["_creds_loaded"] = True
-        saved = credstore.load()
+        saved = credstore.load(user)
         for k, v in saved.items():
             st.session_state.setdefault(k, v)
         # only treat it as "remembered" if a real credential was saved — a
@@ -222,6 +223,15 @@ def render():
                 with st.spinner("Deleting zztest-* objects..."):
                     res = _cleanup.cleanup("zztest", central=nc, classic=cl)
                 st.session_state["cleanup_results"] = res
+                audit.record(
+                    "cleanup",
+                    user=st.session_state.get("_user"),
+                    tenant=(st.session_state.get("central_base")
+                            or st.session_state.get("central_base_classic")),
+                    prefix="zztest",
+                    deleted=sum(1 for _l, ok, _d in res if ok),
+                    failed=sum(1 for _l, ok, _d in res if not ok),
+                )
                 # rerun only after a real run — on auth failure the st.error
                 # above must stay visible
                 st.rerun()
@@ -498,20 +508,27 @@ def render():
     have_secret = bool(st.session_state.get("central_secret"))
     have_token = bool(st.session_state.get("classic_access_token"))
 
-    # ── Optional: persist destination creds on this machine (opt-in) ───────
-    remember = st.checkbox(
-        "💾 Remember these API credentials on this machine",
-        key="remember_creds",
-        help="Auto-fills the base URLs, API client ID/secret and Classic "
-             "refresh token next launch. Saved to "
-             "~/.aos8-migration/credentials.json (file perms 0600, outside the "
-             "repo so it's never committed). Plaintext on disk — only enable "
-             "on a machine you trust. Uncheck to delete the file.",
-    )
+    # ── Optional: persist destination creds for this user (opt-in) ─────────
+    # Only offered when an encryption key is available. In multi-user (proxy)
+    # mode with no AOS8_CREDSTORE_KEY, persistence is disabled outright so
+    # secrets are never written to the shared volume.
+    remember = False
+    if credstore.available():
+        remember = st.checkbox(
+            "💾 Remember these API credentials for my account",
+            key="remember_creds",
+            help="Auto-fills the base URLs, API client ID/secret and Classic "
+                 "refresh token next launch. Stored encrypted (Fernet) and "
+                 "scoped to your signed-in identity — never shared with other "
+                 "users. The Classic *access* token and all source-side secrets "
+                 "are never saved. Uncheck to delete your saved file.",
+        )
+    else:
+        st.session_state["remember_creds"] = False
     if remember:
         st.markdown(
             f'<div style="font-size:11.5px;color:{FAINT};margin:-0.4rem 0 0.6rem;">'
-            f'Auto-filled from <code>~/.aos8-migration/credentials.json</code> '
+            f'Auto-filled from your encrypted, per-account credential store '
             f'(0600, never committed). The short-lived Classic <i>access</i> '
             f'token is never saved — re-mint it from the refresh token. '
             f'Uncheck to forget.</div>', unsafe_allow_html=True)
@@ -630,9 +647,9 @@ def render():
                 st.session_state["_forget_classic"] = True
                 # rewrite the credstore without the classic fields (save merges,
                 # so clear first)
-                credstore.clear()
+                credstore.clear(user)
                 if st.session_state.get("remember_creds"):
-                    credstore.save_from_session(st.session_state)
+                    credstore.save_from_session(st.session_state, user)
                 st.rerun()
     else:
         c1, c2 = st.columns([3, 1])
@@ -682,9 +699,9 @@ def render():
     # after every cred field above is captured into session_state, so the file
     # tracks the latest values as you go.
     if st.session_state.get("remember_creds"):
-        credstore.save_from_session(st.session_state)
-    elif credstore.exists():
-        credstore.clear()
+        credstore.save_from_session(st.session_state, user)
+    elif credstore.exists(user):
+        credstore.clear(user)
 
     fw_valid = bool(_FW_RE.match(aos10_fw.strip()))
     if aos10_fw and not fw_valid:

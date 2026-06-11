@@ -69,13 +69,67 @@ Provisioning maps AOS 8 constructs onto the New Central model:
 
 ## Deployment
 
+### Single user (laptop / one engagement)
+
 ```bash
 # Docker
 docker build -t aos8-migration .
 docker run -p 8501:8501 aos8-migration
 
-# Or just run locally per engagement:
+# Or just run locally:
 streamlit run app.py
 ```
 
-Credentials live only in the Streamlit session — nothing is written to disk.
+In this default (`AOS8_AUTH_MODE=local`) mode there is no app login. Live
+credentials stay in the Streamlit session only. The optional **Remember**
+toggle persists *destination* API creds (client id/secret + Classic refresh
+token, never source-side secrets) to `~/.aos8-migration/<user>/credentials.json`,
+**encrypted at rest** with a private auto-generated key. Uncheck to delete.
+
+### Multi-user (Docker farm, concurrent engineers)
+
+Run behind the bundled **oauth2-proxy** so every session maps to a verified
+SSO identity. The app trusts **one** header — `X-Forwarded-Email` — which
+oauth2-proxy injects *and strips from inbound client requests* in `--upstream`
+mode. That stripping plus the network boundary is what makes the identity
+non-spoofable, so the app container must be reachable **only** through the
+proxy. The compose file enforces this: the app uses `expose:` (never `ports:`)
+and sits on a dedicated `appnet` bridge shared with nothing but the proxy.
+**This network boundary is load-bearing for identity integrity — don't attach
+other containers to `appnet`, and never publish the app's `8501`.**
+
+```bash
+cp .env.example .env        # fill in OIDC issuer/client + COOKIE_SECRET
+# optional: set AOS8_CREDSTORE_KEY to enable per-user encrypted "Remember"
+docker compose up --build
+```
+
+Key properties in this mode (`AOS8_AUTH_MODE=proxy`):
+
+- **Per-user credential isolation.** Saved creds are keyed and encrypted per
+  authenticated user; one engineer's tenant secrets never load into another's
+  session. With no `AOS8_CREDSTORE_KEY` set, credential persistence is disabled
+  entirely (session-only) — a fail-safe so nothing is written to a shared
+  volume without an operator-provisioned key.
+- **Sticky sessions required if you scale out.** Streamlit sessions are
+  websocket-bound to one replica. The single-replica compose file needs no
+  stickiness; if you run multiple `app` replicas, pin each user to one replica
+  (cookie/IP affinity) at your load balancer or in-flight migrations are lost
+  on reconnect.
+- **Audit trail.** Sensitive actions (provision, cutover, claim, cleanup) are
+  emitted as JSON audit lines to stdout, tagged with the signed-in user — wire
+  your container logs into your log pipeline.
+- **Saved creds are ephemeral by default.** No volume is mounted at
+  `/home/appuser/.aos8-migration`, so "Remember" resets on every container
+  restart/redeploy. To persist it, mount a named volume there (0700) and keep
+  `AOS8_CREDSTORE_KEY` stable across deploys (a new key makes old files
+  undecryptable, which just falls back to empty — no crash).
+
+### Environment variables
+
+| Var | Default | Purpose |
+|---|---|---|
+| `AOS8_AUTH_MODE` | `local` | `proxy` = require an SSO identity header (multi-user); `local` = single user |
+| `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | The single request header trusted as the verified identity in proxy mode. Must be one the proxy sets **and** inbound-strips |
+| `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in proxy mode = persistence off |
+| `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in local mode |

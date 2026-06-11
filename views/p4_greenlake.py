@@ -5,6 +5,7 @@ moment `ap convert` brings them up in Central.
 """
 import streamlit as st
 
+from lib import audit
 from lib.glp_client import GLPClient
 from lib.session_clients import (
     build_central_client, build_classic_client, use_classic_for_moves,
@@ -303,6 +304,13 @@ def render():
                 failed = sorted(submitted - in_workspace)
                 st.session_state["glp_existing"] = sorted(in_workspace)
                 st.session_state["glp_claim_result"] = {"ok": ok, "failed": failed}
+                audit.record(
+                    "claim",
+                    user=st.session_state.get("_user"),
+                    customer=st.session_state.get("customer_name"),
+                    claimed=len(ok),
+                    failed=len(failed),
+                )
                 st.rerun()
             except Exception as e:
                 # Soft-fail only when the SUBMITTED serials are synthetic test
@@ -504,6 +512,15 @@ def render():
                                                phase="devices")
                 if classic is not None:
                     persist_rotated_refresh_token(classic)
+                audit.record(
+                    "cutover",
+                    user=st.session_state.get("_user"),
+                    tenant=st.session_state.get("central_base"),
+                    customer=st.session_state.get("customer_name"),
+                    hybrid=bool(classic),
+                    steps=len(results),
+                    failed=sum(1 for r in results if not r[1]),
+                )
                 st.session_state["onboard_results"] = results
                 st.rerun()
             except Exception as e:

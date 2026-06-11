@@ -20,6 +20,10 @@ ENV/
 # Keep .streamlit/config.toml (theme/server config) but never commit secrets.
 .streamlit/secrets.toml
 
+# ── Deployment secrets ────────────────────────────────────────────────────────
+# oauth2-proxy / OIDC + credstore key for docker-compose — never commit (.env.example is fine).
+.env
+
 # ── Tooling / local state ─────────────────────────────────────────────────────
 .playwright-mcp/
 *.log
