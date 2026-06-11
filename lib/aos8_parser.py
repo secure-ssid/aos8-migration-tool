@@ -13,7 +13,9 @@ from .models import (
     AP, APGroup, ClusterInfo, CustomerConfig, ForwardMode,
     AuthType, RadiusServer, SSID, VLAN,
 )
-from .aos8_client import _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named
+from .aos8_client import (
+    AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
+)
 
 
 def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> CustomerConfig:
@@ -28,6 +30,12 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
     ssid_profiles = _parse_ssid_profiles(running)
     ssids = _parse_ssids_from_running(running, ssid_profiles)
     vap_bindings = _parse_group_vap_bindings(running)
+
+    # The factory "default" virtual-AP (essid aruba-ap) exists on every
+    # controller; keep it only when a real (non-default) AP group binds it.
+    bound_vaps = {n for g, names in vap_bindings.items()
+                  if g not in AOS8Client._DEFAULT_GROUPS for n in names}
+    ssids = [s for s in ssids if s.name != "default" or s.name in bound_vaps]
     aps = _parse_ap_database(pasted_outputs.get("ap_database", ""))
     if not aps:
         aps = _parse_ap_active(pasted_outputs.get("ap_active", ""))

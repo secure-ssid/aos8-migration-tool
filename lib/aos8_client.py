@@ -316,6 +316,12 @@ class AOS8Client:
             prof = ssid_profiles.get(prof_name, {})
             auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
 
+            # per-VAP band selection ("all"/"a"/"g") → New Central rf-band enum,
+            # mirroring paste mode's allowed-band mapping
+            band_raw = str(self._field(item, "rf_band_tristate", "vap_rf_band",
+                                       default="")).lower()
+            rf_band = {"all": "BAND_ALL", "a": "5GHZ", "g": "24GHZ"}.get(band_raw, "")
+
             ssids.append(SSID(
                 name=name,
                 vlan=vlan,
@@ -326,6 +332,7 @@ class AOS8Client:
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
                 auth_server_group=self._profile_ref(item, "aaa_prof") or None,
+                rf_band=rf_band,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
             ))
@@ -532,6 +539,11 @@ class AOS8Client:
         aps = self.get_active_aps()
         cluster = self.get_cluster_info()
         self._attach_aps(ap_groups, aps)
+
+        # The factory "default" virtual-AP (essid aruba-ap) exists on every
+        # controller; keep it only when a real (non-default) AP group binds it.
+        bound_vaps = {n for names in vap_bindings.values() for n in names}
+        ssids = [s for s in ssids if s.name != "default" or s.name in bound_vaps]
 
         # Per-group SSID membership from the discovered virtual-ap bindings;
         # fall back to "all SSIDs" only when a group has no binding data.
