@@ -2,42 +2,42 @@
 # (AOS8_AUTH_MODE=accounts): engineers register with a verified @hpe.com email
 # and a password — no OAuth, no IdP.
 #
-# ── PUT TLS IN FRONT ─────────────────────────────────────────────────────────
-# Passwords and verification codes traverse the connection, so terminate HTTPS
-# at your farm's ingress / load balancer (or a reverse proxy such as Caddy,
-# nginx or Traefik) ahead of this service. Do not expose plain :8501 to users
-# over an untrusted network.
+# ── HTTPS via Caddy ──────────────────────────────────────────────────────────
+# This service binds to 127.0.0.1 only, so it is NOT publicly reachable; your
+# Caddy server terminates HTTPS and reverse-proxies to it (see deploy/Caddyfile).
+#   - Caddy on the HOST  -> proxy to localhost:8501 (the binding below).
+#   - Caddy in a CONTAINER -> drop the published port, put both on one network,
+#     and proxy to http://app:8501 instead.
+# Passwords + verification codes ride the connection, so always go through Caddy
+# (HTTPS), never plain :8501 over an untrusted network.
 #
 # ── PERSISTENCE ──────────────────────────────────────────────────────────────
 # The named volume keeps the user registry (users.json) and the per-user
-# encrypted credential files across restarts. Without it, accounts and saved
-# creds reset on every redeploy. Keep AOS8_CREDSTORE_KEY stable across deploys
-# (a changed key just makes old saved creds unreadable — no crash).
+# encrypted credential files across restarts. Keep AOS8_CREDSTORE_KEY stable.
 #
 # ── SCALING ──────────────────────────────────────────────────────────────────
-# Streamlit sessions are websocket-bound to one replica. If you scale `app`,
-# pin each user to one replica (cookie/IP affinity) at the LB AND make the
-# volume shared so every replica sees the same accounts.
+# Streamlit sessions are websocket-bound to one replica; if you scale `app`, pin
+# each user to one replica (cookie/IP affinity) and share the volume.
 
 services:
   app:
     build: .
     ports:
-      - "8501:8501"           # ⚠ put your TLS-terminating ingress/LB in front
+      - "127.0.0.1:8501:8501"   # localhost only — Caddy fronts HTTPS
     environment:
       AOS8_AUTH_MODE: "accounts"
       AOS8_ALLOWED_EMAIL_DOMAIN: "hpe.com"
       # Per-user encrypted "Remember" (optional). Generate once:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      # Leave UNSET to disable credential persistence (session-only).
       AOS8_CREDSTORE_KEY: "${AOS8_CREDSTORE_KEY:-}"
-      # SMTP for verification emails. Without a host, codes are written to the
-      # container log (DEV ONLY) — set these for any real deployment.
+      # Verification email. mode=direct sends via MX lookup (no relay); mode=relay
+      # hands off to AOS8_SMTP_HOST. Empty = codes logged to console (dev only).
+      AOS8_SMTP_MODE: "${AOS8_SMTP_MODE:-}"
+      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-no-reply@hpe.com}"
       AOS8_SMTP_HOST: "${AOS8_SMTP_HOST:-}"
       AOS8_SMTP_PORT: "${AOS8_SMTP_PORT:-587}"
       AOS8_SMTP_USER: "${AOS8_SMTP_USER:-}"
       AOS8_SMTP_PASS: "${AOS8_SMTP_PASS:-}"
-      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-no-reply@hpe.com}"
     volumes:
       - aos8_state:/home/appuser/.aos8-migration
     restart: unless-stopped

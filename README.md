@@ -105,12 +105,22 @@ How it works and what to know:
   `AOS8_ALLOWED_EMAIL_DOMAIN` to change). The emailed code proves ownership, so
   someone can't register a colleague's address. Passwords are stored
   scrypt-hashed with a per-user salt; codes are short-lived and hashed.
-- **Put TLS in front.** Passwords/codes traverse the connection — terminate
-  HTTPS at your farm's ingress/LB or a reverse proxy (Caddy/nginx/Traefik)
-  ahead of the app. Don't serve plain `:8501` to users.
-- **SMTP required for real use.** Set `AOS8_SMTP_*` (your HPE relay). Without a
-  host, verification codes are written to the **container log only** (dev
-  fallback) — fine for local testing, not for production.
+- **HTTPS via Caddy (recommended).** Passwords/codes traverse the connection.
+  The compose file binds the app to `127.0.0.1:8501`; put **Caddy** in front to
+  terminate HTTPS and reverse-proxy to it — `deploy/Caddyfile` is a ready
+  example (Caddy upgrades the websockets Streamlit needs automatically). Never
+  serve plain `:8501` to users.
+- **Verification email — two ways, no corporate relay needed:**
+  - `AOS8_SMTP_MODE=direct` — the app looks up the recipient domain's MX and
+    delivers itself (no relay). Simplest, but a gateway like **Proofpoint
+    (hpe.com)** usually rejects mail from an unsanctioned IP, so this is
+    reliable only when the app's egress IP is an authorized sender for
+    `AOS8_SMTP_FROM` (e.g. running inside the org network).
+  - `AOS8_SMTP_MODE=relay` (default) + `AOS8_SMTP_*` — hand off to any SMTP
+    server: a free transactional provider (SendGrid/Mailgun/Brevo/Resend — gives
+    you a verified sender + good deliverability) or your own mailbox via an app
+    password. **This is the dependable path.**
+  - With neither set, codes are written to the **container log only** (dev).
 - **Per-user credential isolation.** Saved creds are keyed and encrypted per
   signed-in user; one engineer's tenant secrets never load into another's
   session. With no `AOS8_CREDSTORE_KEY`, persistence is disabled entirely
@@ -139,7 +149,9 @@ mode above is the recommended path.
 | `AOS8_AUTH_MODE` | `local` | `accounts` = built-in self-service login (multi-user); `proxy` = trust a reverse-proxy identity header; `local` = single user |
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | `hpe.com` | Email domain allowed to register in `accounts` mode |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
-| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` | _(unset)_ / `587` / — / — / `no-reply@hpe.com` | SMTP for verification emails. No host ⇒ codes logged to console (dev only) |
+| `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
+| `AOS8_SMTP_FROM` | `no-reply@hpe.com` | From address on verification emails |
+| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. No host (and not `direct`) ⇒ codes logged to console (dev only) |
 | `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in a multi-user mode = persistence off |
 | `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |
 | `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in `local` mode |

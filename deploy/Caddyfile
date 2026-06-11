@@ -1,0 +1,22 @@
+# Example Caddy config fronting the migration console with automatic HTTPS.
+# Caddy terminates TLS and reverse-proxies to the app; reverse_proxy upgrades
+# websockets automatically (Streamlit needs that). The app stays on
+# 127.0.0.1:8501 (see docker-compose.yml) and is never exposed directly.
+#
+# Replace the hostname. For a public host with public DNS, Caddy gets a
+# Let's Encrypt cert automatically. For an internal-only host, either use
+# Caddy's internal CA (`tls internal`) or point `tls` at your own cert/key.
+
+migrate.your-domain.example {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8501
+
+    # Internal/offline host without public DNS? Use Caddy's local CA instead of
+    # Let's Encrypt (clients must trust Caddy's root, or swap for your own certs):
+    # tls internal
+    # tls /etc/caddy/certs/migrate.crt /etc/caddy/certs/migrate.key
+}
+
+# If Caddy runs as a CONTAINER in the same compose project, drop the published
+# port on `app` and proxy to the service name instead:
+#   reverse_proxy app:8501
