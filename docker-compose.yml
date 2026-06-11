@@ -33,7 +33,7 @@ services:
       # Verification email. mode=direct sends via MX lookup (no relay); mode=relay
       # hands off to AOS8_SMTP_HOST. Empty = codes logged to console (dev only).
       AOS8_SMTP_MODE: "${AOS8_SMTP_MODE:-}"
-      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-no-reply@hpe.com}"
+      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-}"   # e.g. your gmail address (NOT @hpe.com)
       AOS8_SMTP_HOST: "${AOS8_SMTP_HOST:-}"
       AOS8_SMTP_PORT: "${AOS8_SMTP_PORT:-587}"
       AOS8_SMTP_USER: "${AOS8_SMTP_USER:-}"
