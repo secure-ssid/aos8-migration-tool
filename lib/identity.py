@@ -1,32 +1,23 @@
 """
-Operator identity for multi-user deployments.
-
-In a shared deployment the tool sits BEHIND an authenticating reverse proxy
-(oauth2-proxy / an SSO gateway). The proxy verifies the user against your IdP
-and injects the verified identity as ONE request header, which we read via
-``st.context.headers``.
-
-We trust exactly one header name (``AOS8_IDENTITY_HEADER``, default
-``X-Forwarded-Email`` — the header oauth2-proxy injects AND strips from inbound
-client requests in ``--upstream`` mode via ``--pass-user-headers``). We do NOT
-fall through a list of candidate headers: ``X-Auth-Request-*`` are auth_request
-*response* headers that oauth2-proxy does not set or sanitize on the upstream
-request, so trusting them would be client-spoofable.
-
-Two load-bearing requirements for this to be safe (see docker-compose.yml):
-  1. The proxy must SET and INBOUND-STRIP the trusted header, and
-  2. the app must ONLY be reachable through the proxy (put it on an internal
-     Docker network / NetworkPolicy so no other container can hit :8501
-     directly with a forged header).
+Operator identity for multi-user deployments — the single seam every other
+module reads "who is this user" from, so the identity SOURCE is swappable.
 
 Modes (env ``AOS8_AUTH_MODE``):
-  - ``local``  (default) — single-user / laptop. Identity is a fixed local
-    user; no proxy, no header required. This is the original behaviour.
-  - ``proxy``  — multi-user farm. A proxy identity header is REQUIRED; with no
-    header the session is unauthenticated and the app refuses to run
-    (enforced in app.py). This is what enables per-user credential isolation.
+  - ``local``    (default) — single-user / laptop. Identity is a fixed local
+    principal; no login. The original behaviour.
+  - ``accounts`` — multi-user farm with the app's OWN self-service login
+    (no OAuth/IdP). Engineers register with a verified @hpe.com email
+    (lib.accounts + lib.auth_ui); the signed-in email is the identity, read
+    here from ``st.session_state['_auth_user']``. This is the recommended
+    shared-deployment mode.
+  - ``proxy``    — multi-user behind a header-injecting reverse proxy. The
+    identity comes from ONE trusted header (``AOS8_IDENTITY_HEADER``, default
+    ``X-Forwarded-Email``) read via ``st.context.headers``. The proxy must SET
+    and INBOUND-STRIP that header and be the sole ingress, or it's spoofable.
+    Kept for completeness; ``accounts`` is preferred.
 
-Set ``AOS8_AUTH_MODE=proxy`` in the Docker-farm deployment.
+Any non-local mode is treated as multi-user: the credstore goes per-user +
+encrypted and the audit log is attributed to the identity.
 """
 import hashlib
 import os
@@ -46,12 +37,14 @@ def identity_header() -> str:
 
 
 def auth_mode() -> str:
-    """'local' (single-user, default) or 'proxy' (multi-user behind SSO)."""
+    """'local' (single-user, default), 'accounts' (built-in login), or 'proxy'."""
     return os.environ.get("AOS8_AUTH_MODE", "local").strip().lower()
 
 
 def is_multiuser() -> bool:
-    return auth_mode() == "proxy"
+    """True for any shared (non-local) deployment. Gates the credstore
+    fail-safe + per-user behaviour identically for 'accounts' and 'proxy'."""
+    return auth_mode() != "local"
 
 
 def _header_identity() -> str | None:
@@ -69,14 +62,18 @@ def _header_identity() -> str | None:
 
 
 def current_user() -> str | None:
-    """The authenticated operator's identity.
+    """The authenticated operator's identity, or None if not signed in.
 
-    Returns a fixed local principal in local mode. In proxy mode returns the
-    proxy-asserted identity, or None when no identity header is present (the
-    caller must then refuse to proceed)."""
-    if not is_multiuser():
+    local mode: a fixed local principal. accounts mode: the email the in-app
+    login established (session_state['_auth_user']). proxy mode: the trusted
+    proxy header. A None return in a multi-user mode means the caller must
+    refuse to proceed / show the login gate."""
+    mode = auth_mode()
+    if mode == "local":
         return os.environ.get("AOS8_LOCAL_USER", LOCAL_USER).strip().lower()
-    return _header_identity()
+    if mode == "accounts":
+        return st.session_state.get("_auth_user")
+    return _header_identity()  # proxy
 
 
 def user_slug(user: str) -> str:

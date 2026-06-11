@@ -584,6 +584,10 @@ def sidebar_summary() -> None:
                 f'<span style="color:{TEXT};">{esc(_user)}</span></div>',
                 unsafe_allow_html=True,
             )
+            if identity.auth_mode() == "accounts":
+                from lib import auth_ui
+                if st.button("Sign out", key="_logout_btn", use_container_width=True):
+                    auth_ui.logout()
         if st.session_state.get("remember_creds"):
             note = ('DEST API CREDS SAVED<br>ENCRYPTED FOR YOUR<br>'
                     'ACCOUNT · SOURCE<br>SECRETS NEVER WRITTEN')

@@ -12,10 +12,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 RUN chown -R appuser:appuser /app
 
+# State dir (user registry + per-user encrypted creds) owned by the runtime
+# user, so a named volume mounted here initializes with the right ownership.
+RUN install -d -o appuser -g appuser -m 700 /home/appuser/.aos8-migration
+
 # Deployment knobs (override per environment — see docker-compose.yml):
-#   AOS8_AUTH_MODE=proxy   require an SSO-proxy identity header (multi-user farm)
-#   AOS8_CREDSTORE_KEY=...  Fernet key enabling per-user encrypted "Remember";
-#                           unset in proxy mode => credential persistence is OFF
+#   AOS8_AUTH_MODE=accounts  built-in self-service login (multi-user farm)
+#   AOS8_CREDSTORE_KEY=...    Fernet key enabling per-user encrypted "Remember";
+#                             unset in a multi-user mode => persistence is OFF
 # The image defaults to single-user 'local' mode so a plain `docker run` works.
 ENV AOS8_AUTH_MODE=local \
     PYTHONUNBUFFERED=1

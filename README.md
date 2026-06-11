@@ -88,48 +88,58 @@ token, never source-side secrets) to `~/.aos8-migration/<user>/credentials.json`
 
 ### Multi-user (Docker farm, concurrent engineers)
 
-Run behind the bundled **oauth2-proxy** so every session maps to a verified
-SSO identity. The app trusts **one** header — `X-Forwarded-Email` — which
-oauth2-proxy injects *and strips from inbound client requests* in `--upstream`
-mode. That stripping plus the network boundary is what makes the identity
-non-spoofable, so the app container must be reachable **only** through the
-proxy. The compose file enforces this: the app uses `expose:` (never `ports:`)
-and sits on a dedicated `appnet` bridge shared with nothing but the proxy.
-**This network boundary is load-bearing for identity integrity — don't attach
-other containers to `appnet`, and never publish the app's `8501`.**
+The app has its **own self-service login** (`AOS8_AUTH_MODE=accounts`) — no
+OAuth, no IdP. Engineers register with an **@hpe.com** email; a 6-digit code is
+emailed to confirm the address is really theirs, then they set a password and
+sign in. The signed-in email becomes the identity that scopes the per-user
+encrypted credential store and the audit log.
 
 ```bash
-cp .env.example .env        # fill in OIDC issuer/client + COOKIE_SECRET
-# optional: set AOS8_CREDSTORE_KEY to enable per-user encrypted "Remember"
+cp .env.example .env        # set SMTP (verification emails) + AOS8_CREDSTORE_KEY
 docker compose up --build
 ```
 
-Key properties in this mode (`AOS8_AUTH_MODE=proxy`):
+How it works and what to know:
 
+- **Verified registration.** Open to `@hpe.com` only (set
+  `AOS8_ALLOWED_EMAIL_DOMAIN` to change). The emailed code proves ownership, so
+  someone can't register a colleague's address. Passwords are stored
+  scrypt-hashed with a per-user salt; codes are short-lived and hashed.
+- **Put TLS in front.** Passwords/codes traverse the connection — terminate
+  HTTPS at your farm's ingress/LB or a reverse proxy (Caddy/nginx/Traefik)
+  ahead of the app. Don't serve plain `:8501` to users.
+- **SMTP required for real use.** Set `AOS8_SMTP_*` (your HPE relay). Without a
+  host, verification codes are written to the **container log only** (dev
+  fallback) — fine for local testing, not for production.
 - **Per-user credential isolation.** Saved creds are keyed and encrypted per
-  authenticated user; one engineer's tenant secrets never load into another's
-  session. With no `AOS8_CREDSTORE_KEY` set, credential persistence is disabled
-  entirely (session-only) — a fail-safe so nothing is written to a shared
-  volume without an operator-provisioned key.
-- **Sticky sessions required if you scale out.** Streamlit sessions are
-  websocket-bound to one replica. The single-replica compose file needs no
-  stickiness; if you run multiple `app` replicas, pin each user to one replica
-  (cookie/IP affinity) at your load balancer or in-flight migrations are lost
-  on reconnect.
+  signed-in user; one engineer's tenant secrets never load into another's
+  session. With no `AOS8_CREDSTORE_KEY`, persistence is disabled entirely
+  (session-only) — a fail-safe.
+- **Persistence.** The `aos8_state` volume holds `users.json` + the encrypted
+  cred files. Without it, accounts and saved creds reset on redeploy. Keep
+  `AOS8_CREDSTORE_KEY` stable across deploys.
 - **Audit trail.** Sensitive actions (provision, cutover, claim, cleanup) are
-  emitted as JSON audit lines to stdout, tagged with the signed-in user — wire
-  your container logs into your log pipeline.
-- **Saved creds are ephemeral by default.** No volume is mounted at
-  `/home/appuser/.aos8-migration`, so "Remember" resets on every container
-  restart/redeploy. To persist it, mount a named volume there (0700) and keep
-  `AOS8_CREDSTORE_KEY` stable across deploys (a new key makes old files
-  undecryptable, which just falls back to empty — no crash).
+  emitted as JSON audit lines to stdout, tagged with the signed-in user.
+- **Scaling.** Streamlit sessions are websocket-bound to one replica. If you
+  scale `app`, pin each user to one replica (cookie/IP affinity) at the LB and
+  share the volume so all replicas see the same accounts.
+
+> Login lasts for the browser session — a full page refresh signs the user out
+> and they log back in (no cookie/JWT persistence yet). Ask if you want
+> stay-signed-in across refreshes.
+
+A header-injecting reverse proxy is also supported as an alternative
+(`AOS8_AUTH_MODE=proxy` + `AOS8_IDENTITY_HEADER`), but the built-in `accounts`
+mode above is the recommended path.
 
 ### Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
-| `AOS8_AUTH_MODE` | `local` | `proxy` = require an SSO identity header (multi-user); `local` = single user |
-| `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | The single request header trusted as the verified identity in proxy mode. Must be one the proxy sets **and** inbound-strips |
-| `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in proxy mode = persistence off |
-| `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in local mode |
+| `AOS8_AUTH_MODE` | `local` | `accounts` = built-in self-service login (multi-user); `proxy` = trust a reverse-proxy identity header; `local` = single user |
+| `AOS8_ALLOWED_EMAIL_DOMAIN` | `hpe.com` | Email domain allowed to register in `accounts` mode |
+| `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
+| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` / `_FROM` | _(unset)_ / `587` / — / — / `no-reply@hpe.com` | SMTP for verification emails. No host ⇒ codes logged to console (dev only) |
+| `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in a multi-user mode = persistence off |
+| `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |
+| `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in `local` mode |

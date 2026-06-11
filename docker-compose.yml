@@ -1,80 +1,46 @@
-# Multi-user deployment: oauth2-proxy (SSO) terminates auth and is the ONLY
-# public ingress. The app trusts a single identity header (X-Forwarded-Email)
-# that the proxy injects AND strips from inbound client requests, so the app
-# must be reachable ONLY through the proxy. We enforce that with a dedicated
-# bridge network (`appnet`) shared by exactly these two services, plus the app
-# using `expose:` (never `ports:`) so :8501 is not published to the host.
+# Multi-user deployment with the app's OWN self-service login
+# (AOS8_AUTH_MODE=accounts): engineers register with a verified @hpe.com email
+# and a password — no OAuth, no IdP.
 #
-# Why not `internal: true` on appnet? The app needs OUTBOUND egress to HPE SSO,
-# GreenLake, the regional Central API and the customer's AOS 8 controllers — an
-# internal-only network would break its core function. The isolation we need is
-# "nothing but the proxy can REACH the app", which a dedicated, unshared bridge
-# network + unpublished port already gives. Do NOT attach other containers to
-# appnet and never give `app` a `ports:` mapping.
+# ── PUT TLS IN FRONT ─────────────────────────────────────────────────────────
+# Passwords and verification codes traverse the connection, so terminate HTTPS
+# at your farm's ingress / load balancer (or a reverse proxy such as Caddy,
+# nginx or Traefik) ahead of this service. Do not expose plain :8501 to users
+# over an untrusted network.
 #
-# Fill in .env (copy from .env.example) before `docker compose up`.
+# ── PERSISTENCE ──────────────────────────────────────────────────────────────
+# The named volume keeps the user registry (users.json) and the per-user
+# encrypted credential files across restarts. Without it, accounts and saved
+# creds reset on every redeploy. Keep AOS8_CREDSTORE_KEY stable across deploys
+# (a changed key just makes old saved creds unreadable — no crash).
 #
-# SCALING NOTE: Streamlit sessions are websocket-bound to one replica. This file
-# runs a single app replica (no stickiness needed). If you scale `app`, pin each
-# user to one replica (cookie/IP affinity) at the LB or in-flight migrations are
-# lost on reconnect.
+# ── SCALING ──────────────────────────────────────────────────────────────────
+# Streamlit sessions are websocket-bound to one replica. If you scale `app`,
+# pin each user to one replica (cookie/IP affinity) at the LB AND make the
+# volume shared so every replica sees the same accounts.
 
 services:
   app:
     build: .
-    expose:
-      - "8501"          # internal only — deliberately NOT published to the host
-    environment:
-      AOS8_AUTH_MODE: "proxy"
-      # The single header the app trusts as the verified identity. Must match a
-      # header oauth2-proxy SETS and inbound-STRIPS (X-Forwarded-Email does both
-      # in --upstream mode with --pass-user-headers).
-      AOS8_IDENTITY_HEADER: "X-Forwarded-Email"
-      # Fernet key enabling the per-user encrypted "Remember". Generate once:
-      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      # Leave UNSET to disable credential persistence entirely (session-only).
-      # Prefer a Docker/K8s secret over an inline value. NOTE: with no volume
-      # mounted at /home/appuser/.aos8-migration, saved creds are ephemeral and
-      # reset on container restart (the key must also outlive containers).
-      AOS8_CREDSTORE_KEY: "${AOS8_CREDSTORE_KEY:-}"
-    networks:
-      - appnet
-    restart: unless-stopped
-
-  auth:
-    # ⚠ Pin to the LATEST patched oauth2-proxy release before production — verify
-    #   against https://github.com/oauth2-proxy/oauth2-proxy/releases ; an old
-    #   pin may be missing security fixes (e.g. X-Forwarded-* auth-bypass CVEs).
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
-    depends_on:
-      - app
-    command:
-      - --http-address=0.0.0.0:4180
-      - --upstream=http://app:8501
-      - --reverse-proxy=true
-      - --provider=oidc
-      - --oidc-issuer-url=${OIDC_ISSUER_URL}
-      - --client-id=${OIDC_CLIENT_ID}
-      - --client-secret=${OIDC_CLIENT_SECRET}
-      - --cookie-secret=${COOKIE_SECRET}
-      - --email-domain=${ALLOWED_EMAIL_DOMAIN:-*}
-      # Inject X-Forwarded-User/-Email upstream AND overwrite any inbound copy —
-      # this is what makes the identity header non-spoofable for the app.
-      - --pass-user-headers=true
-      - --pass-access-token=false
-      - --skip-provider-button=false
-      - --cookie-secure=true        # requires HTTPS in front (terminate at your LB)
-      # If a load balancer fronts this proxy, restrict trusted client IPs:
-      # - --real-client-ip-header=X-Forwarded-For
-      # - --trusted-proxy-ip=10.0.0.0/8
     ports:
-      # Put your TLS-terminating LB/ingress in front of this. For a quick local
-      # HTTPS test you can terminate TLS here instead.
-      - "443:4180"
-    networks:
-      - appnet
+      - "8501:8501"           # ⚠ put your TLS-terminating ingress/LB in front
+    environment:
+      AOS8_AUTH_MODE: "accounts"
+      AOS8_ALLOWED_EMAIL_DOMAIN: "hpe.com"
+      # Per-user encrypted "Remember" (optional). Generate once:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      # Leave UNSET to disable credential persistence (session-only).
+      AOS8_CREDSTORE_KEY: "${AOS8_CREDSTORE_KEY:-}"
+      # SMTP for verification emails. Without a host, codes are written to the
+      # container log (DEV ONLY) — set these for any real deployment.
+      AOS8_SMTP_HOST: "${AOS8_SMTP_HOST:-}"
+      AOS8_SMTP_PORT: "${AOS8_SMTP_PORT:-587}"
+      AOS8_SMTP_USER: "${AOS8_SMTP_USER:-}"
+      AOS8_SMTP_PASS: "${AOS8_SMTP_PASS:-}"
+      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-no-reply@hpe.com}"
+    volumes:
+      - aos8_state:/home/appuser/.aos8-migration
     restart: unless-stopped
 
-networks:
-  appnet:
-    driver: bridge
+volumes:
+  aos8_state:
