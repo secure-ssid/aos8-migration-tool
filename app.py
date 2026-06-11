@@ -106,14 +106,16 @@ if st.session_state.pop("_forget_classic", False):
 with st.sidebar:
     _mode_label = st.radio(
         "Mode",
-        ["Full migration", "Add devices only"],
-        index=0 if app_mode == "wizard" else 1,
+        ["Full migration", "Add devices only", "Help & Docs"],
+        index={"wizard": 0, "add_devices": 1, "help": 2}.get(app_mode, 0),
         key="app_mode_radio",
         help="Add devices only: onboard APs into groups that already exist in "
              "the tenant — claim → assign → move → persona, skipping "
-             "discovery/config.",
+             "discovery/config.  •  Help & Docs: how each page works, the scripts "
+             "behind it, curl + Postman, and how to create the API keys.",
     )
-app_mode = "add_devices" if "Add" in _mode_label else "wizard"
+app_mode = ("help" if "Help" in _mode_label
+            else "add_devices" if "Add" in _mode_label else "wizard")
 st.session_state["app_mode"] = app_mode
 
 # set_page_config + the CSS inject above ran with the PREVIOUS render's mode
@@ -126,7 +128,10 @@ if app_mode != st.session_state.get("_last_app_mode"):
 
 brand_header(accent=HPE_GREEN if (on_greenlake or app_mode == "add_devices") else ORANGE)
 
-if app_mode == "add_devices":
+if app_mode == "help":
+    from lib import help_docs
+    help_docs.render()
+elif app_mode == "add_devices":
     import views.add_devices as page
     page.render()
 else:
