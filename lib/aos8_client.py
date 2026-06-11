@@ -130,13 +130,25 @@ class AOS8Client:
 
     @staticmethod
     def _field(item: dict, *names: str, default: Any = "") -> Any:
-        """Fetch the first present key; AOS unwraps some values as {key: {key: val}}."""
+        """Fetch the first present key. AOS key spelling varies by build
+        (hyphen vs underscore), and scalar params arrive wrapped one level
+        deep — e.g. {"rad_authport": {"authport": 1812}} — so each name is
+        tried in both spellings on the item and inside a matched sub-dict."""
+        keys: list[str] = []
         for n in names:
-            if n in item:
-                val = item[n]
-                if isinstance(val, dict) and n in val:
-                    return val[n]
-                return val
+            for k in (n, n.replace("-", "_"), n.replace("_", "-")):
+                if k not in keys:
+                    keys.append(k)
+        for k in keys:
+            if k not in item:
+                continue
+            val = item[k]
+            if isinstance(val, dict):
+                for inner in keys:
+                    if inner in val:
+                        return val[inner]
+                continue  # flag/_present dict with no scalar — keep looking
+            return val
         return default
 
     @staticmethod
@@ -187,6 +199,12 @@ class AOS8Client:
         paths.sort(key=lambda p: p.count("/"), reverse=True)
         return paths
 
+    def _get_virtual_aps(self) -> list[dict]:
+        """Virtual-AP profiles. The object is named "virtual_ap" (matching
+        the key AOS embeds in ap_group responses); some builds answer the
+        legacy "wlan_virtual_ap" name instead, so try both."""
+        return self._get_object("virtual_ap") or self._get_object("wlan_virtual_ap")
+
     def _node_has_config(self) -> bool:
         """True when the CURRENT config_path holds real (non-default) AP
         groups or virtual APs."""
@@ -194,7 +212,7 @@ class AOS8Client:
             for item in self._get_object("ap_group"):
                 if self._field(item, "profile-name") not in self._DEFAULT_GROUPS:
                     return True
-            for item in self._get_object("wlan_virtual_ap"):
+            for item in self._get_virtual_aps():
                 if self._field(item, "profile-name") not in ("default",):
                     return True
         except Exception:
@@ -234,7 +252,8 @@ class AOS8Client:
             if not name or name in ("default", "default-campus-ap-group", "NoAuthApGroup"):
                 continue
             groups.append(APGroup(name=name))
-            vaps = item.get("virtual_ap", [])
+            # AOS8 returns the VAP list as "virtual_ap" or "virtual-ap" depending on build
+            vaps = item.get("virtual_ap") or item.get("virtual-ap") or []
             if isinstance(vaps, dict):
                 vaps = [vaps]
             bindings[name] = [v.get("profile-name", "") for v in vaps if v.get("profile-name")]
@@ -256,10 +275,10 @@ class AOS8Client:
             elif isinstance(raw_opmode, str):
                 opmode = raw_opmode
             profiles[name] = {
-                "essid": str(self._field(item, "essid")),
+                "essid": str(self._field(item, "essid", "wlan-essid")),
                 "opmode": opmode,
                 "dtim_period": _safe_int(self._field(item, "dtim-period", default=0), 0),
-                "max_clients": _safe_int(self._field(item, "max-clients-threshold", default=0), 0),
+                "max_clients": _safe_int(self._field(item, "max-clients", "max-clients-threshold", default=0), 0),
                 "passphrase": str(self._field(item, "wpa-passphrase", "wpa-hexkey", default="")) or None,
             }
         return profiles
@@ -272,7 +291,7 @@ class AOS8Client:
             pass  # opmode/essid enrichment is best-effort
 
         ssids, seen = [], set()
-        for item in self._get_object("wlan_virtual_ap"):
+        for item in self._get_virtual_aps():
             name = self._field(item, "profile-name")
             if not name or name in seen:
                 continue
@@ -281,7 +300,7 @@ class AOS8Client:
             vlan_token = self._field(item, "vlan", default=1)
             vlan = _safe_vlan(vlan_token)
             vlan_raw = str(vlan_token) if _vlan_is_named(vlan_token) else None
-            fwd_raw = str(self._field(item, "forward-mode", default="tunnel")).lower()
+            fwd_raw = str(self._field(item, "forward-mode", "forward_mode", default="tunnel")).lower()
             if "bridge" in fwd_raw:
                 fwd = ForwardMode.BRIDGE
             elif "split" in fwd_raw:
@@ -289,7 +308,11 @@ class AOS8Client:
             else:
                 fwd = ForwardMode.TUNNEL
 
-            prof_name = self._profile_ref(item, "ssid_prof")
+            # AOS8 returns the SSID profile ref as "ssid_prof", "ssid-profile",
+            # or "ssid-prof" depending on firmware build — try all three
+            prof_name = (self._profile_ref(item, "ssid_prof")
+                         or self._profile_ref(item, "ssid-profile")
+                         or self._profile_ref(item, "ssid-prof"))
             prof = ssid_profiles.get(prof_name, {})
             auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
 
@@ -322,21 +345,21 @@ class AOS8Client:
     def get_radius_servers(self) -> list[RadiusServer]:
         servers = []
         for item in self._get_object("rad_server"):
-            name = self._field(item, "profile-name")
-            addr = str(self._field(item, "host", default=""))
+            name = self._field(item, "rad_server_name", "profile-name")
+            addr = str(self._field(item, "host", "rad_host", default=""))
             if name and addr:
                 servers.append(RadiusServer(
                     name=name,
                     address=addr,
-                    auth_port=_safe_int(self._field(item, "authport", default=1812), 1812),
-                    acct_port=_safe_int(self._field(item, "acctport", default=1813), 1813),
+                    auth_port=_safe_int(self._field(item, "authport", "rad_authport", default=1812), 1812),
+                    acct_port=_safe_int(self._field(item, "acctport", "rad_acctport", default=1813), 1813),
                 ))
         return servers
 
     def get_server_groups(self) -> list[ServerGroup]:
         groups = []
         for item in self._get_object("server_group_prof"):
-            name = self._field(item, "profile-name")
+            name = self._field(item, "sg_name", "profile-name")
             if name in ("default", "internal"):
                 continue  # built-in server groups — noise, not customer config
             servers = item.get("auth_server", [])
@@ -476,17 +499,15 @@ class AOS8Client:
         fw = self.get_mc_firmware()
         mc_ip, ctrl_vlan = self.get_controller_ip()
         ap_groups, vap_bindings, ssids, vlans, radius, sgroups = self._pull_objects()
-        if not ap_groups and not ssids:
-            # The node answered but holds nothing — wrong config_path for this
-            # box (e.g. /md default against a Managed Device, or config defined
-            # on a child node). Find the node that has the config and re-pull;
-            # self.config_path then tells the caller what was used.
+        if not ssids:
+            # SSIDs missing (even if groups came back) — the WLAN config may
+            # live at a different node than the AP group config. Re-probe.
             detected = self.find_config_node()
             if detected:
                 self.config_path = detected
                 ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
                     self._pull_objects()
-        if not ap_groups and not ssids:
+        if not ssids:
             # Last resort: the object API exposes no WLAN config on this box
             # (managed devices often don't) — parse the CLI show output
             # instead, exactly like paste mode.

@@ -47,7 +47,7 @@ GROUPS = [
             {"name": "Get config object (ap_group)", "method": "GET",
              "url": "https://{{aos8_host}}:4343/v1/configuration/object/ap_group?UIDARUBA={{uidaruba}}&config_path={{config_path}}",
              "headers": {}, "body": None,
-             "desc": "Swap ap_group for ssid_prof, wlan_virtual_ap, vlan_id, rad_server, server_group_prof, node_hierarchy."},
+             "desc": "Swap ap_group for ssid_prof, virtual_ap, vlan_id, rad_server, server_group_prof, node_hierarchy."},
             {"name": "Show command", "method": "GET",
              "url": "https://{{aos8_host}}:4343/v1/configuration/showcommand?command=show version&UIDARUBA={{uidaruba}}&config_path={{config_path}}",
              "headers": {}, "body": None,
