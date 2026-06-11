@@ -1,6 +1,6 @@
 # Multi-user deployment with the app's OWN self-service login
-# (AOS8_AUTH_MODE=accounts): engineers register with a verified @hpe.com email
-# and a password — no OAuth, no IdP.
+# (AOS8_AUTH_MODE=accounts): users register with a verified email and a
+# password — no OAuth, no IdP.
 #
 # ── HTTPS via Caddy ──────────────────────────────────────────────────────────
 # This service binds to 127.0.0.1 only, so it is NOT publicly reachable; your
@@ -33,7 +33,7 @@ services:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       AOS8_CREDSTORE_KEY: "${AOS8_CREDSTORE_KEY:-}"
       # ── Only used if you switch AOS8_AUTH_MODE=accounts (per-person login) ──
-      AOS8_ALLOWED_EMAIL_DOMAIN: "${AOS8_ALLOWED_EMAIL_DOMAIN:-hpe.com}"
+      AOS8_ALLOWED_EMAIL_DOMAIN: "${AOS8_ALLOWED_EMAIL_DOMAIN:-}"
       AOS8_SMTP_MODE: "${AOS8_SMTP_MODE:-}"
       AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-}"
       AOS8_SMTP_HOST: "${AOS8_SMTP_HOST:-}"

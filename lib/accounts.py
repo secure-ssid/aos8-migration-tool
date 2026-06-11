@@ -1,9 +1,10 @@
 """
 Self-service local user accounts for the multi-user deployment — registration
-restricted to a verified company email domain (default @hpe.com), no OAuth/IdP.
+with verified email, no OAuth/IdP. Optionally gate to a specific domain via
+AOS8_ALLOWED_EMAIL_DOMAIN; unset (the default) allows any valid email address.
 
-Flow: register (domain-gated) -> a 6-digit code is emailed to prove the address
-is really theirs -> enter the code -> the account is activated -> sign in.
+Flow: register (optionally domain-gated) -> a 6-digit code is emailed to prove
+the address is really theirs -> enter the code -> the account is activated -> sign in.
 
 Storage: a single JSON file (AOS8_USERS_FILE, default
 ~/.aos8-migration/users.json, perms 0600) holding, per email: a scrypt password
@@ -24,7 +25,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # --- policy knobs -----------------------------------------------------------
-ALLOWED_DOMAIN = os.environ.get("AOS8_ALLOWED_EMAIL_DOMAIN", "hpe.com").strip().lower()
+# Set AOS8_ALLOWED_EMAIL_DOMAIN to restrict registration to one domain (e.g.
+# "example.com"). Leave unset to allow any valid email address.
+ALLOWED_DOMAIN = os.environ.get("AOS8_ALLOWED_EMAIL_DOMAIN", "").strip().lower()
 MIN_PASSWORD_LEN = 10
 CODE_TTL_MINUTES = 15
 MAX_CODE_ATTEMPTS = 5
@@ -35,11 +38,19 @@ _KEYLEN = 64
 USERS_FILE = Path(os.environ.get(
     "AOS8_USERS_FILE", str(Path.home() / ".aos8-migration" / "users.json")))
 
-_EMAIL_RE = re.compile(rf"^[A-Za-z0-9._%+\-]+@{re.escape(ALLOWED_DOMAIN)}$", re.I)
+# Generic valid-email pattern; domain suffix appended only when a domain is set.
+_ANY_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$", re.I)
+_DOMAIN_EMAIL_RE = (
+    re.compile(rf"^[A-Za-z0-9._%+\-]+@{re.escape(ALLOWED_DOMAIN)}$", re.I)
+    if ALLOWED_DOMAIN else None
+)
 
 
 def allowed_email(email: str) -> bool:
-    return bool(_EMAIL_RE.match((email or "").strip()))
+    e = (email or "").strip()
+    if _DOMAIN_EMAIL_RE:
+        return bool(_DOMAIN_EMAIL_RE.match(e))
+    return bool(_ANY_EMAIL_RE.match(e))
 
 
 def _now() -> datetime:
@@ -96,7 +107,8 @@ def register(email: str, password: str):
     An existing *verified* account cannot be re-registered."""
     email = _norm(email)
     if not allowed_email(email):
-        return False, f"Use your @{ALLOWED_DOMAIN} email address.", None
+        domain_hint = f"@{ALLOWED_DOMAIN} " if ALLOWED_DOMAIN else ""
+        return False, f"Enter a valid {domain_hint}email address.", None
     if len(password or "") < MIN_PASSWORD_LEN:
         return False, f"Password must be at least {MIN_PASSWORD_LEN} characters.", None
     users = _load()

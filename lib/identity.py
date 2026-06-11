@@ -9,10 +9,10 @@ Modes (env ``AOS8_AUTH_MODE``):
     multi-user option: no registration, no email. There is no per-person
     identity, so saved creds are a single shared store (and only if a key is
     set) and the audit log is attributed to a generic team principal.
-  - ``accounts`` — the app's OWN self-service login (no OAuth/IdP). Engineers
-    register with a verified @hpe.com email; the signed-in email is the
-    identity, read from ``st.session_state['_auth_user']``. Per-person
-    isolation, but needs email for verification.
+  - ``accounts`` — the app's OWN self-service login (no OAuth/IdP). Users
+    register with a verified email (optionally restricted to one domain via
+    ``AOS8_ALLOWED_EMAIL_DOMAIN``); the signed-in email is the identity, read
+    from ``st.session_state['_auth_user']``. Per-person isolation, needs email.
   - ``proxy``    — behind a header-injecting reverse proxy; identity comes from
     ONE trusted header (``AOS8_IDENTITY_HEADER``). The proxy must SET and
     INBOUND-STRIP that header and be the sole ingress.

@@ -68,7 +68,7 @@ def _login_register() -> None:
     tab_login, tab_register = st.tabs(["Sign in", "Register"])
 
     with tab_login:
-        email = st.text_input("HPE email", key="login_email")
+        email = st.text_input("Email", key="login_email")
         pw = st.text_input("Password", type="password", key="login_pw")
         if st.button("Sign in", type="primary", key="login_btn"):
             status = accounts.verify_password(email, pw)
@@ -85,9 +85,10 @@ def _login_register() -> None:
                 st.error("Invalid email or password.")
 
     with tab_register:
-        st.caption(f"Registration is open to **@{accounts.ALLOWED_DOMAIN}** "
-                   f"addresses. We'll email a code to confirm it's yours.")
-        email_r = st.text_input(f"HPE email (@{accounts.ALLOWED_DOMAIN})", key="reg_email")
+        domain_hint = f"**@{accounts.ALLOWED_DOMAIN}** addresses" if accounts.ALLOWED_DOMAIN else "any email address"
+        st.caption(f"Registration is open to {domain_hint}. We'll email a code to confirm it's yours.")
+        email_label = f"Email (@{accounts.ALLOWED_DOMAIN})" if accounts.ALLOWED_DOMAIN else "Email"
+        email_r = st.text_input(email_label, key="reg_email")
         pw1 = st.text_input(f"Password (min {accounts.MIN_PASSWORD_LEN} chars)",
                             type="password", key="reg_pw1")
         pw2 = st.text_input("Confirm password", type="password", key="reg_pw2")
@@ -125,7 +126,7 @@ def render_gate() -> bool:
         st.caption("Enter the access password to continue.")
         _password_screen()
         return False
-    st.caption("Sign in with your HPE account to continue.")
+    st.caption("Sign in to continue.")
     pending = st.session_state.get("_pending_email")
     if pending:
         _verify_screen(pending)

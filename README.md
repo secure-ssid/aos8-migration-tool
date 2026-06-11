@@ -100,35 +100,33 @@ cp .env.example .env        # set AOS8_APP_PASSWORD
 docker compose up --build
 ```
 
-**Per-person — `@hpe.com` self-service login (`AOS8_AUTH_MODE=accounts`).**
-Engineers register with an **@hpe.com** email; a 6-digit code is emailed to
-confirm the address, then they set a password. The signed-in email scopes the
-per-user encrypted credential store and the audit log. Needs email (below).
+**Per-person — self-service login (`AOS8_AUTH_MODE=accounts`).**
+Users register with a verified email; a 6-digit code is emailed to confirm the
+address, then they set a password. The signed-in email scopes the per-user
+encrypted credential store and the audit log. Needs email (below).
 
 How accounts mode works and what to know:
 
-- **Verified registration.** Open to `@hpe.com` only (set
-  `AOS8_ALLOWED_EMAIL_DOMAIN` to change). The emailed code proves ownership, so
-  someone can't register a colleague's address. Passwords are stored
-  scrypt-hashed with a per-user salt; codes are short-lived and hashed.
+- **Verified registration.** Open to any valid email by default. Set
+  `AOS8_ALLOWED_EMAIL_DOMAIN=example.com` to restrict to one domain. The
+  emailed code proves ownership so someone can't register a colleague's address.
+  Passwords are stored scrypt-hashed with a per-user salt; codes are
+  short-lived and hashed.
 - **HTTPS via Caddy (recommended).** Passwords/codes traverse the connection.
-  The compose file binds the app to `127.0.0.1:8501`; put **Caddy** in front to
-  terminate HTTPS and reverse-proxy to it — `deploy/Caddyfile` is a ready
-  example (Caddy upgrades the websockets Streamlit needs automatically). Never
+  The compose file binds the app to `127.0.0.1:8501`; put **Caddy** in front
+  to terminate HTTPS and reverse-proxy to it — `deploy/Caddyfile` is a ready
+  example (Caddy handles the websockets Streamlit needs automatically). Never
   serve plain `:8501` to users.
-- **Verification email — no corporate relay needed.** The code just has to
-  *reach* the @hpe.com inbox; the **From can be any account** (a Gmail/throwaway
-  is fine — it does **not** need to be @hpe.com).
+- **Verification email.** The **From can be any account** (Gmail, throwaway,
+  transactional provider — anything that can SMTP-send).
   - **Gmail (easiest + reliable):** `AOS8_SMTP_MODE=relay`,
-    `AOS8_SMTP_HOST=smtp.gmail.com`, port `587`, user/from = your gmail address,
-    pass = a Google **App Password** (Security → App passwords). Gmail's
-    SPF/DKIM lands it in HPE inboxes.
+    `AOS8_SMTP_HOST=smtp.gmail.com`, port `587`, user/from = your Gmail address,
+    pass = a Google **App Password** (Security → App passwords).
   - **Transactional provider** (SendGrid/Resend/Brevo free tier) — same shape,
     a verified sender domain.
   - **`AOS8_SMTP_MODE=direct`** — no account at all; the app does the MX lookup
-    and delivers itself. May be spam-filtered by Proofpoint from an
-    unauthenticated IP; set `AOS8_SMTP_FROM` to a domain you control (not
-    @hpe.com).
+    and delivers itself. May be spam-filtered from an unauthenticated IP; set
+    `AOS8_SMTP_FROM` to a domain you control.
   - With nothing set, codes are written to the **container log only** (dev).
 - **Per-user credential isolation.** Saved creds are keyed and encrypted per
   signed-in user; one engineer's tenant secrets never load into another's
@@ -157,7 +155,7 @@ mode above is the recommended path.
 |---|---|---|
 | `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person `@hpe.com` login; `proxy` = reverse-proxy header; `local` = single user |
 | `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode (required in that mode; fail-closed if unset) |
-| `AOS8_ALLOWED_EMAIL_DOMAIN` | `hpe.com` | Email domain allowed to register in `accounts` mode |
+| `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
 | `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address); do **not** use @hpe.com |
