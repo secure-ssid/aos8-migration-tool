@@ -25,15 +25,17 @@ services:
     ports:
       - "127.0.0.1:8501:8501"   # localhost only — Caddy fronts HTTPS
     environment:
-      AOS8_AUTH_MODE: "accounts"
-      AOS8_ALLOWED_EMAIL_DOMAIN: "hpe.com"
-      # Per-user encrypted "Remember" (optional). Generate once:
+      # Simplest multi-user: one shared gate password (no registration, no email).
+      AOS8_AUTH_MODE: "${AOS8_AUTH_MODE:-password}"
+      AOS8_APP_PASSWORD: "${AOS8_APP_PASSWORD:?set a shared password in .env}"
+      # Per-user encrypted "Remember" (optional). In password mode this is a
+      # single SHARED store. Generate once:
       #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       AOS8_CREDSTORE_KEY: "${AOS8_CREDSTORE_KEY:-}"
-      # Verification email. mode=direct sends via MX lookup (no relay); mode=relay
-      # hands off to AOS8_SMTP_HOST. Empty = codes logged to console (dev only).
+      # ── Only used if you switch AOS8_AUTH_MODE=accounts (per-person login) ──
+      AOS8_ALLOWED_EMAIL_DOMAIN: "${AOS8_ALLOWED_EMAIL_DOMAIN:-hpe.com}"
       AOS8_SMTP_MODE: "${AOS8_SMTP_MODE:-}"
-      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-}"   # e.g. your gmail address (NOT @hpe.com)
+      AOS8_SMTP_FROM: "${AOS8_SMTP_FROM:-}"
       AOS8_SMTP_HOST: "${AOS8_SMTP_HOST:-}"
       AOS8_SMTP_PORT: "${AOS8_SMTP_PORT:-587}"
       AOS8_SMTP_USER: "${AOS8_SMTP_USER:-}"

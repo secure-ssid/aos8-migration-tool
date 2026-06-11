@@ -12,7 +12,7 @@ log via lib.identity.current_user() (which reads _auth_user in accounts mode).
 """
 import streamlit as st
 
-from lib import accounts, mailer
+from lib import accounts, identity, mailer
 
 
 def _deliver_code(email: str, code: str) -> bool:
@@ -104,12 +104,27 @@ def _login_register() -> None:
                     st.error(msg)
 
 
+def _password_screen() -> None:
+    pw = st.text_input("Access password", type="password", key="app_pw")
+    if st.button("Enter", type="primary", key="app_pw_btn"):
+        if identity.check_app_password(pw):
+            st.session_state["_authenticated"] = True
+            st.session_state["_auth_user"] = identity.SHARED_USER
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+
 def render_gate() -> bool:
     """Render the auth gate. Returns True if signed in (caller proceeds),
     False if the gate was drawn (caller must st.stop())."""
     if st.session_state.get("_authenticated") and st.session_state.get("_auth_user"):
         return True
     st.markdown("### 🔐 AOS 8 → Central Migration Console")
+    if identity.auth_mode() == "password":
+        st.caption("Enter the access password to continue.")
+        _password_screen()
+        return False
     st.caption("Sign in with your HPE account to continue.")
     pending = st.session_state.get("_pending_email")
     if pending:

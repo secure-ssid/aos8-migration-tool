@@ -17,8 +17,10 @@ RUN chown -R appuser:appuser /app
 RUN install -d -o appuser -g appuser -m 700 /home/appuser/.aos8-migration
 
 # Deployment knobs (override per environment — see docker-compose.yml):
-#   AOS8_AUTH_MODE=accounts  built-in self-service login (multi-user farm)
-#   AOS8_CREDSTORE_KEY=...    Fernet key enabling per-user encrypted "Remember";
+#   AOS8_AUTH_MODE=password  one shared gate password (simplest multi-user)
+#                  =accounts  per-person @hpe.com self-service login
+#   AOS8_APP_PASSWORD=...     the shared password (password mode)
+#   AOS8_CREDSTORE_KEY=...    Fernet key enabling encrypted "Remember";
 #                             unset in a multi-user mode => persistence is OFF
 # The image defaults to single-user 'local' mode so a plain `docker run` works.
 ENV AOS8_AUTH_MODE=local \

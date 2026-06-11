@@ -575,8 +575,9 @@ def sidebar_summary() -> None:
                 unsafe_allow_html=True,
             )
         from lib import identity
+        _mode = identity.auth_mode()
         _user = st.session_state.get("_user")
-        if identity.is_multiuser() and _user:
+        if _mode in ("accounts", "proxy") and _user:
             st.markdown(
                 f'<div style="margin-top:1.2rem;font-family:\'IBM Plex Mono\','
                 f'monospace;font-size:9px;color:{FAINT};letter-spacing:0.1em;'
@@ -584,10 +585,17 @@ def sidebar_summary() -> None:
                 f'<span style="color:{TEXT};">{esc(_user)}</span></div>',
                 unsafe_allow_html=True,
             )
-            if identity.auth_mode() == "accounts":
-                from lib import auth_ui
-                if st.button("Sign out", key="_logout_btn", use_container_width=True):
-                    auth_ui.logout()
+        elif _mode == "password" and st.session_state.get("_authenticated"):
+            st.markdown(
+                f'<div style="margin-top:1.2rem;font-family:\'IBM Plex Mono\','
+                f'monospace;font-size:9px;color:{FAINT};letter-spacing:0.1em;'
+                f'line-height:1.8;">SIGNED IN</div>',
+                unsafe_allow_html=True,
+            )
+        if identity.requires_login():
+            from lib import auth_ui
+            if st.button("Sign out", key="_logout_btn", width="stretch"):
+                auth_ui.logout()
         if st.session_state.get("remember_creds"):
             note = ('DEST API CREDS SAVED<br>ENCRYPTED FOR YOUR<br>'
                     'ACCOUNT · SOURCE<br>SECRETS NEVER WRITTEN')

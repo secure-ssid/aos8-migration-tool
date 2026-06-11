@@ -5,21 +5,24 @@ module reads "who is this user" from, so the identity SOURCE is swappable.
 Modes (env ``AOS8_AUTH_MODE``):
   - ``local``    (default) — single-user / laptop. Identity is a fixed local
     principal; no login. The original behaviour.
-  - ``accounts`` — multi-user farm with the app's OWN self-service login
-    (no OAuth/IdP). Engineers register with a verified @hpe.com email
-    (lib.accounts + lib.auth_ui); the signed-in email is the identity, read
-    here from ``st.session_state['_auth_user']``. This is the recommended
-    shared-deployment mode.
-  - ``proxy``    — multi-user behind a header-injecting reverse proxy. The
-    identity comes from ONE trusted header (``AOS8_IDENTITY_HEADER``, default
-    ``X-Forwarded-Email``) read via ``st.context.headers``. The proxy must SET
-    and INBOUND-STRIP that header and be the sole ingress, or it's spoofable.
-    Kept for completeness; ``accounts`` is preferred.
+  - ``password`` — one SHARED gate password (``AOS8_APP_PASSWORD``). Simplest
+    multi-user option: no registration, no email. There is no per-person
+    identity, so saved creds are a single shared store (and only if a key is
+    set) and the audit log is attributed to a generic team principal.
+  - ``accounts`` — the app's OWN self-service login (no OAuth/IdP). Engineers
+    register with a verified @hpe.com email; the signed-in email is the
+    identity, read from ``st.session_state['_auth_user']``. Per-person
+    isolation, but needs email for verification.
+  - ``proxy``    — behind a header-injecting reverse proxy; identity comes from
+    ONE trusted header (``AOS8_IDENTITY_HEADER``). The proxy must SET and
+    INBOUND-STRIP that header and be the sole ingress.
 
-Any non-local mode is treated as multi-user: the credstore goes per-user +
-encrypted and the audit log is attributed to the identity.
+``password``/``accounts`` render an in-app login gate. ``accounts``/``proxy``
+have per-person identities (credstore goes per-user). ``password`` has a single
+shared identity (one shared store).
 """
 import hashlib
+import hmac
 import os
 
 import streamlit as st
@@ -36,9 +39,27 @@ def identity_header() -> str:
     return os.environ.get("AOS8_IDENTITY_HEADER", _DEFAULT_IDENTITY_HEADER).strip()
 
 
+SHARED_USER = "team"
+
+
 def auth_mode() -> str:
-    """'local' (single-user, default), 'accounts' (built-in login), or 'proxy'."""
+    """'local' (default), 'password' (shared gate), 'accounts' (login), 'proxy'."""
     return os.environ.get("AOS8_AUTH_MODE", "local").strip().lower()
+
+
+def requires_login() -> bool:
+    """Modes where the app renders its own in-app login gate."""
+    return auth_mode() in ("password", "accounts")
+
+
+def check_app_password(password: str) -> bool:
+    """Constant-time check against the single shared password
+    (``AOS8_APP_PASSWORD``). Fail-closed: with no password configured, nobody
+    gets in."""
+    expected = os.environ.get("AOS8_APP_PASSWORD", "")
+    if not expected:
+        return False
+    return hmac.compare_digest(password or "", expected)
 
 
 def is_multiuser() -> bool:
@@ -71,6 +92,8 @@ def current_user() -> str | None:
     mode = auth_mode()
     if mode == "local":
         return os.environ.get("AOS8_LOCAL_USER", LOCAL_USER).strip().lower()
+    if mode == "password":
+        return SHARED_USER if st.session_state.get("_authenticated") else None
     if mode == "accounts":
         return st.session_state.get("_auth_user")
     return _header_identity()  # proxy

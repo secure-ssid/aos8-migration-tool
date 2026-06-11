@@ -88,18 +88,24 @@ token, never source-side secrets) to `~/.aos8-migration/<user>/credentials.json`
 
 ### Multi-user (Docker farm, concurrent engineers)
 
-The app has its **own self-service login** (`AOS8_AUTH_MODE=accounts`) — no
-OAuth, no IdP. Engineers register with an **@hpe.com** email; a 6-digit code is
-emailed to confirm the address is really theirs, then they set a password and
-sign in. The signed-in email becomes the identity that scopes the per-user
-encrypted credential store and the audit log.
+Two built-in login options — no OAuth, no IdP:
+
+**Simplest — one shared password (`AOS8_AUTH_MODE=password`, the default).** Set
+`AOS8_APP_PASSWORD` and everyone uses that one password to get in. No
+registration, no email. There's no per-person identity, so saved creds are a
+single shared store and audit lines are attributed to a generic `team`.
 
 ```bash
-cp .env.example .env        # set SMTP (verification emails) + AOS8_CREDSTORE_KEY
+cp .env.example .env        # set AOS8_APP_PASSWORD
 docker compose up --build
 ```
 
-How it works and what to know:
+**Per-person — `@hpe.com` self-service login (`AOS8_AUTH_MODE=accounts`).**
+Engineers register with an **@hpe.com** email; a 6-digit code is emailed to
+confirm the address, then they set a password. The signed-in email scopes the
+per-user encrypted credential store and the audit log. Needs email (below).
+
+How accounts mode works and what to know:
 
 - **Verified registration.** Open to `@hpe.com` only (set
   `AOS8_ALLOWED_EMAIL_DOMAIN` to change). The emailed code proves ownership, so
@@ -149,7 +155,8 @@ mode above is the recommended path.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `AOS8_AUTH_MODE` | `local` | `accounts` = built-in self-service login (multi-user); `proxy` = trust a reverse-proxy identity header; `local` = single user |
+| `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person `@hpe.com` login; `proxy` = reverse-proxy header; `local` = single user |
+| `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode (required in that mode; fail-closed if unset) |
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | `hpe.com` | Email domain allowed to register in `accounts` mode |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |

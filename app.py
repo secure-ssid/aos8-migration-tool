@@ -51,7 +51,7 @@ inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba
 _user = identity.current_user()
 st.session_state["_user"] = _user
 _mode = identity.auth_mode()
-if _mode == "accounts":
+if identity.requires_login():        # 'password' or 'accounts' — in-app login gate
     if not auth_ui.render_gate():
         st.stop()
     st.session_state["_user"] = identity.current_user()
