@@ -102,8 +102,10 @@ def render():
             return str(ap.get("serialNumber") or ap.get("serial") or "").strip().upper()
 
         migrated        = [ap for ap in all_aps if serial_of(ap) in expected]
+        # Classic reports "Up"/"Down"; New Central device status is
+        # "ONLINE"-style — accept both spellings of online
         migrated_online = [ap for ap in migrated
-                           if str(ap.get("status", "")).lower() == "up"]
+                           if str(ap.get("status", "")).lower() in ("up", "online")]
 
         st.divider()
         section_label("Migration status")
