@@ -3,10 +3,27 @@ Shared client construction from Streamlit session state — keeps the
 credential plumbing (and the classic rotating-refresh-token persistence)
 identical between the Provision and Validate views.
 """
+import hashlib
+
 import streamlit as st
 
 from .central_client import CentralClient
 from .classic_central_client import ClassicCentralClient
+
+
+def tenant_fingerprint() -> str:
+    """Stable identity of the DESTINATION TENANT the session points at.
+    Base URL alone is not enough (many tenants share a regional URL), so the
+    API client id is included; for Classic, the client id may be absent, so
+    the gateway base is the best available identity. Rotating tokens are
+    deliberately excluded — a refreshed token is the same tenant."""
+    ss = st.session_state
+    if ss.get("dest_type", "new") == "new":
+        raw = "new|" + ss.get("central_base", "") + "|" + ss.get("central_client_id", "")
+    else:
+        raw = ("classic|" + ss.get("central_base_classic", "")
+               + "|" + ss.get("central_client_id", ""))
+    return hashlib.sha1(raw.encode()).hexdigest()
 
 
 _DEFAULT_CLASSIC_BASE = "https://apigw-uswest4.central.arubanetworks.com"

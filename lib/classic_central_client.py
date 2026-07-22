@@ -34,6 +34,7 @@ from urllib.parse import quote
 import requests
 
 from .models import AuthType, CentralConfig, ForwardMode, SSID
+from .central_client import PSK_PLACEHOLDER, secret_looks_unusable
 
 OPMODE_CLASSIC = {
     AuthType.OPEN: "opensystem",
@@ -414,9 +415,15 @@ class ClassicCentralClient:
             "type": "employee",
             "vlan": str(ssid.vlan) if ssid.vlan else "",
             "hide_ssid": not ssid.broadcast,
+            # a source WLAN that was administratively disabled stays disabled
+            "disable_ssid": not getattr(ssid, "enabled", True),
         })
         if ssid.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE):
-            wlan["wpa_passphrase"] = ssid.psk or ""
+            # AOS 8 exports PSKs hashed/encrypted — pushing that verbatim
+            # creates a WLAN with an unusable credential. Same placeholder
+            # policy as the New Central client.
+            usable = ssid.psk and not secret_looks_unusable(ssid.psk)
+            wlan["wpa_passphrase"] = ssid.psk if usable else PSK_PLACEHOLDER
         if ssid.auth_type in ENTERPRISE:
             wlan["access_type"] = "network_based"
             wlan["auth_server1"] = ssid.auth_server_group or ""

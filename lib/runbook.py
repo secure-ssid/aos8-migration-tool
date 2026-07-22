@@ -60,6 +60,45 @@ MODEL_FAMILIES = {
 }
 
 
+def _overlay_completion_block(customer: CustomerConfig,
+                              central: CentralConfig) -> list[str]:
+    """The tunnel/split SSIDs Step 3 DEFERRED ('see runbook') are completed
+    HERE — after the converted MCs have joined Central as gateways and the
+    cluster exists, the overlay WLANs are created and bound to it. Without
+    this block the deferral pointed at instructions that did not exist."""
+    if central.gateways_retired or not central.gw_cluster_name:
+        return []
+    tunnel = [s for s in customer.ssids
+              if s.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT)]
+    if not tunnel:
+        return []
+    out = [
+        "",
+        "MANUAL — COMPLETE THE OVERLAY (TUNNEL) SSIDs",
+        "─" * 40,
+        "Step 3 deliberately DEFERRED these SSIDs: the gateway cluster",
+        f"'{central.gw_cluster_name}' only exists after the converted MC(s)",
+        "join Central as gateways. Complete them AFTER the gateways are up:",
+        "",
+        "  1. Central → Devices → Gateways: confirm the gateway(s) joined and",
+        f"     the cluster '{central.gw_cluster_name}' is formed and healthy.",
+        "  2. For each tunnel SSID below, create the overlay WLAN in Central",
+        "     (Config → WLANs → Add) with forward mode TUNNEL/L2, bound to the",
+        f"     cluster '{central.gw_cluster_name}' (GRE), on its listed VLAN:",
+    ]
+    for s in tunnel:
+        out.append(f"       [ ] {s.display_name}  (VLAN {s.vlan}"
+                   + (", 802.1X — attach its RADIUS server group"
+                      if s.auth_server_group else "")
+                   + ")")
+    out += [
+        "  3. Broadcast-test each overlay SSID with a client and confirm the",
+        "     client lands on the correct VLAN behind the gateway.",
+        "",
+    ]
+    return out
+
+
 def generate(customer: CustomerConfig, central: CentralConfig, customer_name: str = "") -> str:
     name = customer_name or central.customer_name or "Customer"
     today = date.today().strftime("%Y-%m-%d")
@@ -130,6 +169,7 @@ def generate(customer: CustomerConfig, central: CentralConfig, customer_name: st
         _write_single_mc_steps(lines, customer, central)
 
     lines += _manual_secrets_block(customer)
+    lines += _overlay_completion_block(customer, central)
 
     lines += [
         "",

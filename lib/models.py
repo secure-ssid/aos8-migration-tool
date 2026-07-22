@@ -28,7 +28,8 @@ class SSID:
     psk: Optional[str] = None
     auth_server_group: Optional[str] = None
     role_name: Optional[str] = None
-    broadcast: bool = True
+    broadcast: bool = True          # False = hidden SSID (still enabled)
+    enabled: bool = True            # False = WLAN administratively disabled at the source
     auth_known: bool = True         # False = auth type could not be determined
     vlan_raw: Optional[str] = None  # original VLAN token when non-numeric (named VLAN)
     # additional WLAN attributes migrated to New Central (0/"" = use default)
@@ -160,6 +161,9 @@ class CentralConfig:
     groups: list[CentralGroupConfig] = field(default_factory=list)
     sites: list[str] = field(default_factory=list)
     radius_servers: list[RadiusServer] = field(default_factory=list)
+    # discovered AOS 8 server-groups — provisioning recreates them so each
+    # 802.1X SSID keeps its own RADIUS group instead of one merged group
+    server_groups: list = field(default_factory=list)
     gw_cluster_name: Optional[str] = None
     gw_serial: Optional[str] = None
     # True when the customer chose to retire gateways: every tunnel/split SSID

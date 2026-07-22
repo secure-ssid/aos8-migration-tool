@@ -200,3 +200,36 @@ def test_ap_group_list_title_is_not_a_group():
     from lib.aos8_parser import _parse_ap_groups
     groups = _parse_ap_groups("AP group List\n-------------\nName\n----\ncampus\n")
     assert all(g.name.lower() != "list" for g in groups)
+
+
+def test_instant_disabled_wlan_stays_disabled_not_hidden():
+    cfg = parse_instant_config(
+        {"running_config": INSTANT_CONFIG + '''
+wlan ssid-profile off-net
+ essid off-net
+ opmode wpa2-psk-aes
+ wpa-passphrase Something123
+ vlan 100
+ disable
+!
+''', "show_aps": INSTANT_APS}, vc_ip="10.2.1.9")
+    off = next(s for s in cfg.ssids if s.name == "off-net")
+    assert off.enabled is False          # administratively OFF...
+    assert off.broadcast is True         # ...NOT a hidden-but-active SSID
+
+
+def test_instant_quoted_psk_with_spaces():
+    cfg = parse_instant_config(
+        {"running_config": INSTANT_CONFIG.replace(
+            "wpa-passphrase SecretPass123",
+            'wpa-passphrase "instant pass with spaces"')},
+        vc_ip="10.2.1.9")
+    corp = next(s for s in cfg.ssids if s.name == "corp")
+    assert corp.psk == "instant pass with spaces"
+
+
+def test_api_group_cell_placeholder_normalized():
+    from lib.aos8_client import _normalize_group_cell
+    assert _normalize_group_cell("-") == "default"
+    assert _normalize_group_cell("") == "default"
+    assert _normalize_group_cell("campus") == "campus"

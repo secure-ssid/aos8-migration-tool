@@ -273,7 +273,7 @@ def render():
                     if len(page) < 100:
                         break
                     offset += 100
-                subs = client.list_subscriptions()
+                subs = client.list_all_subscriptions()
                 try:
                     sms = client.list_service_managers()
                 except Exception:

@@ -74,8 +74,11 @@ def cleanup(prefix: str, central=None, classic=None,
         try:
             ssids = _list(central._get("/network-config/v1/wlan-ssids"),
                           "wlan-ssid", "wlan-ssids")
-        except Exception:
+        except Exception as e:
             ssids = []
+            results.append(("List SSIDs", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
         for s in ssids:
             essid = s.get("essid")
             name = (s.get("ssid") or (essid.get("name") if isinstance(essid, dict) else essid)
@@ -98,8 +101,11 @@ def cleanup(prefix: str, central=None, classic=None,
         try:
             groups = _list(central._get("/network-config/v1alpha1/server-groups"),
                            "server-group", "server-groups")
-        except Exception:
+        except Exception as e:
             groups = []
+            results.append(("List server-groups", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
         for g in groups:
             nm = g.get("name", "")
             if _matches(nm, prefix):
@@ -111,8 +117,11 @@ def cleanup(prefix: str, central=None, classic=None,
         try:
             servers = _list(central._get("/network-config/v1alpha1/auth-servers"),
                             "auth-server", "auth-servers")
-        except Exception:
+        except Exception as e:
             servers = []
+            results.append(("List auth servers", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
         for sv in servers:
             nm = sv.get("name", "")
             if _matches(nm, prefix):

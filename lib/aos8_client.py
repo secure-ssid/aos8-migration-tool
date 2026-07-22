@@ -490,7 +490,10 @@ class AOS8Client:
                 model=_normalize_model(model),
                 mac=str(row.get("Wired MAC Address", "")).strip(),
                 name=name or serial,
-                ap_group=str(row.get("Group", "")).strip(),
+                # `-`/blank means "no group" in `show ap database` output —
+                # normalize like paste mode, or a device group literally
+                # named "-" gets provisioned (B14)
+                ap_group=_normalize_group_cell(row.get("Group", "")),
                 ip=str(row.get("IP Address", "")).strip(),
                 status="Up" if status_raw.lower().startswith("up") else (status_raw or "unknown"),
             ))
@@ -703,6 +706,16 @@ def _vlan_is_named(value: Any) -> bool:
         if m and 1 <= int(m.group(1)) <= 4094:
             return False
     return True
+
+
+_GROUP_CELL_PLACEHOLDERS = {"", "-", "--", "\u2014", "n/a", "na", "none"}
+
+
+def _normalize_group_cell(token: Any) -> str:
+    """AP-database Group column placeholders mean the default group — mirror
+    the paste parser's normalization so API and paste discovery agree."""
+    t = str(token or "").strip()
+    return "default" if t.lower() in _GROUP_CELL_PLACEHOLDERS else t
 
 
 def _normalize_model(model: Any) -> str:

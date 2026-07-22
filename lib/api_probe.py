@@ -75,15 +75,19 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
         try:
             client._post("/network-config/v1/device-groups",
                          json={"scopeName": "zzprobe-donotcreate-readonly"})
-            # if it somehow created, remove it so the probe stays read-only
+            # the create went through — remove the probe group again, and
+            # SAY SO if the delete fails (a leftover zzprobe group in a
+            # production tenant must never be silent)
             try:
                 for grp in client.list_device_groups(refresh=True):
                     if grp.get("scopeName") == "zzprobe-donotcreate-readonly":
                         client._request("DELETE",
                                         "/network-config/v1/device-groups/bulk",
                                         json={"items": [{"id": grp.get("scopeId")}]})
-            except Exception:
-                pass
+            except Exception as e:
+                return ("device-group WRITE allowed — WARNING: the disposable "
+                        "'zzprobe-donotcreate-readonly' group could not be "
+                        f"deleted ({str(e)[:80]}) — remove it in Central")
             return "device-group WRITE allowed (native New Central, not hybrid)"
         except CentralAPIError as e:
             if "HYBRID_CLUSTER" in str(e) or "API_ACCESS_RESTRICTED" in str(e):
