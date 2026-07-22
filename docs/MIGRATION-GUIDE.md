@@ -194,7 +194,7 @@ chooses the path.
 2. Pick the **Source platform** (Mobility Controller vs Instant cluster).
 3. Pull the config: **API mode** (MC IP + credentials → *Connect & Pull
    Config*) or **Paste CLI output** (one text box per show command → *Parse
-   Pasted Output*). No controller handy? Open the 🧪 *Load test customer*
+   Pasted Output*). No controller handy? Open the *Load test customer*
    expander and load a synthetic scenario instead.
 4. Review the **Discovery summary** — AP groups with their SSIDs
    (color-coded tunnel/split/bridge), the AP table with AOS 10 compatibility
@@ -307,7 +307,7 @@ fix a failure and use "Reset & re-run provisioning."
 
 1. Expand the **manifest** and read exactly what will be created — sites,
    groups, VLANs, SSIDs, auth servers — before anything is written.
-2. Hit **🚀 Provision** and watch the live per-step log.
+2. Hit **Provision** and watch the live per-step log.
 3. On failures: fix the cause (the raw API error is shown per step) and use
    **Reset & re-run provisioning** — completed objects are reused.
 4. **GreenLake →** when the log is green:

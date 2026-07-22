@@ -82,7 +82,7 @@ An alternative for shops that already have an authenticating proxy
 (`AOS8_IDENTITY_HEADER`, default `X-Forwarded-Email`). The proxy must SET
 **and inbound-strip** that header and be the sole ingress.
 
-> ⚠️ **In proxy mode the loopback (or proxy-network-only) binding is
+> **In proxy mode the loopback (or proxy-network-only) binding is
 > mandatory** — anyone who can reach `:8501` directly can impersonate any
 > user with one header. The built-in `accounts` mode above is the
 > recommended path.
