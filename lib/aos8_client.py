@@ -31,20 +31,43 @@ CONFIG_PATH_PREFIX = "/v1/configuration"
 # AP models known to be incompatible with AOS 10.
 # NOTE: verify against Aruba's official AOS 10 supported-platform matrix for
 # each release; matching is exact-token (country variants like -US stripped).
+# From Wi-Fi 5 (802.11ac), ONLY the 303 series (303/303H/303P), AP-318, the
+# 340 series (344/345) and the 370 series (374/375/377) made it into AOS 10;
+# every other 2xx/3xx (and all Wi-Fi 4 and older) did not. AP-/IAP- prefixes
+# are treated as interchangeable by the lookup, so one prefix per model is
+# enough — both are listed for the models operators paste most.
 INCOMPATIBLE_MODELS = {
+    # Wi-Fi 4 and older
+    "AP-92", "AP-93", "AP-93H",
+    "AP-103", "AP-103H", "AP-104", "AP-105",
+    "AP-114", "AP-115",
+    "AP-134", "AP-135",
+    "AP-175", "AP-175P", "AP-175AC", "AP-175DC",
     "IAP-103", "IAP-104", "IAP-105",
     "IAP-134", "IAP-135",
     "IAP-175", "IAP-175P", "IAP-175AC",
-    "IAP-204", "IAP-205",
-    "IAP-214", "IAP-215",
-    "IAP-224", "IAP-225",
-    "IAP-274", "IAP-275",
-    "IAP-315",
-    "AP-204", "AP-205",
+    "RAP-3WN", "RAP-3WNP", "RAP-108", "RAP-109", "RAP-155", "RAP-155P",
+    # 200 series (Wi-Fi 5 wave 1 + hospitality/remote)
+    "AP-203H", "AP-203R", "AP-203RP",
+    "AP-204", "AP-205", "AP-205H", "AP-207",
     "AP-214", "AP-215",
-    "AP-224", "AP-225",
-    "AP-274", "AP-275",
-    "AP-315",
+    "AP-224", "AP-225", "AP-228",
+    "AP-274", "AP-275", "AP-277",
+    "IAP-204", "IAP-205", "IAP-205H", "IAP-207",
+    "IAP-214", "IAP-215",
+    "IAP-224", "IAP-225", "IAP-228",
+    "IAP-274", "IAP-275", "IAP-277",
+    # 300 series models NOT carried into AOS 10 (303/318/34x/37x are OK)
+    "AP-304", "AP-305",
+    "AP-314", "AP-315",
+    "AP-324", "AP-325",
+    "AP-334", "AP-335",
+    "AP-365", "AP-367",
+    "IAP-304", "IAP-305",
+    "IAP-314", "IAP-315",
+    "IAP-324", "IAP-325",
+    "IAP-334", "IAP-335",
+    "IAP-365", "IAP-367",
 }
 
 _COUNTRY_SUFFIXES = ("-US", "-RW", "-JP", "-IL", "-EG")

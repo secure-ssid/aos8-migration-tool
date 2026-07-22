@@ -71,7 +71,10 @@ def check_app_password(password: str) -> bool:
     expected = os.environ.get("AOS8_APP_PASSWORD", "")
     if not expected:
         return False
-    return hmac.compare_digest(password or "", expected)
+    # compare bytes — compare_digest on str raises TypeError for non-ASCII
+    # input, which would crash the login gate instead of rejecting it
+    return hmac.compare_digest((password or "").encode("utf-8"),
+                               expected.encode("utf-8"))
 
 
 # Shared-password mode has no per-user record to hang a lockout on, so the

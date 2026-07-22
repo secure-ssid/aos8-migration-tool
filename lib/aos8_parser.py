@@ -76,8 +76,20 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
             grp.ssids = list(all_ssid_names)
             mapping_incomplete = True
 
+    # EAP termination on the controller ("EAP offload") lives inside the
+    # dot1x auth profile as `termination enable` — the old aaa-fastconnect
+    # token is not an AOS 8 running-config keyword, so keep it only as a
+    # belt-and-suspenders extra.
     has_eap = "aaa-fastconnect" in running.lower()
-    has_internal = "internal" in pasted_outputs.get("aaa_auth_server", "").lower()
+    for _dot1x_name, _dot1x_block in _iter_blocks(running, r"aaa authentication dot1x"):
+        if any(l.strip().lower().startswith("termination") for l in _dot1x_block):
+            has_eap = True
+            break
+    # The built-in "Internal" server appears in EVERY `show aaa
+    # authentication-server all` output — its mere presence proves nothing.
+    # Internal auth is in USE only when a server-group references it.
+    has_internal = bool(re.search(r'^\s*auth-server\s+"?Internal"?\s*$',
+                                  running, re.IGNORECASE | re.MULTILINE))
 
     return CustomerConfig(
         mc_ip=mc_ip_parsed or mc_ip,
@@ -107,12 +119,18 @@ def parse_cli_table(text: str, required_cols: tuple[str, ...]) -> list[dict[str,
         ap-1    campus    335      10.0.0.5      Up 10d:2h     ...
     """
     lines = text.splitlines()
+
+    def _hdr_norm(s: str) -> str:
+        # header spellings vary ("IP Address" vs "IP-Address") — compare on
+        # alphanumerics only, mirroring what _row_get tolerates
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
     for i in range(1, len(lines)):
         sep = lines[i]
         if not re.fullmatch(r"[-\s]+", sep) or "-" not in sep:
             continue
         header = lines[i - 1]
-        if not all(c.lower() in header.lower() for c in required_cols):
+        if not all(_hdr_norm(c) in _hdr_norm(header) for c in required_cols):
             continue
         starts = [m.start() for m in re.finditer(r"-+", sep)]
         if len(starts) < 2:
@@ -148,6 +166,10 @@ def _row_get(row: dict[str, str], *names: str) -> str:
 # in the default group / unprovisioned — never let that become a literal
 # device-group name like "-" in Central.
 _GROUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none"}
+
+# allowed-band token sets → Central rf-band enum (shared by the ssid-profile
+# and virtual-ap parsers — the parameter officially lives on the virtual-ap)
+_BAND_MAP = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
 
 
 def _clean_group(token: str) -> str:
@@ -227,7 +249,10 @@ def _parse_ap_groups(text: str) -> list[APGroup]:
         m = re.match(r"(?:AP Group|ap-group)\s*[:\s]\s*\"?([\w\-. ]+?)\"?\s*$", line, re.IGNORECASE)
         if m:
             name = m.group(1).strip()
-            if name and name.lower() not in ("default", "noauthapgroup") and name not in seen:
+            # "list" excluded: `show ap-group` titles its table "AP group
+            # List", which this pattern would otherwise read as a group
+            if name and name.lower() not in ("default", "noauthapgroup", "list") \
+                    and name not in seen:
                 seen.add(name)
                 groups.append(APGroup(name=name))
     if not groups:
@@ -272,7 +297,6 @@ def _iter_blocks(text: str, opener: str):
 def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     profiles = {}
     # AOS8 'a-band'/'g-band'/'wmm' → New Central rf-band enum
-    _BAND = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
         info = {"essid": "", "opmode": "", "passphrase": None,
                 "rf_band": "", "dtim_period": 0, "max_clients": 0}
@@ -284,7 +308,9 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             m = re.match(r"opmode\s+([\w\-]+)", line, re.IGNORECASE)
             if m:
                 info["opmode"] = m.group(1)
-            m = re.match(r"wpa-passphrase\s+(\S+)", line, re.IGNORECASE)
+            # quoted passphrases may contain spaces — capture to end of line
+            # and strip the quotes (\S+ would keep the quote and truncate)
+            m = re.match(r'wpa-passphrase\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
             if m:
                 info["passphrase"] = m.group(1)
             m = re.match(r"dtim-period\s+(\d+)", line, re.IGNORECASE)
@@ -298,7 +324,7 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             if m:
                 bands = {b for b in m.group(1).lower().split() if b in ("a", "g")}
         if bands:
-            info["rf_band"] = _BAND.get(tuple(sorted(bands)), "BAND_ALL")
+            info["rf_band"] = _BAND_MAP.get(tuple(sorted(bands)), "BAND_ALL")
         profiles[name] = info
     return profiles
 
@@ -371,6 +397,7 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
         fwd = ForwardMode.TUNNEL
         prof_ref = ""
         aaa_ref = ""
+        vap_bands: set = set()
         for line in block:
             low = line.lower()
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
@@ -389,6 +416,11 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
                 m = re.match(r"aaa-profile\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
                 if m:
                     aaa_ref = m.group(1)
+                # allowed-band is a virtual-ap parameter in AOS 8
+                m = re.match(r"allowed-band\s+(.+)$", line, re.IGNORECASE)
+                if m:
+                    vap_bands = {b for b in m.group(1).lower().split()
+                                 if b in ("a", "g")}
 
         prof = ssid_profiles.get(prof_ref, {})
         auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
@@ -405,7 +437,8 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             # prefer the real server group from inside the aaa-profile; the
             # profile name is only a last-resort placeholder
             auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
-            rf_band=prof.get("rf_band", ""),
+            rf_band=(_BAND_MAP.get(tuple(sorted(vap_bands)), "BAND_ALL")
+                     if vap_bands else prof.get("rf_band", "")),
             dtim_period=prof.get("dtim_period", 0),
             max_clients=prof.get("max_clients", 0),
             captive_portal_url=cp.get("url", ""),
@@ -447,9 +480,14 @@ def _parse_radius_servers(auth_text: str, running_text: str) -> list[RadiusServe
             servers.append(RadiusServer(name=name, address=host,
                                         auth_port=auth_port, acct_port=acct_port))
 
-    # `show aaa authentication-server radius` summary table fallback
+    # Summary-table fallbacks. Two shapes exist:
+    #   `show aaa authentication-server radius`:  <name> <ip> <port> ...
+    #   `show aaa authentication-server all`:     <name> <Type> <ip> ...
     for line in auth_text.splitlines():
-        m = re.match(r"([\w\-.]+)\s+([\d.]+)\s+\d+", line.strip())
+        line = line.strip()
+        m = (re.match(r"([\w\-.]+)\s+([\d.]+)\s+\d+", line)
+             or re.match(r"([\w\-.]+)\s+Radius\s+(\d+\.\d+\.\d+\.\d+)", line,
+                         re.IGNORECASE))
         if m and m.group(1) not in seen:
             seen.add(m.group(1))
             servers.append(RadiusServer(name=m.group(1), address=m.group(2)))

@@ -147,8 +147,9 @@ def render_gate() -> bool:
 
 
 def logout() -> None:
-    for k in ("_authenticated", "_auth_user", "_pending_email"):
-        st.session_state.pop(k, None)
-    # drop any loaded destination creds so the next user starts clean
-    st.session_state["_creds_loaded"] = False
+    # Clear the WHOLE session, not just the auth flags: the sign-out button
+    # exists for shared workstations, and the previous operator's decrypted
+    # API secrets, tokens and discovered customer data must not survive into
+    # the next sign-in on this browser session.
+    st.session_state.clear()
     st.rerun()

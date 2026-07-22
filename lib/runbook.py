@@ -41,10 +41,22 @@ def _manual_secrets_block(customer: CustomerConfig) -> list[str]:
 # AP model → AOS 10 image family codename, used only for the manual-server
 # alternative. Only confidently-known families are mapped; anything else gets
 # an explicit placeholder so a wrong image is never pasted into a controller.
+# Verified against the Instant 8.x release-notes supported-platforms tables
+# (image file: ArubaInstant_<Family>_<version>_<build>):
+#   Scorpio = 303 series          Gemini = 318 / 370 series
+#   Draco   = 344/345, 500/510/518/570 series
+#   Lupus   = 530/550/580 series  Norma  = 630/650 series
 MODEL_FAMILIES = {
-    "303": "Ursa", "304": "Ursa", "305": "Ursa",
-    "504": "Scorpio", "505": "Scorpio",
-    "535": "Norma", "555": "Norma",
+    "303": "Scorpio",
+    "318": "Gemini",
+    "344": "Draco", "345": "Draco",
+    "374": "Gemini", "375": "Gemini", "377": "Gemini",
+    "504": "Draco", "505": "Draco",
+    "514": "Draco", "515": "Draco", "518": "Draco",
+    "574": "Draco", "575": "Draco", "577": "Draco",
+    "534": "Lupus", "535": "Lupus", "555": "Lupus",
+    "584": "Lupus", "585": "Lupus", "587": "Lupus",
+    "635": "Norma", "655": "Norma",
 }
 
 

@@ -59,23 +59,39 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
 
 
 def _check_ap_models(customer: CustomerConfig) -> list[CheckResult]:
-    incompatible = []
+    incompatible, unknown = [], []
     for ap in customer.aps:
-        if not is_model_compatible(ap.model):
+        if not ap.model:
+            unknown.append(ap.name or ap.serial or "(unnamed AP)")
+        elif not is_model_compatible(ap.model):
             incompatible.append(f"{ap.name} ({ap.model})")
 
+    results = []
     if incompatible:
-        return [CheckResult(
+        results.append(CheckResult(
             name="AP Model Compatibility",
             status=Status.FAIL,
             message=f"{len(incompatible)} AP(s) do not support AOS 10 — hardware refresh required before migration.",
             detail="Incompatible APs:\n" + "\n".join(incompatible),
-        )]
-    return [CheckResult(
-        name="AP Model Compatibility",
-        status=Status.PASS,
-        message=f"All {len(customer.aps)} APs support AOS 10.",
-    )]
+        ))
+    else:
+        known = len(customer.aps) - len(unknown)
+        results.append(CheckResult(
+            name="AP Model Compatibility",
+            status=Status.PASS,
+            message=f"All {known} APs with a known model support AOS 10.",
+        ))
+    if unknown:
+        # a blank model can't be checked — surface it instead of silently
+        # counting it as compatible
+        results.append(CheckResult(
+            name="AP Models Unknown",
+            status=Status.WARN,
+            message=f"{len(unknown)} AP(s) have no model in the discovery data — "
+                    "compatibility could not be checked.",
+            detail="APs without a model:\n" + "\n".join(unknown),
+        ))
+    return results
 
 
 def _parse_firmware_tuple(version: str) -> Optional[tuple]:

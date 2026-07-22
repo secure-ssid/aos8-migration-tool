@@ -21,8 +21,15 @@ import json
 import os
 import re
 import secrets
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:          # non-POSIX — thread lock only
+    fcntl = None
 
 # --- policy knobs -----------------------------------------------------------
 # Set AOS8_ALLOWED_EMAIL_DOMAIN to restrict registration to one domain (e.g.
@@ -67,6 +74,29 @@ def _now() -> datetime:
 
 def _norm(email: str) -> str:
     return (email or "").strip().lower()
+
+
+# users.json is read-modify-written by every mutation. Streamlit serves
+# sessions from threads (and the farm may share the volume between replicas),
+# so an unlocked write can lose a registration or reset another user's
+# lockout counter. Thread lock for in-process races + flock for cross-process.
+_IO_LOCK = threading.Lock()
+
+
+@contextmanager
+def _locked():
+    with _IO_LOCK:
+        if fcntl is None:
+            yield
+            return
+        USERS_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lockfile = open(USERS_FILE.with_name(USERS_FILE.name + ".lock"), "w")
+        try:
+            fcntl.flock(lockfile, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lockfile, fcntl.LOCK_UN)
+            lockfile.close()
 
 
 def _load() -> dict:
@@ -119,83 +149,86 @@ def register(email: str, password: str):
         return False, f"Enter a valid {domain_hint}email address.", None
     if len(password or "") < MIN_PASSWORD_LEN:
         return False, f"Password must be at least {MIN_PASSWORD_LEN} characters.", None
-    users = _load()
-    rec = users.get(email)
-    if rec and rec.get("verified"):
-        return False, "An account with that email already exists — sign in instead.", None
-    salt = os.urandom(16)
-    code = _new_code()
-    users[email] = {
-        "salt": salt.hex(),
-        "hash": _pw_hash(password, salt),
-        "created": _now().isoformat(),
-        "verified": False,
-        "code": {
-            "hash": _code_hash(code, salt),
-            "expires": (_now() + timedelta(minutes=CODE_TTL_MINUTES)).isoformat(),
-            "issued": _now().isoformat(),
-            "attempts": 0,
-        },
-    }
-    _save(users)
+    with _locked():
+        users = _load()
+        rec = users.get(email)
+        if rec and rec.get("verified"):
+            return False, "An account with that email already exists — sign in instead.", None
+        salt = os.urandom(16)
+        code = _new_code()
+        users[email] = {
+            "salt": salt.hex(),
+            "hash": _pw_hash(password, salt),
+            "created": _now().isoformat(),
+            "verified": False,
+            "code": {
+                "hash": _code_hash(code, salt),
+                "expires": (_now() + timedelta(minutes=CODE_TTL_MINUTES)).isoformat(),
+                "issued": _now().isoformat(),
+                "attempts": 0,
+            },
+        }
+        _save(users)
     return True, "Account created — check your email for a verification code.", code
 
 
 def resend_code(email: str):
     """Issue a fresh code for a pending account. Returns (ok, message, code)."""
     email = _norm(email)
-    users = _load()
-    rec = users.get(email)
-    if not rec:
-        return False, "No pending registration for that email.", None
-    if rec.get("verified"):
-        return False, "That account is already verified — just sign in.", None
-    # throttle: each new code resets the attempt budget, so unlimited resends
-    # would turn 5 attempts/code into unlimited guesses
-    prev = rec.get("code") or {}
-    try:
-        issued = datetime.fromisoformat(prev["issued"])
-        wait = RESEND_MIN_INTERVAL_S - (_now() - issued).total_seconds()
-    except (KeyError, ValueError):
-        wait = 0
-    if wait > 0:
-        return False, f"A code was just sent — wait {int(wait) + 1}s before requesting another.", None
-    salt = bytes.fromhex(rec["salt"])
-    code = _new_code()
-    rec["code"] = {
-        "hash": _code_hash(code, salt),
-        "expires": (_now() + timedelta(minutes=CODE_TTL_MINUTES)).isoformat(),
-        "issued": _now().isoformat(),
-        "attempts": 0,
-    }
-    _save(users)
+    with _locked():
+        users = _load()
+        rec = users.get(email)
+        if not rec:
+            return False, "No pending registration for that email.", None
+        if rec.get("verified"):
+            return False, "That account is already verified — just sign in.", None
+        # throttle: each new code resets the attempt budget, so unlimited
+        # resends would turn 5 attempts/code into unlimited guesses
+        prev = rec.get("code") or {}
+        try:
+            issued = datetime.fromisoformat(prev["issued"])
+            wait = RESEND_MIN_INTERVAL_S - (_now() - issued).total_seconds()
+        except (KeyError, ValueError):
+            wait = 0
+        if wait > 0:
+            return False, f"A code was just sent — wait {int(wait) + 1}s before requesting another.", None
+        salt = bytes.fromhex(rec["salt"])
+        code = _new_code()
+        rec["code"] = {
+            "hash": _code_hash(code, salt),
+            "expires": (_now() + timedelta(minutes=CODE_TTL_MINUTES)).isoformat(),
+            "issued": _now().isoformat(),
+            "attempts": 0,
+        }
+        _save(users)
     return True, "A new code is on its way.", code
 
 
 def verify_code(email: str, code: str):
     """Activate a pending account if the code matches. Returns (ok, message)."""
     email = _norm(email)
-    users = _load()
-    rec = users.get(email)
-    if not rec or not rec.get("code"):
-        return False, "Nothing to verify — register first."
-    c = rec["code"]
-    try:
-        expired = _now() > datetime.fromisoformat(c["expires"])
-    except (ValueError, KeyError):
-        expired = True
-    if expired:
-        return False, "That code expired. Request a new one."
-    if c.get("attempts", 0) >= MAX_CODE_ATTEMPTS:
-        return False, "Too many attempts. Request a new code."
-    salt = bytes.fromhex(rec["salt"])
-    if hmac.compare_digest(_code_hash((code or "").strip(), salt), c["hash"]):
-        rec["verified"] = True
-        rec.pop("code", None)
+    with _locked():
+        users = _load()
+        rec = users.get(email)
+        if not rec or not rec.get("code"):
+            return False, "Nothing to verify — register first."
+        c = rec["code"]
+        try:
+            expired = _now() > datetime.fromisoformat(c["expires"])
+        except (ValueError, KeyError):
+            expired = True
+        if expired:
+            return False, "That code expired. Request a new one."
+        if c.get("attempts", 0) >= MAX_CODE_ATTEMPTS:
+            return False, "Too many attempts. Request a new code."
+        salt = bytes.fromhex(rec["salt"])
+        if hmac.compare_digest(_code_hash((code or "").strip(), salt), c["hash"]):
+            rec["verified"] = True
+            rec.pop("code", None)
+            _save(users)
+            return True, "Email verified — you're signed in."
+        c["attempts"] = c.get("attempts", 0) + 1
         _save(users)
-        return True, "Email verified — you're signed in."
-    c["attempts"] = c.get("attempts", 0) + 1
-    _save(users)
     return False, "Incorrect code."
 
 
@@ -205,29 +238,30 @@ def verify_password(email: str, password: str) -> str:
     account exists. Consecutive failures lock the account for
     LOGIN_LOCK_MINUTES (persisted, so a fresh session doesn't reset it)."""
     email = _norm(email)
-    users = _load()
-    rec = users.get(email)
-    if not rec:
-        _pw_hash(password or "", b"0" * 16)   # equalize timing
-        return "bad"
-    try:
-        locked = _now() < datetime.fromisoformat(rec["lock_until"])
-    except (KeyError, ValueError):
-        locked = False
-    if locked:
-        _pw_hash(password or "", b"0" * 16)   # equalize timing while locked
-        return "locked"
-    salt = bytes.fromhex(rec["salt"])
-    if not hmac.compare_digest(_pw_hash(password or "", salt), rec["hash"]):
-        rec["fails"] = rec.get("fails", 0) + 1
-        if rec["fails"] >= MAX_LOGIN_FAILS:
-            rec["fails"] = 0
-            rec["lock_until"] = (
-                _now() + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat()
-        _save(users)
-        return "bad"
-    if rec.get("fails") or rec.get("lock_until"):
-        rec.pop("fails", None)
-        rec.pop("lock_until", None)
-        _save(users)
-    return "ok" if rec.get("verified") else "unverified"
+    with _locked():
+        users = _load()
+        rec = users.get(email)
+        if not rec:
+            _pw_hash(password or "", b"0" * 16)   # equalize timing
+            return "bad"
+        try:
+            locked = _now() < datetime.fromisoformat(rec["lock_until"])
+        except (KeyError, ValueError):
+            locked = False
+        if locked:
+            _pw_hash(password or "", b"0" * 16)   # equalize timing while locked
+            return "locked"
+        salt = bytes.fromhex(rec["salt"])
+        if not hmac.compare_digest(_pw_hash(password or "", salt), rec["hash"]):
+            rec["fails"] = rec.get("fails", 0) + 1
+            if rec["fails"] >= MAX_LOGIN_FAILS:
+                rec["fails"] = 0
+                rec["lock_until"] = (
+                    _now() + timedelta(minutes=LOGIN_LOCK_MINUTES)).isoformat()
+            _save(users)
+            return "bad"
+        if rec.get("fails") or rec.get("lock_until"):
+            rec.pop("fails", None)
+            rec.pop("lock_until", None)
+            _save(users)
+        return "ok" if rec.get("verified") else "unverified"

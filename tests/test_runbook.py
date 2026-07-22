@@ -51,3 +51,27 @@ def test_l2_cluster_sequence():
     text = _runbook(ClusterInfo(type="L2", members=["10.0.0.5", "10.0.0.6"]))
     assert "L2 CLUSTER" in text.upper()
     assert "10.0.0.5" in text
+
+
+def test_image_families_match_vendor_matrix():
+    from lib.runbook import MODEL_FAMILIES
+    # spot-check against the Instant release-notes image-class tables
+    assert MODEL_FAMILIES["303"] == "Scorpio"
+    assert MODEL_FAMILIES["505"] == "Draco"
+    assert MODEL_FAMILIES["535"] == "Lupus"
+    assert MODEL_FAMILIES["655"] == "Norma"
+    assert MODEL_FAMILIES["375"] == "Gemini"
+    assert "304" not in MODEL_FAMILIES  # not AOS-10 capable — never mapped
+
+
+def test_compatibility_matrix_boundary():
+    from lib.aos8_client import is_model_compatible
+    # AOS-10-capable Wi-Fi 5 survivors
+    for ok in ("AP-303", "AP-318", "AP-345", "AP-375", "AP-505", "AP-535",
+               "AP-635", "IAP-303"):
+        assert is_model_compatible(ok), ok
+    # dropped models must FAIL preflight
+    for bad in ("AP-304", "AP-305", "AP-314", "AP-315", "AP-325", "AP-335",
+                "AP-365", "AP-367", "AP-205", "AP-207", "AP-228", "AP-277",
+                "IAP-305", "AP-203R", "AP-105"):
+        assert not is_model_compatible(bad), bad

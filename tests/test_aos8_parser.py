@@ -158,3 +158,45 @@ def test_instant_zoneless_aps_group_into_synthetic_cluster():
     names = {g.name for g in cfg.ap_groups}
     assert names == {"instant-cluster"}
     assert all(a.ap_group == "instant-cluster" for a in cfg.aps)
+
+
+def test_internal_auth_not_triggered_by_summary_table():
+    # every AOS 8 box lists the built-in "Internal" server — its presence in
+    # `show aaa authentication-server all` output must NOT flag internal auth
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG,
+         "aaa_auth_server": "Auth Server Table\nName      Type    IP\n"
+                            "Internal  Local   10.0.0.1\n"
+                            "cp-1      Radius  10.0.0.50\n"},
+        mc_ip="10.0.0.1")
+    assert cfg.has_internal_auth is False
+    # ...but a server-group actually referencing it does
+    cfg2 = parse_customer_config(
+        {"running_config": RUNNING_CONFIG +
+         '\naaa server-group "corp-sg"\n   auth-server Internal\n!\n'},
+        mc_ip="10.0.0.1")
+    assert cfg2.has_internal_auth is True
+
+
+def test_eap_offload_detected_via_dot1x_termination():
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG +
+         '\naaa authentication dot1x "corp-dot1x"\n   termination enable\n!\n'},
+        mc_ip="10.0.0.1")
+    assert cfg.has_eap_offload is True
+
+
+def test_quoted_passphrase_with_spaces():
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace(
+            "wpa-passphrase SecretPass123",
+            'wpa-passphrase "pass with spaces"')},
+        mc_ip="10.0.0.1")
+    guest = next(s for s in cfg.ssids if s.name == "guest-vap")
+    assert guest.psk == "pass with spaces"
+
+
+def test_ap_group_list_title_is_not_a_group():
+    from lib.aos8_parser import _parse_ap_groups
+    groups = _parse_ap_groups("AP group List\n-------------\nName\n----\ncampus\n")
+    assert all(g.name.lower() != "list" for g in groups)

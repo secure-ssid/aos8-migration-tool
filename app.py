@@ -81,7 +81,7 @@ def reset_downstream_state() -> None:
                 "provision_results", "validation_results",
                 "glp_existing", "glp_subscriptions", "glp_claim_result",
                 "glp_sub_results", "glp_service_managers", "onboard_results",
-                "probe_results", "validation_celebrated"):
+                "probe_results", "validation_celebrated", "macedit_result"):
         st.session_state.pop(key, None)
     # the Step 6 closeout checklist is mirrored into durable chk_* keys —
     # a new engagement starts with an unticked checklist

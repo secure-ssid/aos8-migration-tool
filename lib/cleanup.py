@@ -82,10 +82,15 @@ def cleanup(prefix: str, central=None, classic=None,
                     or s.get("name") or "")
             if _matches(name, prefix):
                 enc = quote(name, safe="")
-                try:  # best-effort — underlay SSIDs have no overlay-wlan
-                    central._delete(f"/network-config/v1alpha1/overlay-wlan/{enc}")
-                except Exception:
-                    pass
+                # best-effort — underlay SSIDs have no overlay-wlan. v1 is
+                # where provisioning creates them; keep v1alpha1 as fallback.
+                for _ow_path in (f"/network-config/v1/overlay-wlan/{enc}",
+                                 f"/network-config/v1alpha1/overlay-wlan/{enc}"):
+                    try:
+                        central._delete(_ow_path)
+                        break
+                    except Exception:
+                        continue
                 step(f"Delete SSID: {name}",
                      lambda e=enc: central._delete(f"/network-config/v1/wlan-ssids/{e}"))
 
@@ -189,6 +194,17 @@ def cleanup(prefix: str, central=None, classic=None,
             if _matches(gname, prefix):
                 step(f"Delete classic group: {gname}",
                      lambda n=gname: classic.delete_group(n))
+        # classic provisioning also creates sites — clean those up too
+        try:
+            for site in classic.list_sites(refresh=True):
+                sname = site.get("site_name", "")
+                sid = site.get("site_id")
+                if _matches(sname, prefix) and sid is not None:
+                    step(f"Delete classic site: {sname}",
+                         lambda i=sid: classic._request(
+                             "DELETE", f"/central/v2/sites/{i}"))
+        except Exception as e:
+            results.append(("List classic sites", False, str(e)[:150]))
 
     if not results:
         results.append((f"No objects named '{prefix}*' found to delete", True, ""))

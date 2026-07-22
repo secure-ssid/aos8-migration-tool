@@ -839,6 +839,14 @@ def render():
             # as provisioned and never provisions the new one.
             prev = st.session_state.get("central_config")
 
+            # translate() regenerates the gateway-cluster name from the
+            # customer slug — carry forward an operator rename from Step 3 so
+            # re-Continuing doesn't silently revert it (and then read the
+            # unchanged design as a change that wipes provisioning state).
+            if prev is not None and getattr(prev, "gw_cluster_name", None) \
+                    and central_cfg.gw_cluster_name:
+                central_cfg.gw_cluster_name = prev.gw_cluster_name
+
             def _group_sig(cfg):
                 # group names + firmware drive provisioning too — a changed
                 # target firmware or renamed groups must invalidate as well
