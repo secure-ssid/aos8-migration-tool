@@ -408,7 +408,7 @@ def _check_serials(customer: CustomerConfig) -> list[CheckResult]:
             name="AP Serial Numbers",
             status=Status.WARN,
             message=f"{len(missing)} AP(s) have no serial number — they cannot be "
-                    "pre-assigned to groups/sites, and Step 5 validation will not "
+                    "pre-assigned to groups/sites, and Step 6 validation will not "
                     "be able to match them in Central.",
             detail="Paste `show ap database long` output (it includes the Serial # column), "
                    "or use API mode.\nAffected: " + ", ".join(missing[:20]) +
@@ -535,9 +535,10 @@ def _check_ssid_auth(customer: CustomerConfig) -> list[CheckResult]:
         results.append(CheckResult(
             name="802.1X SSIDs",
             status=Status.WARN,
-            message=f"Enterprise SSIDs ({', '.join(enterprise)}) will need their RADIUS "
-                    "auth server attached in Central after provisioning, and the new GW/AP "
-                    "IPs added as RADIUS clients (see NAD check).",
+            message=f"Enterprise SSIDs ({', '.join(enterprise)}): provisioning binds a "
+                    "RADIUS server-group to them (New Central), but the shared secrets are "
+                    "placeholders — set the real secrets in Central, and add the new GW/AP "
+                    "IPs as RADIUS clients (see NAD check).",
         ))
     if not results:
         results.append(CheckResult(
