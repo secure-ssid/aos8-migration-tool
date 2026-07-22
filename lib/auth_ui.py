@@ -39,7 +39,7 @@ def _signed_in(email: str) -> None:
 
 
 def _verify_screen(email: str) -> None:
-    st.markdown(f"#### Verify your email")
+    st.markdown("#### Verify your email")
     st.caption(f"Enter the 6-digit code we sent to **{email}**.")
     if not mailer.configured():
         st.warning("Email delivery isn't configured on this server — the code "
@@ -81,6 +81,10 @@ def _login_register() -> None:
                     _deliver_code(email, code)
                 st.session_state["_pending_email"] = accounts._norm(email)
                 st.rerun()
+            elif status == "locked":
+                st.error(f"Too many failed attempts — this account is locked "
+                         f"for {accounts.LOGIN_LOCK_MINUTES} minutes. "
+                         f"Try again later.")
             else:
                 st.error("Invalid email or password.")
 
@@ -111,11 +115,16 @@ def _password_screen() -> None:
                        placeholder="Enter password and press Enter",
                        key="app_pw")
     if st.button("Unlock", type="primary", key="app_pw_btn"):
-        if identity.check_app_password(pw):
+        wait = identity.app_password_retry_after()
+        if wait:
+            error_slot.error(f"Too many failed attempts — wait {wait}s "
+                             "before trying again.")
+        elif identity.check_app_password(pw):
             st.session_state["_authenticated"] = True
             st.session_state["_auth_user"] = identity.SHARED_USER
             st.rerun()
         else:
+            identity.record_app_password_failure()
             error_slot.error("Incorrect password — try again.")
 
 

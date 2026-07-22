@@ -51,6 +51,16 @@ inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba
 _user = identity.current_user()
 st.session_state["_user"] = _user
 _mode = identity.auth_mode()
+if not identity.auth_mode_valid():
+    # An unrecognized mode must never serve sessions: a typo like 'prox'
+    # would otherwise skip every login gate (fail-open).
+    st.error(
+        f"🔒 `AOS8_AUTH_MODE={_mode}` is not a recognized mode "
+        f"(expected one of: {', '.join(identity.KNOWN_MODES)}). "
+        "Fix the environment variable and restart — refusing to serve "
+        "without a working auth mode."
+    )
+    st.stop()
 if identity.requires_login():        # 'password' or 'accounts' — in-app login gate
     if not auth_ui.render_gate():
         st.stop()

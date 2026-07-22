@@ -490,7 +490,6 @@ def step_progress(current_step: int, steps: list) -> None:
         if i < n - 1:
             if i == glake - 1:
                 # orange → green: the literal migration into GreenLake
-                a = OK if done else f"rgba(255,131,0,{1 if done else 0.45})"
                 line_bg = f"linear-gradient(90deg,{OK if done else 'rgba(255,131,0,0.45)'},{HPE_GREEN})"
                 height = "2px"
             elif i == glake:

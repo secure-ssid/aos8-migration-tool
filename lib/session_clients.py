@@ -54,9 +54,18 @@ def build_classic_client() -> ClassicCentralClient:
 
 def persist_rotated_refresh_token(client: ClassicCentralClient) -> bool:
     """The classic refresh token is single-use and rotates — losing the new
-    one strands later steps with a dead token. Returns True if it rotated."""
+    one strands later steps with a dead token. Returns True if it rotated.
+    Also re-syncs the encrypted credstore when Remember is on, so the next
+    launch doesn't auto-fill an already-spent token."""
     if client.refresh_token and client.refresh_token != \
             st.session_state.get("classic_refresh_token"):
         st.session_state["classic_refresh_token"] = client.refresh_token
+        if st.session_state.get("remember_creds"):
+            try:
+                from . import credstore
+                credstore.save_from_session(st.session_state,
+                                            st.session_state.get("_user"))
+            except Exception:
+                pass  # never let credstore IO break the API flow
         return True
     return False

@@ -24,6 +24,8 @@ shared identity (one shared store).
 import hashlib
 import hmac
 import os
+import time
+from collections import deque
 
 import streamlit as st
 
@@ -42,9 +44,19 @@ def identity_header() -> str:
 SHARED_USER = "team"
 
 
+KNOWN_MODES = ("local", "password", "accounts", "proxy")
+
+
 def auth_mode() -> str:
     """'local' (default), 'password' (shared gate), 'accounts' (login), 'proxy'."""
     return os.environ.get("AOS8_AUTH_MODE", "local").strip().lower()
+
+
+def auth_mode_valid() -> bool:
+    """False when AOS8_AUTH_MODE is set to something unrecognized. The app
+    must refuse to serve in that case (fail closed) — a typo like 'prox'
+    would otherwise fall through every login gate."""
+    return auth_mode() in KNOWN_MODES
 
 
 def requires_login() -> bool:
@@ -60,6 +72,30 @@ def check_app_password(password: str) -> bool:
     if not expected:
         return False
     return hmac.compare_digest(password or "", expected)
+
+
+# Shared-password mode has no per-user record to hang a lockout on, so the
+# throttle is process-wide: more than PW_MAX_FAILS wrong guesses (from anyone)
+# inside PW_WINDOW_S refuses further attempts until the window drains. That
+# can briefly lock out a legitimate teammate during an active guessing attack
+# — inherent to a shared secret, and preferable to unlimited guessing.
+PW_WINDOW_S = 60
+PW_MAX_FAILS = 10
+_pw_fail_times: deque = deque()
+
+
+def app_password_retry_after() -> int:
+    """Seconds until another shared-password attempt is allowed (0 = now)."""
+    now = time.time()
+    while _pw_fail_times and now - _pw_fail_times[0] > PW_WINDOW_S:
+        _pw_fail_times.popleft()
+    if len(_pw_fail_times) >= PW_MAX_FAILS:
+        return int(PW_WINDOW_S - (now - _pw_fail_times[0])) + 1
+    return 0
+
+
+def record_app_password_failure() -> None:
+    _pw_fail_times.append(time.time())
 
 
 def is_multiuser() -> bool:
@@ -96,7 +132,9 @@ def current_user() -> str | None:
         return SHARED_USER if st.session_state.get("_authenticated") else None
     if mode == "accounts":
         return st.session_state.get("_auth_user")
-    return _header_identity()  # proxy
+    if mode == "proxy":
+        return _header_identity()
+    return None  # unknown mode — fail closed, never trust a header
 
 
 def user_slug(user: str) -> str:

@@ -71,7 +71,12 @@ def render():
         if getattr(central_cfg, "destination", "new") == "classic":
             client = build_classic_client()
             with st.spinner("Fetching AP status from classic Central..."):
-                all_aps = client.list_all_aps()
+                try:
+                    all_aps = client.list_all_aps()
+                except Exception as e:
+                    persist_rotated_refresh_token(client)
+                    st.error(f"Could not fetch AP status: {e}")
+                    return
             persist_rotated_refresh_token(client)
         else:
             client = build_central_client()

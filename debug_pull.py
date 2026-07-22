@@ -14,7 +14,10 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-OBJECTS = ["ap_group", "wlan_virtual_ap", "ssid_prof", "vlan_id", "rad_server"]
+# virtual_ap is the primary object name (what the client reads);
+# wlan_virtual_ap is the legacy alias some builds answer instead
+OBJECTS = ["ap_group", "virtual_ap", "wlan_virtual_ap", "ssid_prof",
+           "vlan_id", "rad_server", "aaa_prof", "server_group_prof"]
 
 
 def main():

@@ -12,6 +12,7 @@ substitute.
 # Environment variables surfaced in the Postman collection.
 VARIABLES = [
     ("aos8_host", "10.0.0.1", "Mobility Controller/Conductor IP (port 4343)"),
+    ("password", "", "AOS 8 admin password for the login call"),
     ("uidaruba", "", "AOS 8 session token from /v1/api/login"),
     ("config_path", "/md", "/md on a Conductor, /mm/mynode on a standalone MC"),
     ("central_base", "https://us4.api.central.arubanetworks.com", "New Central regional API base"),

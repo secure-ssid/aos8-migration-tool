@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models import (
     AP, APGroup, ClusterInfo, CustomerConfig, ForwardMode,
-    AuthType, RadiusServer, SSID, VLAN,
+    RadiusServer, SSID, VLAN,
 )
 from .aos8_client import (
     AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
@@ -153,6 +153,16 @@ _GROUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none"}
 def _clean_group(token: str) -> str:
     t = (token or "").strip()
     return "default" if t.lower() in _GROUP_PLACEHOLDERS else t
+
+
+def _clean_zone(token: str) -> str:
+    """Instant Zone column: empty/placeholder means NO zone — keep it empty so
+    the instant-default catch-all grouping applies. (Unlike the MC Group
+    column, where the default group really is named 'default', mapping an
+    empty zone to 'default' would conflate zoneless APs with a genuinely
+    named 'default' zone and dead-end the catch-all branch.)"""
+    t = (token or "").strip()
+    return "" if t.lower() in _GROUP_PLACEHOLDERS else t
 
 
 # ─────────────────── AP inventory ───────────────────
@@ -330,9 +340,31 @@ def _mc_captive_portals(running: str) -> dict[str, dict]:
     return aaa_cp
 
 
+def _aaa_server_groups(running: str) -> dict[str, str]:
+    """aaa-profile → RADIUS server-group name. The virtual-ap references an
+    aaa-profile, but the actual server group hangs off `dot1x-server-group`
+    (802.1X) or `mac-server-group` (MAC auth) INSIDE that profile — the
+    profile name itself is not a server group and must not be exported as
+    one."""
+    groups: dict[str, str] = {}
+    for name, block in _iter_blocks(running, r"aaa profile"):
+        dot1x, mac = "", ""
+        for line in block:
+            m = re.match(r'dot1x-server-group\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                dot1x = m.group(1)
+            m = re.match(r'mac-server-group\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                mac = m.group(1)
+        if dot1x or mac:
+            groups[name] = dot1x or mac
+    return groups
+
+
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
     mc_cps = _mc_captive_portals(running)
+    aaa_sgs = _aaa_server_groups(running)
     for name, block in _iter_blocks(running, r"wlan virtual-ap"):
         vlan = 1
         vlan_raw = None
@@ -370,7 +402,9 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             auth_known=auth_known,
             essid=prof.get("essid") or None,
             psk=prof.get("passphrase"),
-            auth_server_group=aaa_ref or None,
+            # prefer the real server group from inside the aaa-profile; the
+            # profile name is only a last-resort placeholder
+            auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
             rf_band=prof.get("rf_band", ""),
             dtim_period=prof.get("dtim_period", 0),
             max_clients=prof.get("max_clients", 0),
@@ -622,7 +656,10 @@ def _parse_instant_external_cp(running: str) -> dict[str, dict]:
             if m:
                 redirect = m.group(1)
         if server:
-            scheme = "http" if port and port not in (443, 8443) else "https"
+            # assume TLS unless the port is a well-known cleartext one —
+            # external captive portals on custom ports (4443, 9443, …) are
+            # far more likely to be https than http
+            scheme = "http" if port in (80, 8080) else "https"
             portpart = f":{port}" if port else ""
             if path and not path.startswith("/"):
                 path = "/" + path
@@ -746,7 +783,7 @@ def _parse_instant_aps(text: str) -> list[AP]:
             model=_normalize_model(_row_get(row, "Type", "AP Type", "Model")),
             mac=mac,
             name=name,
-            ap_group=_clean_group(_row_get(row, "Zone")),
+            ap_group=_clean_zone(_row_get(row, "Zone")),
             ip=ip,
             status="Up",
         ))

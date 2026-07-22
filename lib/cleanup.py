@@ -31,6 +31,11 @@ def cleanup(prefix: str, central=None, classic=None,
             ) -> list[tuple[str, bool, str]]:
     """Delete <prefix>* objects across New Central (central) and Classic
     (classic). Either client may be None. Returns [(label, ok, detail)]."""
+    # An empty prefix matches EVERY object in the tenant (startswith("") is
+    # always True) — refuse outright rather than risk an account-wide wipe.
+    if not (prefix or "").strip():
+        raise ValueError("cleanup() requires a non-empty prefix — an empty "
+                         "prefix would match every object in the tenant")
     results: list[tuple[str, bool, str]] = []
 
     def step(label: str, fn) -> None:

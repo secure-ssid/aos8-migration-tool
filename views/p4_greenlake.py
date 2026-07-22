@@ -42,8 +42,8 @@ def _review_checklist(central_cfg, customer) -> bool:
             f"({', '.join(g.name for g in central_cfg.groups) or '—'})",
             f"SSIDs present with correct VLANs: <b>{n_ssids}</b> SSID(s), "
             f"<b>{n_vlans}</b> VLAN(s)",
-            (f"RADIUS server-group bound to enterprise SSIDs "
-             f"(remember to set the real shared secret)" if has_radius
+            ("RADIUS server-group bound to enterprise SSIDs "
+             "(remember to set the real shared secret)" if has_radius
              else "No RADIUS — PSK/open SSIDs only"),
             f"Firmware compliance set: <b>{esc(fw)}</b>",
             "APs in GreenLake workspace with a subscription (claim below)",
@@ -83,6 +83,14 @@ def render():
                     "review it here before onboarding APs: build config → review → "
                     "claim → move APs → convert.",
                     color=WARN)
+    else:
+        _failed_steps = [r for r in st.session_state.get("provision_results", [])
+                         if not r[1]]
+        if _failed_steps:
+            st.warning(f"⚠️ Step 3 finished with **{len(_failed_steps)} failed "
+                       f"step(s)** — converted APs may not find their full config. "
+                       "Consider fixing and re-running provisioning before "
+                       "onboarding.")
 
     central_cfg = st.session_state.get("central_config")
     # Pre-onboarding review checklist (only meaningful for the New Central path
@@ -159,7 +167,9 @@ def render():
                     if not v:
                         continue
                     if _MAC.match(v):
-                        ap.mac = v
+                        # normalize to the lowercase-colon form the rest of
+                        # the app (and the GLP claim payload) uses
+                        ap.mac = v.lower().replace("-", ":")
                         applied += 1
                     else:
                         bad.append(f"{ap.serial}: '{v}'")
@@ -206,6 +216,23 @@ def render():
             st.session_state["glp_secret"] = glp_secret_in
 
     st.divider()
+
+    # A workspace snapshot taken with one set of credentials must never be
+    # reused after the operator switches tenants/credentials — "already
+    # claimed" flags from the wrong workspace would skip real claims.
+    import hashlib as _hashlib
+    if st.session_state.get("glp_use_central_creds", True):
+        _fp_raw = "central|" + st.session_state.get("central_client_id", "") \
+                  + "|" + st.session_state.get("central_secret", "")
+    else:
+        _fp_raw = "glp|" + st.session_state.get("glp_client_id", "") \
+                  + "|" + st.session_state.get("glp_secret", "")
+    _fp = _hashlib.sha1(_fp_raw.encode()).hexdigest()
+    if st.session_state.get("_glp_creds_fp") not in (None, _fp):
+        for _k in ("glp_existing", "glp_subscriptions", "glp_service_managers",
+                   "glp_claim_result", "glp_sub_results", "onboard_results"):
+            st.session_state.pop(_k, None)
+    st.session_state["_glp_creds_fp"] = _fp
 
     # ── Workspace check / claim ────────────────────────────────────────────
     section_label("Claim devices", color=HPE_GREEN)

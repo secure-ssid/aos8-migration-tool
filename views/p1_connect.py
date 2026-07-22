@@ -11,7 +11,7 @@ from lib.aos8_client import AOS8Client, AOS8APIError, is_model_compatible
 from lib.aos8_parser import parse_customer_config, parse_instant_config
 from lib.translator import translate
 from lib.styles import (
-    OK, FAIL, WARN, MUTED, TEXT, FAINT, HPE_GREEN,
+    OK, FAIL, WARN, MUTED, TEXT, FAINT,
     page_header, section_label, badge, ssid_tag, esc, mono_row, mono_caption,
     telemetry_chip,
 )
@@ -206,7 +206,8 @@ def render():
                       disabled=not confirm):
             from lib import cleanup as _cleanup
             from lib.session_clients import (build_central_client, build_classic_client,
-                                             have_classic_creds)
+                                             have_classic_creds,
+                                             persist_rotated_refresh_token)
             # old results are from a different run — never let them imply this
             # click succeeded
             st.session_state.pop("cleanup_results", None)
@@ -223,6 +224,9 @@ def render():
                 with st.spinner("Deleting zztest-* objects..."):
                     res = _cleanup.cleanup("zztest", central=nc, classic=cl)
                 st.session_state["cleanup_results"] = res
+                # cleanup may have refreshed the single-use classic token
+                if cl is not None:
+                    persist_rotated_refresh_token(cl)
                 audit.record(
                     "cleanup",
                     user=st.session_state.get("_user"),
@@ -339,6 +343,7 @@ def render():
         if st.button("Connect & Pull Config", type="primary",
                      disabled=not (mc_ip and mc_user and mc_pass)):
             with st.spinner(f"Connecting to {mc_ip} ..."):
+                client = None
                 try:
                     requested_path = config_path.strip() or "/md"
                     client = AOS8Client(mc_ip, mc_user, mc_pass,
@@ -377,6 +382,10 @@ def render():
                     st.error(f"Connection error: {e}")
                     st.info("Verify port 4343 is reachable from this machine, "
                             "then retry — or use paste mode.")
+                finally:
+                    # AOS 8 caps concurrent API sessions — always release ours
+                    if client is not None:
+                        client.logout()
     else:
         mc_ip = st.text_input(
             "MC IP address (RADIUS NAD reference only)",
@@ -727,20 +736,27 @@ def render():
                     st.session_state.get("central_secret", ""))
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
-                from lib.session_clients import have_classic_creds
+                from lib.session_clients import (have_classic_creds,
+                                                 persist_rotated_refresh_token)
                 # refresh-token + id/secret (the remembered-creds shape) is a
                 # probe-able config too — the client re-mints on the first 401
                 if have_classic_creds():
-                    rows += api_probe.probe_classic(
+                    _cl_rows, _cl = api_probe.probe_classic(
                         st.session_state.get("central_base_classic", ""),
                         st.session_state.get("classic_access_token", ""),
                         central_client_id, st.session_state.get("central_secret", ""),
                         st.session_state.get("classic_refresh_token", ""))
+                    rows += _cl_rows
+                    # the probe may have consumed the single-use refresh token
+                    persist_rotated_refresh_token(_cl)
             else:
-                rows += api_probe.probe_classic(
+                from lib.session_clients import persist_rotated_refresh_token
+                _cl_rows, _cl = api_probe.probe_classic(
                     central_base, st.session_state.get("classic_access_token", ""),
                     central_client_id, st.session_state.get("central_secret", ""),
                     st.session_state.get("classic_refresh_token", ""))
+                rows += _cl_rows
+                persist_rotated_refresh_token(_cl)
         st.session_state["probe_results"] = [(r.name, r.status, r.detail) for r in rows]
 
     for name, status, detail in st.session_state.get("probe_results", []):

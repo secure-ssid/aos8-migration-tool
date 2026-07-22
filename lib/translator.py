@@ -69,13 +69,37 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
                     has_bridge = True
 
         if not group_ssids:
-            group_ssids = cc.ssids
+            if not ap_group.ssids:
+                # no VAP bindings were discovered for this group at all —
+                # mirror discovery's assign-everything fallback
+                group_ssids = cc.ssids
+            else:
+                # bindings exist but none resolved to a discovered SSID
+                # (dangling refs) — flooding every SSID in would silently
+                # broadcast the wrong networks; keep the group empty and
+                # surface it through the preflight mapping warning instead
+                customer_config.ssid_mapping_incomplete = True
 
         used_vlan_ids = {s.vlan for s in group_ssids}
         group_vlans = [v for v in cc.vlans if v.id in used_vlan_ids]
 
+        central_name = central_group_name(ap_group.name)
+        existing = next((g for g in central.groups if g.name == central_name), None)
+        if existing is not None:
+            # Two generic source groups map to the same Central group — merge
+            # instead of provisioning the same group twice. Serials from every
+            # folded source group are picked up via extra_source_groups.
+            existing.extra_source_groups.append(ap_group.name)
+            known = {s.name for s in existing.ssids}
+            existing.ssids.extend(s for s in group_ssids if s.name not in known)
+            known_vlans = {v.id for v in existing.vlans}
+            existing.vlans.extend(v for v in group_vlans if v.id not in known_vlans)
+            existing.has_tunnel_ssid = existing.has_tunnel_ssid or has_tunnel
+            existing.has_bridge_ssid = existing.has_bridge_ssid or has_bridge
+            groups[ap_group.name] = existing
+            continue
         cgc = CentralGroupConfig(
-            name=central_group_name(ap_group.name),
+            name=central_name,
             source_group=ap_group.name,
             firmware_version=aos10_firmware,
             site_name=site_name,

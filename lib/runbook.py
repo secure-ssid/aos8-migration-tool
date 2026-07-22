@@ -34,7 +34,7 @@ def _manual_secrets_block(customer: CustomerConfig) -> list[str]:
                    "(Config → Authentication → Servers)")
     for p in psk:
         out.append(f"  [ ] SSID '{p}': set WPA passphrase "
-                   "(Config → WLANs → {SSID} → Security)")
+                   f"(Config → WLANs → {p} → Security)")
     out.append("")
     return out
 
@@ -249,7 +249,7 @@ def _write_l2_cluster_steps(lines: list, customer: CustomerConfig,
         ]
         lines += _convert_block(customer, central)
         lines += [
-            f"STEP 4 — After all APs are online in Central and validated (Step 6):",
+            "STEP 4 — After all APs are online in Central and validated (Step 6):",
             f"  decommission MC1 ({mc1}) and the other member(s) ({others_label}).",
             "",
         ]

@@ -87,6 +87,19 @@ class AOS8Client:
             raise AOS8APIError("Login succeeded but no UIDARUBA token returned")
         return True
 
+    def logout(self) -> None:
+        """Best-effort session release. AOS 8 caps concurrent API sessions per
+        user — leaking one per pull eventually locks the account out of the
+        API until the old sessions age out."""
+        if not self.uidaruba:
+            return
+        try:
+            self.session.get(f"{self.base}/v1/api/logout",
+                             params={"UIDARUBA": self.uidaruba}, timeout=5)
+        except Exception:
+            pass
+        self.uidaruba = None
+
     def _params(self, extra: Optional[dict] = None) -> dict:
         params = {"UIDARUBA": self.uidaruba}
         if self.config_path:
@@ -202,8 +215,19 @@ class AOS8Client:
     def _get_virtual_aps(self) -> list[dict]:
         """Virtual-AP profiles. The object is named "virtual_ap" (matching
         the key AOS embeds in ap_group responses); some builds answer the
-        legacy "wlan_virtual_ap" name instead, so try both."""
-        return self._get_object("virtual_ap") or self._get_object("wlan_virtual_ap")
+        legacy "wlan_virtual_ap" name instead, so try both. Either name can
+        404 on builds that don't expose it — an unknown-object error on one
+        name must not kill the pull while the other would have answered."""
+        try:
+            vaps = self._get_object("virtual_ap")
+        except Exception:
+            vaps = []
+        if vaps:
+            return vaps
+        try:
+            return self._get_object("wlan_virtual_ap")
+        except Exception:
+            return []
 
     def _node_has_config(self) -> bool:
         """True when the CURRENT config_path holds real (non-default) AP
@@ -289,6 +313,11 @@ class AOS8Client:
             ssid_profiles = self.get_ssid_profiles()
         except Exception:
             pass  # opmode/essid enrichment is best-effort
+        aaa_sgs: dict[str, str] = {}
+        try:
+            aaa_sgs = self.get_aaa_server_groups()
+        except Exception:
+            pass  # server-group resolution is best-effort
 
         ssids, seen = [], set()
         for item in self._get_virtual_aps():
@@ -300,6 +329,7 @@ class AOS8Client:
             vlan_token = self._field(item, "vlan", default=1)
             vlan = _safe_vlan(vlan_token)
             vlan_raw = str(vlan_token) if _vlan_is_named(vlan_token) else None
+            aaa_ref = self._profile_ref(item, "aaa_prof")
             fwd_raw = str(self._field(item, "forward-mode", "forward_mode", default="tunnel")).lower()
             if "bridge" in fwd_raw:
                 fwd = ForwardMode.BRIDGE
@@ -331,7 +361,9 @@ class AOS8Client:
                 auth_known=auth_known,
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
-                auth_server_group=self._profile_ref(item, "aaa_prof") or None,
+                # prefer the real server group from inside the aaa-profile;
+                # the profile name is only a last-resort placeholder
+                auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
                 rf_band=rf_band,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
@@ -362,6 +394,35 @@ class AOS8Client:
                     acct_port=_safe_int(self._field(item, "acctport", "rad_acctport", default=1813), 1813),
                 ))
         return servers
+
+    def get_aaa_server_groups(self) -> dict[str, str]:
+        """aaa-profile name → RADIUS server-group name. The virtual-ap
+        references an aaa-profile, but the actual server group hangs off the
+        profile's dot1x-server-group (802.1X) or mac-server-group (MAC auth)
+        — the aaa-profile name itself is NOT a server group."""
+        out: dict[str, str] = {}
+        for item in self._get_object("aaa_prof"):
+            name = self._field(item, "profile-name")
+            if not name:
+                continue
+            sg = ""
+            for key in ("dot1x_server_group", "dot1x-server-group",
+                        "mac_server_group", "mac-server-group"):
+                ref = item.get(key)
+                if isinstance(ref, dict):
+                    # reference dicts vary by build: profile-name / srv-group
+                    sg = str(ref.get("profile-name") or ref.get("srv-group")
+                             or ref.get("srv_group") or "")
+                    if not sg:
+                        strs = [v for v in ref.values() if isinstance(v, str)]
+                        sg = strs[0] if len(strs) == 1 else ""
+                elif isinstance(ref, str):
+                    sg = ref
+                if sg:
+                    break
+            if sg:
+                out[str(name)] = sg
+        return out
 
     def get_server_groups(self) -> list[ServerGroup]:
         groups = []
@@ -582,24 +643,37 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 # digits not preceded by '-' (negatives) or another digit (mid-number)
-_VLAN_ID_RE = re.compile(r"(?<![-\d])\d+")
+# A VLAN token is only numeric when the whole (comma/space-separated) token is
+# a number or a numeric range — digits INSIDE a name ("guest2020") must not be
+# mistaken for a VLAN id.
+_VLAN_TOKEN_RE = re.compile(r"^(\d+)(?:-\d+)?$")
+
+
+def _vlan_tokens(value: Any) -> list[str]:
+    return [t for t in re.split(r"[,\s]+", str(value).strip()) if t]
 
 
 def _safe_vlan(value: Any, default: int = 1) -> int:
-    """VLAN fields can be '100', '100,200', or a named VLAN — take the first
-    valid id (1-4094). Named VLANs return default; callers should also record
-    the raw token (SSID.vlan_raw) so preflight can flag it."""
-    for m in _VLAN_ID_RE.finditer(str(value)):
-        vid = int(m.group())
-        if 1 <= vid <= 4094:
-            return vid
+    """VLAN fields can be '100', '100,200', '100-105', or a named VLAN — take
+    the first valid id (1-4094). Named VLANs (even ones containing digits,
+    like 'guest2020') return default; callers should also record the raw
+    token (SSID.vlan_raw) so preflight can flag it."""
+    for tok in _vlan_tokens(value):
+        m = _VLAN_TOKEN_RE.match(tok)
+        if m:
+            vid = int(m.group(1))
+            if 1 <= vid <= 4094:
+                return vid
     return default
 
 
 def _vlan_is_named(value: Any) -> bool:
     """True when the VLAN token has no usable numeric id (named VLAN pool)."""
-    return not any(1 <= int(m.group()) <= 4094
-                   for m in _VLAN_ID_RE.finditer(str(value)))
+    for tok in _vlan_tokens(value):
+        m = _VLAN_TOKEN_RE.match(tok)
+        if m and 1 <= int(m.group(1)) <= 4094:
+            return False
+    return True
 
 
 def _normalize_model(model: Any) -> str:

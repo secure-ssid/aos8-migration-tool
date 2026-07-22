@@ -80,7 +80,8 @@ class GLPClient:
 
     def _request(self, method: str, path: str, json: Optional[dict] = None,
                  params: Optional[dict] = None, headers: Optional[dict] = None,
-                 _retried: bool = False) -> requests.Response:
+                 _auth_retried: bool = False,
+                 _rate_retried: bool = False) -> requests.Response:
         try:
             resp = self.session.request(
                 method, f"{self.base}{path}", json=json, params=params,
@@ -91,16 +92,18 @@ class GLPClient:
         except requests.exceptions.ConnectionError as e:
             raise GLPAPIError(f"{method} {path}: connection to GreenLake failed "
                               f"({type(e).__name__})")
-        if resp.status_code == 401 and not _retried:
+        if resp.status_code == 401 and not _auth_retried:
             self.authenticate()
-            return self._request(method, path, json, params, headers, _retried=True)
-        if resp.status_code == 429 and not _retried:
+            return self._request(method, path, json, params, headers,
+                                 _auth_retried=True, _rate_retried=_rate_retried)
+        if resp.status_code == 429 and not _rate_retried:
             # Retry-After may be an HTTP-date (RFC 7231) — fall back to 30s
             # rather than crashing on int().
             retry_after = resp.headers.get("Retry-After", "30").strip()
             wait = int(retry_after) if retry_after.isdigit() else 30
             time.sleep(min(wait, 120))
-            return self._request(method, path, json, params, headers, _retried=True)
+            return self._request(method, path, json, params, headers,
+                                 _auth_retried=_auth_retried, _rate_retried=True)
         if not resp.ok and resp.status_code != 202:
             try:
                 detail = resp.json()
@@ -194,11 +197,19 @@ class GLPClient:
         """
         if not task_id:
             raise GLPAPIError("poll_task called with an empty async-operation id")
+        # accept a bare operation id (claims: /devices/v1 root) or a full
+        # Location path/URL (other surfaces may root the operation elsewhere)
+        if "/" in task_id:
+            path = task_id
+            if path.startswith(("http://", "https://")):
+                path = "/" + path.split("://", 1)[1].split("/", 1)[1]
+        else:
+            path = f"/devices/v1/async-operations/{task_id}"
         deadline = time.time() + timeout
         attempt = 0
         while time.time() < deadline:
             attempt += 1
-            result = self._get(f"/devices/v1/async-operations/{task_id}")
+            result = self._get(path)
             status = str(result.get("status", "")).lower()
             if on_poll:
                 on_poll(attempt, status or "pending")
@@ -268,16 +279,10 @@ class GLPClient:
         if device_id is None:
             raise GLPAPIError(
                 f"Device {serial_number} not found in the workspace — claim it first")
-        resp = self._request(
-            "PATCH", "/devices/v2beta1/devices",
-            params={"id": device_id},
-            json={"subscription": [{"id": sub_id}]},
-            headers={"Content-Type": "application/merge-patch+json"},
-        )
-        try:
-            return resp.json() if resp.content else {}
-        except Exception:
-            return {}
+        # async-aware: a 202 must be polled to a terminal state, or a rejected
+        # assignment is reported to the operator as success
+        self._patch_device(device_id, {"subscription": [{"id": sub_id}]})
+        return {}
 
     # ─────────────────── Application assignment ───────────────────
 
@@ -313,7 +318,9 @@ class GLPClient:
         )
         location = resp.headers.get("Location", "")
         if resp.status_code == 202 and location:
-            self.poll_task(location.rstrip("/").split("/")[-1])
+            # pass the full Location path — v2beta1 operations are not
+            # guaranteed to live under the /devices/v1 async-operations root
+            self.poll_task(location.rstrip("/"))
 
     def assign_application(self, serial_number: str, application_id: str,
                            region: str,

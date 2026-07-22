@@ -9,11 +9,10 @@ Every check is a GET (or a write with dry-run semantics where the API offers
 it) — nothing is created. Each returns a ProbeResult the UI renders as a row.
 """
 from dataclasses import dataclass
-from typing import Optional
 
 from .central_client import CentralClient, CentralAPIError
-from .glp_client import GLPClient, GLPAPIError
-from .classic_central_client import ClassicCentralClient, ClassicCentralAPIError
+from .glp_client import GLPClient
+from .classic_central_client import ClassicCentralClient
 
 
 @dataclass
@@ -115,7 +114,12 @@ def probe_glp(client_id: str, client_secret: str) -> list[ProbeResult]:
 
 
 def probe_classic(base_url: str, access_token: str, client_id: str = "",
-                  client_secret: str = "", refresh_token: str = "") -> list[ProbeResult]:
+                  client_secret: str = "", refresh_token: str = ""
+                  ) -> tuple[list[ProbeResult], ClassicCentralClient]:
+    """Returns (results, client). The client is returned because a probe on an
+    expired access token triggers a refresh — and the classic refresh token is
+    SINGLE-USE, so the caller must persist client.refresh_token or the rotated
+    token is lost and every later step is stranded with a dead one."""
     results: list[ProbeResult] = []
     client = ClassicCentralClient(base_url, access_token, client_id,
                                   client_secret, refresh_token)
@@ -125,4 +129,4 @@ def probe_classic(base_url: str, access_token: str, client_id: str = "",
                           lambda: f"{len(client.list_sites())} site(s) readable"))
     results.append(_probe("Read — classic monitored APs",
                           lambda: f"{len(client.list_all_aps() or [])} AP(s) via /monitoring/v2/aps"))
-    return results
+    return results, client
