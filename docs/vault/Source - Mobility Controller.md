@@ -77,8 +77,10 @@ Runbook flow per group:
 3. `ap convert active specific-aps activate` — **primary path**: APs fetch
    their own AOS 10 image from **Aruba Activate** (no image names needed).
 4. Alternative (air-gapped Activate): `ap convert active ... server http ...`
-   with per-model image families (`MODEL_FAMILIES`: 303/304/305→Ursa,
-   504/505→Scorpio, 535/555→Norma; unknown models get an explicit "do NOT
+   with per-model image families (`MODEL_FAMILIES`, from the Instant
+   release-notes image classes: 303→Scorpio, 318/37x→Gemini,
+   344/345 + 50x/51x/518/57x→Draco, 53x/55x/58x→Lupus, 635/655→Norma;
+   unknown models get an explicit "do NOT
    guess" placeholder).
 5. `show ap convert-status` — **10–20 min per AP**.
 

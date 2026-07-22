@@ -21,9 +21,11 @@ the [[Destination - New Central|New Central scope model]]. See [[Tool Internals]
 
 `create_group` → `POST /configuration/v3/groups` with
 `group_properties.Architecture = "AOS10"`, `AllowedDevTypes` =
-`["AccessPoints"]` (+ `["Gateways"]` and `GwNetworkRole=BranchGateway` when
-[[Gateway Strategy|keeping gateways]] — note "WLAN gateway" is a runtime cluster
-role, not this group-property enum). Existence is checked via `GET /configuration/v2/groups`
+`["AccessPoints"]` (+ `["Gateways"]` when [[Gateway Strategy|keeping
+gateways]]). **No `GwNetworkRole` is ever sent** — Central 3.x rejects a
+WLAN/AOS10 group carrying the branch-gateway role; wireless gateways are
+MOBILITY_GW and cluster at runtime, not via a group property.
+Existence is checked via `GET /configuration/v2/groups`
 (which returns a list of single-element name lists; `unprovisioned` filtered out).
 
 > **Readback flaw** — invalid property combos return **200 without applying**.

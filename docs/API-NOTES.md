@@ -2,8 +2,11 @@
 
 The exact API surfaces the tool uses, per platform, with the runtime-verify
 caveats baked into the clients. Paths below are relative to each platform's base
-URL. All clients raise on unexpected failure (errors are recorded per step, not
-swallowed) and auto-retry once on 401 (re-auth/refresh) and 429 (Retry-After).
+URL. The three cloud clients (New Central, Classic, GLP) raise on unexpected
+failure (errors are recorded per step, not swallowed) and auto-retry once on
+401 (re-auth/refresh) and once on 429 (Retry-After; both the delay-seconds and
+HTTP-date forms are tolerated). The **AOS 8 client has no auto-retry** — its
+calls are short-lived reads inside one login session.
 
 ## Bases and auth
 
@@ -66,42 +69,60 @@ separator row rather than guessing on whitespace.
 
 The New Central model is **library profiles bound to scopes via scope-maps**.
 
+Calls made during **Step 3 (config phase)**:
+
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/network-config/v1/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). |
+| GET | `/network-config/v1/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). Doubles as the config-access pre-check. |
 | POST | `/network-config/v1/scope-maps` | Map a resource to a scope/persona. Duplicate = idempotent success. |
-| GET/POST | `/network-monitoring/v1/sites` | List / create site (idempotent by name). |
-| POST | `/network-monitoring/v1/sites/{id}/devices` | Assign devices to a site (with `/central/v2/sites/associate` fallback for numeric ids). |
+| GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Falls back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on 404. |
 | GET | `/network-config/v1/device-groups` | List device groups. |
-| POST | `/network-config/v1/device-groups` | Create empty group. |
+| POST | `/network-config/v1/device-groups` | Create empty group (`scopeName`). |
 | POST | `/network-config/v1/device-groups-create-and-add-devices` | Create group + add serials in one call. |
-| POST | `/network-config/v1/device-groups-add-devices` | Add serials (`desScopeId`, `devices`). |
-| POST | `/network-config/v1alpha1/persona-assignment` | Assign device function (`CAMPUS_AP`). |
-| POST/PUT | `/network-config/v1/layer2-vlan/{id}` | Create/replace VLAN profile, then scope-map it. |
-| POST | `/network-config/v1/roles/{name}` | Role for overlay SSIDs (scope-mapped + `role-gpids/{name}`). |
-| POST | `/network-config/v1alpha1/policies/{name}` | Allow-all security policy. |
-| PATCH | `/network-config/v1alpha1/policy-groups` | Add the policy to the policy-group. |
-| POST/PATCH | `/network-config/v1/wlan-ssids/{name}` | Create SSID (POST), re-apply `default-role` (PATCH — POST silently drops it). |
-| POST | `/network-config/v1/overlay-wlan/{name}` | Bind a tunnel SSID to the GW cluster (GRE). |
-| POST | `/network-config/v1alpha1/gateway-clusters/{name}` | Create GW cluster (`object-type=LOCAL`, `scope-id`, `device-function=MOBILITY_GW`). |
+| POST/PUT | `/network-config/v1/layer2-vlan/{id}` | Create/replace VLAN profile (`{vlan, name, enable}`), then scope-map it. |
 | POST | `/network-config/v1alpha1/auth-servers/{name}` | RADIUS auth-server library profile. |
-| POST/PATCH | `/network-config/v1alpha1/firmware-compliance` | Set compliance; on **412** falls back to PATCH. |
-| GET | `/network-monitoring/v1/devices` | Validation: all devices; filter to AP-type for matching. |
+| POST | `/network-config/v1alpha1/server-groups/{name}` | RADIUS server-group — 802.1X SSIDs bind to it via `auth-server-group`. |
+| POST/PATCH | `/network-config/v1/wlan-ssids/{name}` | Upsert underlay SSID (PATCH on duplicate), then scope-map to the group. |
+| POST | `/network-config/v1alpha1/captive-portal/{name}` | Shared external captive-portal profile (referenced by the SSID). |
+| POST/PATCH | `/network-config/v1alpha1/firmware-compliance` | Set compliance. `scope-id`/`object-type`/`device-function` go in the **query string**; on 412/duplicate falls back to PATCH. |
 
-SSID forward modes: tunnel/split → `FORWARD_MODE_L2` (overlay) with
-role/policy/`overlay-wlan`; bridge → `FORWARD_MODE_BRIDGE` (underlay).
-`OPMODE` maps `AuthType` → Central opmode enum (e.g. `WPA2_PERSONAL`,
-`WPA3_SAE`, `WPA2_ENTERPRISE`, `WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`).
+Calls made during **Step 4 (devices phase)**:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/network-config/v1/device-groups-add-devices` | Move serials into their group (`desScopeId`, `devices`) — the conversion trigger for pre-assigned APs. |
+| POST | `/network-config/v1alpha1/persona-assignment` | Assign device function (`CAMPUS_AP`). |
+| POST | `/network-config/v1/site-add-devices` | Assign devices to the site (`desScopeId`, `devices`); falls back to `/network-monitoring/v1/sites/{id}/devices`, then `/central/v2/sites/associate`. |
+
+Validation (Step 6):
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/network-monitoring/v1/devices` | All devices; filter to AP-type for serial matching. |
+
+**Deferred to cutover (recorded as manual follow-ups, not called in Step 3):**
+the gateway cluster (`/network-config/v1alpha1/gateway-clusters/{name}`) and
+the overlay path for tunnel/split SSIDs (role + `role-gpids`, allow-all policy
++ policy-group PATCH, SSID `default-role` re-apply, and the
+`/network-config/v1/overlay-wlan/{name}` GRE binding). The cluster is a New
+Central object formed by JOINING gateways — it can't exist before the MCs
+convert, so Step 3 logs the follow-up and the runbook drives it.
+
+SSID forward modes: bridge (and everything when gateways are retired) →
+`FORWARD_MODE_BRIDGE` (underlay); tunnel/split → deferred overlay
+(`FORWARD_MODE_L2`) as above. `OPMODE` maps `AuthType` → Central opmode enum
+(e.g. `WPA2_PERSONAL`, `WPA3_SAE`, `WPA2_ENTERPRISE`,
+`WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`).
 
 ### Runtime-verify caveats (New Central)
 
 | Behaviour | Why |
 |---|---|
-| Resolve global scope first | Roles/policies/cluster all need it; if it fails, `provision()` returns immediately. |
-| Re-apply `default-role` via PATCH after SSID POST | The POST silently drops `default-role`. |
-| Firmware compliance POST → PATCH on 412 | 412 means it already exists; PATCH updates it. |
-| Site id re-list after create | POST bodies don't always echo the id. |
-| Duplicate scope-maps / objects | "already exists"/"duplicate" are treated as idempotent success. |
+| Resolve global scope first | Proves config access before any write; if it fails, `provision()` returns immediately. |
+| Firmware compliance POST → PATCH on 412/duplicate | Already set for the scope; PATCH updates the version. |
+| Site id re-list after create | POST bodies don't always echo the id; a duplicate error triggers a refreshed re-list. |
+| Duplicate scope-maps / objects | "already exists"/"duplicate" **in the response detail** are treated as idempotent success (the URL path is ignored so customer-named objects can't fake it). |
+| Persona/site assignment in the devices phase | Both need claimed APs, so they run with the Step 4 cutover move (also in `phase="all"`). |
 
 ---
 
@@ -146,7 +167,7 @@ SSID name filled in.
 
 | Behaviour | Why |
 |---|---|
-| **403 on any `wlan` path** | The classic WLAN config APIs are **allowlisted per tenant**. The client raises a clear message: ask your Aruba SE to enable them for the account. |
+| **403 on a `full_wlan` path** | The classic WLAN config APIs are **allowlisted per tenant**. The client raises a clear message: ask your Aruba SE to enable them for the account. (Other 403s raise the generic error.) |
 | Group-create Architecture readback | A known flaw lets the v3 create return success **without applying**. After creating, the client reads `/configuration/v1/groups/properties`; it raises only if `Architecture` is confirmed to be something other than `AOS10` (readback transport errors don't fail the step). |
 | Firmware v2 → v1 fallback | On 404/405 the client retries the v1 compliance endpoint. |
 | 401 → refresh → retry | On 401 the client attempts a token refresh and retries once. |
@@ -167,7 +188,8 @@ region.
 | POST | `/devices/v1/devices` | Claim network devices → **202** + `Location: /devices/v1/async-operations/{id}`. |
 | GET | `/devices/v1/async-operations/{id}` | Poll claim status until `completed`/`failed` (10s interval, 5 min timeout). |
 | GET | `/subscriptions/v1/subscriptions` | List subscriptions; resolve a key → UUID (`filter=key eq '<k>'`). |
-| PATCH | `/devices/v2beta1/devices?id=<uuid>` | Assign a subscription (`merge-patch+json`, body `{"subscription":[{"id": <uuid>}]}`). |
+| GET | `/service-catalog/v1/service-manager-provisions` | Central application instances (id + region) in the workspace; `/v1beta1/` fallback. |
+| PATCH | `/devices/v2beta1/devices?id=<uuid>` | **Two sequential merge-patches** (GLP rejects combining them): 1) `{"application":{"id":…},"region":…}` — REQUIRED for Central to adopt the AP; 2) `{"subscription":[{"id": <uuid>}]}`. Each is polled to a terminal state when GLP answers 202 (the returned `Location` path is honored as-is). |
 
 ### Runtime-verify caveats (GLP)
 
@@ -186,8 +208,8 @@ region.
 | AOS 8 construct | New Central | Classic Central (AOS10) |
 |---|---|---|
 | ap-group | Device group (scope) | v3 AOS10 UI group |
-| virtual-ap tunnel/split (keep gateways) | Overlay SSID + role/policy + `overlay-wlan` → GW cluster | `full_wlan` with `cluster_name` (verify in UI) |
+| virtual-ap tunnel/split (keep gateways) | Overlay SSID → GW cluster — **deferred to cutover** (manual follow-up + runbook) | `full_wlan` with `cluster_name` (verify in UI) |
 | virtual-ap bridge (or all when retired) | Underlay SSID scope-mapped to the group | `full_wlan` (bridge) |
 | VLAN | `layer2-vlan` profile scope-mapped to group | (implicit via WLAN `vlan` field) |
-| RADIUS server | `auth-servers` library profile | Manual follow-up (no classic API) |
-| MC cluster | Gateway cluster in its own `-gws` device group | Gateways auto-cluster on join (manual follow-up) |
+| RADIUS server | `auth-servers` library profile + `server-groups` binding | Manual follow-up (no classic API) |
+| MC cluster | Gateway cluster formed when converted MCs join at cutover (manual follow-up) | Gateways auto-cluster on join (manual follow-up) |

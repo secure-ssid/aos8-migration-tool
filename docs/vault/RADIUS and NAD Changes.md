@@ -29,9 +29,11 @@ auth breaks at cutover. Logic: `_check_radius_nad` in `lib/compatibility.py`
 1. Identify the AP management subnet(s) and the GW management IP (if keeping).
 2. In ClearPass: add the network device / network-range with the right secret
    **before** conversion.
-3. Enterprise SSIDs also need the [[Glossary|auth-server profile]] **attached** in Central
-   — automatic on [[Destination - New Central|New Central]] as a library profile (still attach to the
-   SSID); a **manual follow-up** on [[Destination - Classic Central|Classic]] (create per group).
+3. Enterprise SSIDs need their [[Glossary|auth-server profile]] in Central —
+   on [[Destination - New Central|New Central]] the tool creates the profiles
+   **and binds a server-group to each 802.1X SSID** (only the shared secrets
+   remain to set, since AOS 8 exports them hashed); a **manual follow-up** on
+   [[Destination - Classic Central|Classic]] (create per group).
 4. Validate: [[Glossary|Access Tracker]] should show the new GW/AP mgmt IP as the NAS
    (Step 6 checklist).
 

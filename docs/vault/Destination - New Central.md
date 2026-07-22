@@ -61,6 +61,12 @@ personal.
 
 ## Overlay SSID sequence (the load-bearing order)
 
+> **Deferred:** Step 3 does **not** run this sequence. The gateway cluster
+> only exists after the MCs convert at cutover, so tunnel/split SSIDs are
+> logged as *DEFERRED* follow-ups and bound afterwards (the runbook drives
+> it). `create_overlay_ssid` is the reference implementation for that
+> post-cutover bind.
+
 For a tunnel/split SSID, `create_overlay_ssid` builds, in order:
 
 1. **role** (`_ensure_role`) — `POST /network-config/v1/roles/{essid}`, then
@@ -87,21 +93,27 @@ swallowed (idempotent re-runs + same-ESSID-in-multiple-groups).
 
 ## Gateway cluster
 
-When [[Gateway Strategy|keeping gateways]], the cluster lives in its **own device group**
-(`<cluster>-gws`, MOBILITY_GW persona). `create_gw_cluster` →
-`POST /network-config/v1alpha1/gateway-clusters/{name}` with `auto-cluster=
-false`. The cluster's scope id is the **`cluster-scope-id`** the overlay-wlan
-references. Cluster names: no spaces, must not start with `auto_`. The MC
-hardware joins as a gateway via ZTP/Static Activate (see [[Source - Mobility Controller|gateway migration]]).
+When [[Gateway Strategy|keeping gateways]], the cluster is **not created during
+Step 3** — it is a native New Central object formed by JOINING gateways, and
+the MCs only become AOS 10 gateways at cutover. `provision()` records an
+explicit *manual follow-up* to form the cluster (name rules: no spaces, must
+not start with `auto_`); the MC hardware joins as a gateway via ZTP/Static
+Activate (see [[Source - Mobility Controller|gateway migration]]).
+`create_gw_cluster` (`POST /network-config/v1alpha1/gateway-clusters/{name}`,
+`auto-cluster=false`) remains the reference call for that follow-up.
 
 ## Provision orchestration
 
-`provision()` runs: resolve global scope → sites → auth servers → GW device
-group + cluster → per group: device group, VLANs, SSIDs (overlay or underlay),
-firmware compliance, CAMPUS_AP persona, site assignment. Duplicate ESSIDs within
-a group are **skipped** (first definition wins) — see [[Preflight Checks|duplicate ESSID]]. Every
-step's success/failure is recorded; the flow continues so the operator gets a
-complete picture. Re-runs reuse existing objects.
+`provision(phase="config")` (Step 3) runs: resolve global scope → sites →
+auth servers (+ a RADIUS **server-group** that 802.1X SSIDs bind to) → per
+group: device group, VLANs, **underlay** SSIDs, firmware compliance. Tunnel
+SSIDs and the gateway cluster are recorded as deferred follow-ups (above).
+`provision(phase="devices")` (Step 4's cutover move) then moves claimed APs
+into their groups and assigns the CAMPUS_AP persona + site. Duplicate ESSIDs
+within a group are **skipped** (first definition wins) — see
+[[Preflight Checks|duplicate ESSID]]. Every step's success/failure is
+recorded; the flow continues so the operator gets a complete picture. Re-runs
+reuse existing objects.
 
 ## Validation
 

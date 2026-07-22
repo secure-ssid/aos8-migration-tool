@@ -183,7 +183,12 @@ def reset_downstream_state():
     for key in ("central_config", "preflight_results", "provision_done",
                 "provision_results", "validation_results",
                 "glp_existing", "glp_subscriptions", "glp_claim_result",
-                "glp_sub_results", "validation_celebrated"):
+                "glp_sub_results", "glp_service_managers", "onboard_results",
+                "probe_results", "validation_celebrated", "macedit_result"):
+        st.session_state.pop(key, None)
+    # the Step 6 closeout checklist is mirrored into durable chk_* keys —
+    # a new engagement starts with an unticked checklist
+    for key in [k for k in st.session_state.keys() if str(k).startswith("chk_")]:
         st.session_state.pop(key, None)
 
 # p1_connect.py

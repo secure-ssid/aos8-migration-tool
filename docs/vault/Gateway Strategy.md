@@ -12,8 +12,10 @@ Tunnel/split SSIDs stay **overlay**; the MC hardware is converted to an AOS 10
 **[[Glossary|gateway cluster]]** (`<slug>-cluster`). Mirrors the AOS 8 design — lowest
 behavioral change.
 
-- [[Destination - New Central|New Central]]: explicit overlay-wlan objects bound to the cluster via
-  `gw-cluster-list` + `cluster-scope-id`; cluster in its own `-gws` device group.
+- [[Destination - New Central|New Central]]: overlay-wlan objects bound to the cluster via
+  `gw-cluster-list` + `cluster-scope-id` — **deferred to cutover**: the
+  cluster forms when the converted MCs join in Central (Step 3 records the
+  follow-up; the runbook drives the binding).
 - [[Destination - Classic Central|Classic]]: AOS10 group allows Gateways; the cluster **auto-forms** on
   join (manual follow-up to verify the SSID binding).
 - MC → gateway via ZTP or Static Activate (see [[Source - Mobility Controller|gateway migration]]).

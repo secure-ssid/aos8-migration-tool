@@ -13,6 +13,21 @@ pip install -r requirements.txt
 streamlit run app.py          # opens http://localhost:8501
 ```
 
+> **Screenshots** in this guide come from a real run of the wizard using the
+> built-in `zztest` test customer (Step 1 → *Load test customer*), so you can
+> reproduce every screen yourself without a controller or tenant.
+
+**The wizard at a glance:**
+
+| Step | Screen | You need | It writes to |
+|---|---|---|---|
+| 1 Connect | discovery + destination creds | MC/VC access or CLI paste, Central API creds | nothing |
+| 2 Preflight | pass/warn/fail checks | — | nothing |
+| 3 Build Config | manifest → provisioning log | Central creds from Step 1 | Central tenant |
+| 4 Onboard APs | claim + subscribe + move | GLP creds (usually same client) | GreenLake + Central |
+| 5 Runbook | `ap convert` CLI script | — | nothing |
+| 6 Validate | serial matching + checklist | — | nothing |
+
 ---
 
 ## The four migration paths
@@ -42,8 +57,12 @@ Key facts that hold across all paths:
 - The gateway strategy only matters when the MC source has at least one
   tunnel or split SSID. With only bridge SSIDs there is nothing to keep.
 - Secrets (MC password, Central client secret / access token, PSKs, RADIUS
-  secrets) live only in the Streamlit session. The JSON discovery export
-  redacts PSKs and RADIUS secrets.
+  secrets) live in the Streamlit session. The one exception is the opt-in
+  **Remember** toggle, which persists *destination* API credentials (client
+  id/secret + Classic refresh token — never source-side secrets or the
+  short-lived access token) to disk, Fernet-encrypted and scoped to your
+  signed-in identity. The JSON discovery export redacts PSKs and RADIUS
+  secrets.
 
 ---
 
@@ -102,7 +121,7 @@ Enter into Step 1 → Destination:
 |---|---|---|
 | Central API base URL (regional) | `https://us4.api.central.arubanetworks.com` | Region-specific; not the SSO host. |
 | API client ID | (from GreenLake) | |
-| API client secret | (from GreenLake) | Saved this session only — re-enter after a restart. |
+| API client secret | (from GreenLake) | Session-only by default; the **Remember** toggle keeps it encrypted on disk for the next launch. |
 | Target AOS 10 | `10.7.0.0` (default) | Must look like `10.x.x.x`. |
 
 Auth flow: the tool exchanges client ID/secret at
@@ -139,7 +158,39 @@ Enter into Step 1 → Destination:
 Pulls the AOS 8 config and points at the destination. This is the only step that
 chooses the path.
 
-What it does:
+![Step 1 — empty Connect & Discover screen](screenshots/01-connect-empty.png)
+
+**What you do, in order:**
+
+1. Enter the **Customer name** (drives every generated object name) and,
+   optionally, a site name. Open *Site address & timezone* and fill it in —
+   New Central validates the address, and blank fields fall back to lab
+   placeholders.
+2. Pick the **Source platform** (Mobility Controller vs Instant cluster).
+3. Pull the config: **API mode** (MC IP + credentials → *Connect & Pull
+   Config*) or **Paste CLI output** (one text box per show command → *Parse
+   Pasted Output*). No controller handy? Open the 🧪 *Load test customer*
+   expander and load a synthetic scenario instead.
+4. Review the **Discovery summary** — AP groups with their SSIDs
+   (color-coded tunnel/split/bridge), the AP table with AOS 10 compatibility
+   badges, VLANs, RADIUS servers, firmware/cluster chips:
+
+   ![Step 1 — discovery summary after loading a customer](screenshots/02-connect-discovered.png)
+
+5. Choose the **Destination** (New Central or Classic Central) and enter its
+   API credentials. Optionally tick **Remember** to keep them (encrypted) for
+   the next launch:
+
+   ![Step 1 — destination credentials](screenshots/03-destination.png)
+
+6. Optionally hit **Test API connectivity** — read-only probes that confirm
+   auth, scope/site/group reads, and detect hybrid tenants before anything
+   is written.
+7. If tunnel/split SSIDs were discovered, pick the **Gateway strategy**
+   (keep the MCs as AOS 10 gateways, or retire them → everything bridge).
+8. **Continue →** builds the target design and moves to Preflight.
+
+What it does behind the scenes:
 1. Reads customer name, optional site name + address.
 2. Pulls/parses the source config into a `CustomerConfig` (AP groups, SSIDs with
    per-group bindings, auth types/PSKs, AP inventory with serials/MACs, VLANs,
@@ -176,6 +227,17 @@ Read-only. Nothing is written to Central. Produces pass / warn / fail
 (blocker) results. Blockers must be fixed or explicitly overridden (a checkbox
 acknowledging the risk) before you can advance to provisioning.
 
+![Step 2 — preflight results](screenshots/04-preflight.png)
+
+**What you do, in order:**
+
+1. Read every **warning** — each one names the exact object and the action
+   to take before cutover (NAD updates, VLAN trunking, cluster sequencing…).
+2. Fix any **blocker** at the source (or map named VLANs in the inline
+   editor) and hit **Re-run**. Genuinely unavoidable blockers can be
+   overridden with the acknowledgement checkbox — the risk is yours.
+3. **Provision →** when the list is green enough to proceed.
+
 ### What each check means
 
 | Check | Status logic | Meaning / action |
@@ -206,7 +268,7 @@ advances (gated by the override checkbox when blockers exist).
 
 ---
 
-## Step 3 — Provision Central
+## Step 3 — Build Config (Provision Central)
 
 Writes to the customer tenant. Shows a **manifest** of everything that will be
 created, then runs the provisioning sequence with a live per-step pass/fail log.
@@ -214,29 +276,52 @@ created, then runs the provisioning sequence with a live per-step pass/fail log.
 are idempotent — existing objects with matching names are reused — so you can
 fix a failure and use "Reset & re-run provisioning."
 
+![Step 3 — manifest before provisioning](screenshots/05-provision-manifest.png)
+
+**What you do, in order:**
+
+1. Expand the **manifest** and read exactly what will be created — sites,
+   groups, VLANs, SSIDs, auth servers — before anything is written.
+2. Hit **🚀 Provision** and watch the live per-step log.
+3. On failures: fix the cause (the raw API error is shown per step) and use
+   **Reset & re-run provisioning** — completed objects are reused.
+4. **GreenLake →** when the log is green:
+
+   ![Step 3 — provisioning results](screenshots/06-provision-results.png)
+
 ### New Central (paths 1 & 3)
 
-Sequence (`CentralClient.provision`):
+Sequence (`CentralClient.provision`, config phase):
 1. Authenticate at GreenLake SSO (pre-check; failure stops here with guidance).
 2. Resolve the **global scope id** from `/network-config/v1/scope-maps`
-   (`SERVICE_PERSONA`). If this fails, nothing else can proceed.
-3. Create the **site** (`/network-monitoring/v1/sites`), idempotent by name.
-4. Create **RADIUS auth-server** library profiles.
-5. If keeping gateways: create the `<cluster>-gws` device group, then the
-   **gateway cluster** (`MOBILITY_GW`).
-6. Per AP group: create the **device group** (and add AP serials), create
-   **VLANs** (`layer2-vlan` + scope-map), create **SSIDs**, set **firmware
-   compliance**, assign **CAMPUS_AP persona**, assign **APs to site**.
+   (`SERVICE_PERSONA`) — a cheap read that proves config access. If this
+   fails, nothing else can proceed.
+3. Create the **site** (`/network-config/v1alpha1/sites`, falling back to
+   `/network-config/v1/sites` then `/network-monitoring/v1/sites` on 404),
+   idempotent by name.
+4. Create **RADIUS auth-server** library profiles, plus a **server-group**
+   that 802.1X SSIDs bind to.
+5. Per AP group: create the **device group**, create **VLANs** (`layer2-vlan`
+   + scope-map), create **SSIDs** (underlay), set **firmware compliance**.
+
+Two things are deliberately **deferred to later steps** — the log records
+them explicitly, nothing is silently dropped:
+
+- **Gateway cluster + overlay (tunnel) SSIDs** — the cluster is a New
+  Central object formed by JOINING gateways, and the MCs only become AOS 10
+  gateways at cutover. Step 3 records a *manual follow-up* to form the
+  cluster; tunnel/split SSIDs are logged as *DEFERRED* and bound after
+  cutover (the runbook walks you through it).
+- **CAMPUS_AP persona + site assignment** — these need claimed APs, so they
+  run in Step 4's cutover move (the `devices` phase).
 
 SSID translation in New Central:
 
 | AOS 8 SSID | New Central object |
 |---|---|
-| virtual-ap tunnel/split (keep gateways) | Overlay SSID (`FORWARD_MODE_L2`) + role + allow-all policy + `overlay-wlan` bound to the GW cluster (GRE). Scope-mapped to the group. |
-| virtual-ap bridge (or anything when gateways retired) | Underlay SSID (`FORWARD_MODE_BRIDGE`), scope-mapped to the group (CAMPUS_AP). |
+| virtual-ap tunnel/split (keep gateways) | DEFERRED at Step 3 — bound as overlay (`FORWARD_MODE_L2`) to the GW cluster after cutover (see runbook) |
+| virtual-ap bridge (or anything when gateways retired) | Underlay SSID (`FORWARD_MODE_BRIDGE`), scope-mapped to the group (CAMPUS_AP) |
 
-If a group has a tunnel SSID but the GW group/cluster failed to create earlier,
-the overlay SSID step is recorded as a failure (skipped), not silently dropped.
 Duplicate ESSIDs within a group are skipped after the first (recorded as a
 benign skip).
 
@@ -272,23 +357,48 @@ Classic caveats you will see surfaced:
 
 ## Step 4 — GreenLake Onboarding
 
-Claims the APs into the GreenLake workspace and assigns subscriptions, so Central
-adopts them the moment they convert. Optional if you've already claimed via the
-GreenLake UI / CSV, but recommended order is: provision → claim → convert.
+Claims the APs into the GreenLake workspace, assigns them to the Central
+application + a subscription, and (at cutover time) moves them into their
+device groups — so Central adopts them the moment they convert. Optional if
+you've already claimed via the GreenLake UI / CSV, but recommended order is:
+provision → claim → convert.
 
-What it does:
+![Step 4 — onboarding overview with claim buckets](screenshots/07-greenlake.png)
+
+**What you do, in order:**
+
+1. Review the **pre-onboarding checklist** (New Central) — it summarizes what
+   Step 3 staged so you confirm the config before touching APs.
+2. Check the **claim buckets**. APs missing a wired MAC can be fixed inline
+   (*Add wired MACs* expander) without re-running discovery.
+3. **Check workspace** — authenticates to GLP, lists existing inventory,
+   loads subscriptions, marks which APs are already claimed.
+4. **Claim N APs into GreenLake** — async; the tool polls to completion and
+   then re-reads the workspace to verify every serial actually landed:
+
+   ![Step 4 — after claiming](screenshots/08-greenlake-claimed.png)
+
+5. **Assign APs to Central + subscription** — pick the Central application
+   instance (with its region) and an **active** subscription (AP
+   subscriptions listed first). Two sequential merge-patches per device
+   (GLP rejects combining them): application+region first, then the
+   subscription. Without the application assignment Central never adopts
+   the APs.
+6. At cutover: **Move APs into groups + assign persona/site** — the
+   `devices` phase of provisioning. This is the conversion trigger for
+   pre-assigned APs; it also assigns the CAMPUS_AP persona and the site.
+
+What it does behind the scenes:
 1. Buckets APs into **claimable** (serial + MAC), **missing MAC**, **missing
    serial**. Only claimable APs can be onboarded automatically.
-2. **Check workspace** — authenticates, lists existing inventory, loads
-   subscriptions, marks which APs are already claimed.
-3. **Claim** — `POST /devices/v1/devices` with serial+MAC pairs. This is an
+2. **Claim** — `POST /devices/v1/devices` with serial+MAC pairs. This is an
    **async** operation: the tool polls the async-operation until done, then
    reconciles the submitted serials against the **actual workspace inventory**
    (it never trusts the async body shape alone). Serials not found post-claim are
    flagged as must-resolve.
-4. **Assign subscriptions** — only **active** subscriptions are listed, **AP
-   subscriptions first**. Applies the chosen sub to every claimed AP in the
-   workspace (`PATCH /devices/v2beta1/devices` merge-patch).
+3. **Application + subscription** — `PATCH /devices/v2beta1/devices`
+   (merge-patch, one PATCH for `application`+`region`, a second for
+   `subscription`), each polled to a terminal state when GLP answers 202.
 
 | Bucket | Cause | Fix |
 |---|---|---|
@@ -315,6 +425,18 @@ Generates a **customer-specific** runbook and shows gateway-migration guidance.
 Gated behind Step 3 (you must provision Central first — converted APs look for
 their config in Central). Downloadable as `.txt`.
 
+![Step 5 — generated ap convert runbook](screenshots/09-runbook.png)
+
+**What you do, in order:**
+
+1. Read the pre-requisite warnings at the top — they adapt to your path
+   (firmware minimums, NAD updates, VLAN trunking when retiring gateways).
+2. **Download** the runbook (`.txt`) and review it with the customer.
+3. Execute it on the MC CLI during the maintenance window — it includes the
+   pre-validate/cancel/convert sequence and the cluster ordering.
+4. Follow the gateway-migration guidance below the runbook (ZTP or static
+   Activate for kept gateways; decommissioning steps for retired ones).
+
 The runbook content depends on source and cluster topology:
 
 | Scenario | Runbook shape |
@@ -337,8 +459,9 @@ show ap convert-status            # 10–20 min per AP
 
 `activate` is the primary path (APs fetch their own image). A commented
 **manual image-server alternative** is included only for AP families whose AOS 10
-image codename is confidently known (e.g. 303/304/305 → Ursa, 504/505 → Scorpio,
-535/555 → Norma); unmapped models get an explicit "verify the image, do NOT
+image codename is confidently known (per the Instant release-notes image-class
+tables: 303 → Scorpio, 318/37x → Gemini, 344/345 + 50x/51x/518/57x → Draco,
+53x/55x/58x → Lupus, 635/655 → Norma); unmapped models get an explicit "verify the image, do NOT
 guess" placeholder.
 
 Pre-req warnings adapt to the path:
@@ -365,7 +488,18 @@ sources; boot the Instant partition for Instant).
 Confirms converted APs are online in Central by serial, and provides a
 post-migration checklist.
 
-What it does:
+![Step 6 — validation results and closeout checklist](screenshots/10-validate.png)
+
+**What you do, in order:**
+
+1. Hit **Run Validation** — each converted AP takes 10–20 minutes to upgrade
+   and register, so re-run until Expected = Online.
+2. Chase any serial in the **Missing / Offline** list (console cable, DHCP,
+   Activate rules are the usual suspects).
+3. Work through the **post-migration checklist** — 8/8 marks the engagement
+   closed out.
+
+What it does behind the scenes:
 1. Builds the **expected** set from discovered AP serials (serial-less APs can't
    be matched — flagged).
 2. **Run Validation** fetches all APs from Central (New: `/network-monitoring/v1/devices`;
@@ -380,3 +514,20 @@ What it does:
 
 If the device fetch fails entirely (returns nothing), the tool tells you to check
 the API client's monitoring permissions and retry.
+
+---
+
+## Beyond the wizard
+
+Two more modes live in the sidebar's **Mode** switch:
+
+- **Add devices only** — onboard APs into groups that already exist in the
+  tenant: claim → subscribe → move → persona, skipping discovery and config
+  entirely. Feed it a pasted `show ap database long` or a serial+MAC list.
+
+  ![Add devices only mode](screenshots/11-add-devices.png)
+
+- **Help & Docs** — how each page works, the exact API calls behind it
+  (curl + a generated Postman collection), and how to create the API keys.
+
+  ![Help & Docs mode](screenshots/12-help.png)

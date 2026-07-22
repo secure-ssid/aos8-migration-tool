@@ -41,18 +41,22 @@ diffs the **submitted serials against the actual workspace inventory** →
 reports claimed vs NOT-in-workspace. "Check workspace" can also be run first to
 mark APs already claimed (via CSV/UI) so only the delta is claimed.
 
-## Subscription assignment
+## Application + subscription assignment
 
 1. List subs — `GET /subscriptions/v1/subscriptions`. The UI shows active subs
-   only (status ≠ ENDED), AP-type tiers first.
-2. `assign_subscription(serial, key_or_id)`:
-   - resolve the subscription: canonical UUIDs pass through; a **key** is
-     resolved via OData filter `key eq '<key>'`.
-   - resolve the device's GLP id from its serial (cached; must already be in the
-     workspace — claim first).
-   - `PATCH /devices/v2beta1/devices?id=<device-uuid>` with
-     `{"subscription":[{"id": <sub-uuid>}]}` and
-     `Content-Type: application/merge-patch+json`.
+   only (status ≠ ENDED), AP-type tiers first. List Central application
+   instances — `GET /service-catalog/v1/service-manager-provisions`
+   (`/v1beta1/` fallback) — the operator picks one (id + region).
+2. The UI's assign button calls `assign_application(serial, app_id, region,
+   sub_key_or_id)` per device — **two sequential merge-patches** on
+   `PATCH /devices/v2beta1/devices?id=<device-uuid>` (GLP rejects combining
+   them in one call):
+   1. `{"application": {"id": <app-id>}, "region": <region>}` — REQUIRED, or
+      Central never adopts the AP;
+   2. `{"subscription":[{"id": <sub-uuid>}]}` — canonical UUIDs pass through;
+      a **key** is resolved via OData filter `key eq '<key>'`.
+   Each PATCH that answers **202** is polled to a terminal state via its
+   `Location` operation path.
    - Targets only APs actually in the workspace (claim results ∪ snapshot).
 
 ## Optional / classic note
