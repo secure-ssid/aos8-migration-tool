@@ -25,9 +25,10 @@ A scope is global, a site, or a **device group**:
 - **Device groups** — `POST /network-config/v1/device-groups`
   (or `device-groups-create-and-add-devices` with serials). Returns a
   `scopeId`. One device group per AOS 8 [[Source - Mobility Controller|ap-group]] / Instant [[Source - Instant IAP|zone]].
-- **Sites** — `POST /network-monitoring/v1/sites` (geographic scope with
-  address). AP→site association tries the New Central path then a classic
-  fallback.
+- **Sites** — `POST /network-config/v1alpha1/sites` (geographic scope; falls
+  back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`).
+  The body requires a full ISO-valid address + timezone object. AP→site
+  association tries the New Central path then a classic fallback.
 
 ## Profiles + scope-maps
 
@@ -40,8 +41,10 @@ success**. [[Glossary|Personas]] used: `CAMPUS_AP`, `MOBILITY_GW`, `SERVICE_PERS
 - **VLAN** — `POST /network-config/v1/layer2-vlan/{id}` (PUT on duplicate),
   then scope-mapped to the group.
 - **Auth server** — `POST /network-config/v1alpha1/auth-servers/{name}`
-  (RADIUS, AUTH_AND_COA). 802.1X SSIDs still need it **attached** in Central —
-  surfaced by [[Preflight Checks|the 802.1X check]].
+  (RADIUS, AUTH_AND_COA). 802.1X SSIDs get a RADIUS **server-group**
+  (`<slug>-radius`) created and bound automatically (`auth-server-group` on the
+  SSID body) — only the shared secrets (placeholders, since AOS 8 exports them
+  hashed) must be set in Central, surfaced by [[Preflight Checks|the 802.1X check]].
 - **Firmware compliance** — `POST /network-config/v1alpha1/firmware-compliance`
   (PATCH on 412), `IMMEDIATE` upgrade+reboot, per device group + device-function.
 

@@ -18,7 +18,7 @@ Verification-email sender. Two modes via ``AOS8_SMTP_MODE``:
 
 Config (all optional except where noted):
   AOS8_SMTP_MODE   relay | direct           (default relay)
-  AOS8_SMTP_FROM   From address             (default no-reply@<recipient domain>)
+  AOS8_SMTP_FROM   From address             (default no-reply@<sending host>)
   relay mode:      AOS8_SMTP_HOST (required), _PORT (587), _USER, _PASS,
                    _STARTTLS (true), _SSL (false)
   direct mode:     needs dnspython for MX lookup; delivers on port 25

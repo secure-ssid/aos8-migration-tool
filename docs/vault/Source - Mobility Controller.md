@@ -60,6 +60,13 @@ distinction matters because [[Destination - New Central|Central keys WLANs by ES
 
 ## `ap convert` mechanics
 
+**NOTE — auto-conversion:** assigning the APs to their AOS 10 device group
+(Step 4 "Move APs into groups") makes Central push the conversion
+automatically — the APs reboot into AOS 10 without you running `ap convert`.
+The commands below are the controller-driven path for APs that don't
+auto-convert (e.g. unreachable from Central) — do one or the other, inside a
+maintenance window (the generated runbook carries the same note).
+
 Syntax (AOS-W 8.x CLI ref; see `lib/runbook.py`):
 
 ```

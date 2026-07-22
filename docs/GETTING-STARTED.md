@@ -2,8 +2,9 @@
 
 **New here? This page takes you from nothing to a full simulated migration in
 about 5 minutes — no controller, no Central tenant, no risk.** The tool ships
-with a built-in test customer, so you can click through every screen and see
-exactly what a real migration looks like before you ever touch production
+with a built-in test customer, so you can click through the first three
+steps — discovery, preflight, and the full provisioning manifest — and see
+exactly how a migration is staged before you ever touch production
 credentials.
 
 ## What is this tool?
@@ -48,14 +49,18 @@ Your browser opens http://localhost:8501 and shows Step 1:
 Instead of connecting to a real controller, open the
 **Load test customer** expander, keep the default scenario, and click
 **Load test customer**. The wizard fills with a realistic fake deployment
-(2 AP groups, 3 SSIDs, 3 APs, RADIUS, an L2 controller cluster) — every
+(2 AP groups, 3 SSIDs, 3 APs, RADIUS, and an L2 controller cluster — two
+controllers sharing the same client VLANs, which changes the conversion
+order in Step 5) — every
 object is named `zztest-…` so it's obviously disposable:
 
 ![Step 1 — discovery summary after loading the test customer](screenshots/02-connect-discovered.png)
 
 > This is exactly what you'd see after pulling a real controller's config —
-> AP groups with their SSIDs (color-coded by forwarding mode), the AP
-> inventory with AOS 10 compatibility badges, VLANs, and RADIUS servers.
+> AP groups with their SSIDs (color-coded by forwarding mode — tunnel means
+> client traffic rides through the controller, bridge means the AP puts it
+> straight onto the local network), the AP
+> inventory with AOS 10 compatibility badges, and RADIUS servers.
 
 ### 3. Walk the wizard
 
@@ -64,7 +69,9 @@ anything plausible into the credential fields (auth isn't attempted until
 Step 3), then click **Continue →**.
 
 - **Step 2 (Preflight)** runs instantly and shows the pass/warn/fail report —
-  read a couple of warnings to get a feel for what it checks:
+  read a couple of warnings to get a feel for what it checks. Click
+  **Provision →** to move on — despite the name it only takes you to Step 3;
+  nothing is written until you press **Provision** there:
 
   ![Step 2 — preflight checks](screenshots/04-preflight.png)
 
@@ -75,8 +82,11 @@ Step 3), then click **Continue →**.
 
   ![Step 3 — the manifest](screenshots/05-provision-manifest.png)
 
-- **Step 5 (Runbook)** and the other steps can be browsed from the stepper
-  even before provisioning — each explains what it needs.
+- Steps 4–6 (Onboard APs, Runbook, Validate) unlock only after a successful
+  provisioning run — the stepper at the top is a progress display, not
+  navigation. With demo credentials the walkthrough ends at the Step 3
+  manifest; the [Migration Guide](MIGRATION-GUIDE.md) shows what the
+  remaining steps look like.
 
 ### 4. Explore the other two modes
 
@@ -100,7 +110,9 @@ numbered click-path for every step:
 | Central API credentials | New Central: GreenLake → Manage → API → create client credentials. Classic: API Gateway → System Apps & Tokens | Steps 1, 3, 6 |
 | GreenLake workspace access | Usually the same GreenLake client; needs device + subscription permissions | Step 4 |
 
-**Golden rule:** Steps 1–2 are read-only. You can connect to a production
+**Golden rule:** Steps 1–2 are read-only (the optional **Test API
+connectivity** probe creates one disposable `zzprobe-` group and deletes it
+again). You can connect to a production
 controller and run preflight as many times as you like — nothing is changed
 until you click **Provision** in Step 3, and even that only writes *new*
 objects to Central (your AOS 8 network keeps running untouched until you run

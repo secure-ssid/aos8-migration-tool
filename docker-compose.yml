@@ -3,11 +3,13 @@
 # password — no OAuth, no IdP.
 #
 # ── HTTPS via Caddy ──────────────────────────────────────────────────────────
-# This service binds to 127.0.0.1 only, so it is NOT publicly reachable; your
-# Caddy server terminates HTTPS and reverse-proxies to it (see deploy/Caddyfile).
-#   - Caddy on the HOST  -> proxy to localhost:8501 (the binding below).
-#   - Caddy in a CONTAINER -> drop the published port, put both on one network,
-#     and proxy to http://app:8501 instead.
+# This service publishes 8501 on ALL interfaces so a Caddy on a separate host
+# can front it with HTTPS (see deploy/Caddyfile).
+#   - Caddy on a SEPARATE host -> proxy to this host's :8501 (the binding below).
+#   - Caddy on the SAME host   -> tighten the binding to "127.0.0.1:8501:8501".
+#   - Caddy in a CONTAINER     -> drop the published port, put both on one
+#     network, and proxy to http://app:8501 instead.
+# Either way, firewall plain :8501 from users.
 # Passwords + verification codes ride the connection, so always go through Caddy
 # (HTTPS), never plain :8501 over an untrusted network.
 #

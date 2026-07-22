@@ -14,7 +14,7 @@ destination Central tenant.
 **Source tips**
 - **Mobility Controller**: API mode logs in at `https://<mc>:4343/v1/api/login`.
   On a Mobility Conductor use `config_path=/md` (default); on a standalone
-  controller set `/mm/mynode` (Advanced options). If port 4343 is firewalled,
+  controller set `/mm/mynode` (Advanced — API options). If port 4343 is firewalled,
   switch to paste mode — `show running-config` and `show ap database long`
   carry most of the data (the latter is the only command with **Serial # and
   wired MAC**, both needed for GreenLake claiming).
@@ -47,7 +47,9 @@ HELP = {
   image exists for them), unsupported firmware trains (ap convert needs
   ≥ 8.10.0.12 on 8.10 or ≥ 8.12.0.1 on 8.12 — 8.11 does not qualify),
   unresolved **named VLANs**, conflicting duplicate ESSIDs, ESSIDs over
-  32 chars.
+  32 chars, APs provisioned with **static IPs** (AOS 10 requires DHCP), and
+  two features AOS 10 drops entirely — **EAP-Offload** (AAA FastConnect) and
+  the MC **internal auth server** (move to external RADIUS first).
 - **Warnings (yellow)** need review, not necessarily action: RADIUS NAD
   changes, cluster sequencing, split-tunnel conversion, PSKs that couldn't be
   recovered, missing serials.
@@ -83,8 +85,9 @@ device groups.
 - Claiming is async — the tool polls the operation, then **verifies against
   the actual workspace inventory** (the API's own result body isn't trusted).
 - Only APs with both serial *and* MAC can be claimed automatically — others
-  are listed; add them manually in GreenLake or re-discover with
-  `show ap database long`.
+  are listed. Fill in missing wired MACs right on this page (the **Add wired
+  MACs** expander, then *Apply wired MACs*), or re-discover with
+  `show ap database long`, or claim them manually in GreenLake.
 - Subscriptions: active ones only, AP tiers listed first. Assignment targets
   only devices actually in the workspace.
 - Already claimed via CSV or the GreenLake UI? Skip the claim section — that

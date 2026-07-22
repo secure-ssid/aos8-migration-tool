@@ -59,8 +59,10 @@ relative to repo root (`aos8-migration-tool/`).
 `customer_config` (discovery) → `central_config` (translate) → `preflight_
 results` → `provision_results` → `glp_*` → `validation_results`. A new
 discovery clears everything downstream (`reset_downstream_state` in `app.py`).
-Credentials live in session only; the discovery JSON export redacts PSKs and
-RADIUS secrets.
+Credentials live in session by default; the opt-in Remember toggle (Step 1)
+persists destination creds encrypted per user via `lib/credstore.py` (MC
+password, PSKs, RADIUS secrets and the short-lived Classic access token are
+never saved). The discovery JSON export redacts PSKs and RADIUS secrets.
 
 ## Related
 [[Home]] · [[Glossary]] · [[Migration Paths]]

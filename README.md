@@ -15,9 +15,9 @@ everything it's about to do before it does it.
 
 ## New here? Two links
 
-- **[Getting Started](docs/GETTING-STARTED.md)** — zero to a full simulated
-  migration in 5 minutes, using the built-in test customer. No controller, no
-  tenant, no risk.
+- **[Getting Started](docs/GETTING-STARTED.md)** — zero to a simulated
+  discovery → preflight → provisioning-manifest run in 5 minutes, using the
+  built-in test customer. No controller, no tenant, no risk.
 - **[Migration Guide](docs/MIGRATION-GUIDE.md)** — the full operator
   walkthrough for real migrations, with a screenshot and numbered click-path
   for every step.
@@ -60,8 +60,9 @@ pip install -r requirements.txt
 streamlit run app.py          # opens http://localhost:8501
 ```
 
-Then open the **Load test customer** expander in Step 1 and click through
-the whole wizard with zero infrastructure — the
+Then open the **Load test customer** expander in Step 1 and walk the first
+three steps — discovery, preflight, and the full provisioning manifest —
+with zero infrastructure — the
 [Getting Started guide](docs/GETTING-STARTED.md) walks you through it.
 
 For a **real migration** you'll need three things (details and where to get
@@ -73,8 +74,9 @@ them: [Migration Guide → Credentials setup](docs/MIGRATION-GUIDE.md#credential
    Classic Central (API Gateway token).
 3. **GreenLake workspace access** — usually the same GreenLake client.
 
-Steps 1–2 are read-only; nothing is written anywhere until you press
-**Provision** in Step 3, and your AOS 8 network keeps running untouched
+Steps 1–2 are read-only (the optional **Test API connectivity** probe
+creates one disposable `zzprobe-` group and deletes it again); nothing else
+is written anywhere until you press **Provision** in Step 3, and your AOS 8 network keeps running untouched
 until you execute the runbook in Step 5.
 
 ## What's supported
@@ -83,7 +85,7 @@ until you execute the runbook in Step 5.
 |---|---|
 | **Source** | Mobility Controller / Conductor (MM/MD) · Instant cluster (IAP) |
 | **Destination** | New Central (HPE GreenLake) · Classic Central |
-| **Gateway strategy** (MC + tunnel SSIDs only) | Keep the MCs as AOS 10 gateways (SSIDs stay overlay) · Retire them (everything becomes bridge) |
+| **Gateway strategy** (MC + tunnel SSIDs only) | Keep the MCs as AOS 10 gateways (tunneled SSIDs keep sending client traffic through them) · Retire them (every SSID switches to bridge mode — APs put client traffic straight onto the local network) |
 
 All four source × destination combinations work; the wizard adapts each step
 to your path. Instant sources are Central-driven (no controller commands at

@@ -18,8 +18,10 @@ streamlit run app.py
 In this default (`AOS8_AUTH_MODE=local`) mode there is no app login. Live
 credentials stay in the Streamlit session only. The optional **Remember**
 toggle persists *destination* API creds (client id/secret + Classic refresh
-token, never source-side secrets) to `~/.aos8-migration/<user>/credentials.json`,
-**encrypted at rest** with a private auto-generated key. Uncheck to delete.
+token, never source-side secrets) to `~/.aos8-migration/<user-hash>/credentials.json`
+(the directory name is a SHA-256 hash of your signed-in identity, not your
+email — the raw address is never used as a path), **encrypted at rest** with a
+private auto-generated key. Uncheck to delete.
 
 ## Multi-user (Docker farm, concurrent engineers)
 
@@ -114,6 +116,7 @@ rather than fall back to an unauthenticated mode.
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
 | `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address) |
 | `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. No host (and not `direct`) ⇒ codes logged to console (dev only) |
+| `AOS8_SMTP_STARTTLS` / `AOS8_SMTP_SSL` | `true` / `false` | Relay-mode TLS: STARTTLS on port 587 (default), or set `_SSL=true` for implicit TLS (port 465) |
 | `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in a multi-user mode = persistence off |
 | `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |
 | `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in `local` mode |

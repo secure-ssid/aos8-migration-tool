@@ -8,11 +8,14 @@ results depend on the chosen [[Gateway Strategy]] and [[Migration Paths|source/d
 
 ## AP model compatibility — `_check_ap_models`
 **FAIL** if any AP model is in the AOS 10 incompatible set (`is_model_compatible`
-/ `INCOMPATIBLE_MODELS` in `lib/aos8_client.py`). Incompatible families:
-103/104/105, 134/135, 175*, 204/205, 214/215, 224/225, 274/275, 315 (IAP- and
+/ `INCOMPATIBLE_MODELS` in `lib/aos8_client.py`). Incompatible: all Wi-Fi 4 and
+older (9x/10x/11x/13x/17x, RAP-*), the entire 200 series, and every 300-series
+model except 303/303H/303P, AP-318, 344/345 and 374/375/377 — see
+`INCOMPATIBLE_MODELS` in `lib/aos8_client.py` for the exact set (IAP- and
 AP- prefixes treated as the same hardware; `-US/-RW/-JP/-IL/-EG` country
 suffixes stripped; bare `205` normalized to `AP-205`). **Remediate:** hardware
-refresh before migration. Blank model → not blocked (don't guess).
+refresh before migration. Blank model → not blocked, but a separate "AP Models
+Unknown" WARN lists the APs whose compatibility could not be checked.
 
 ## Firmware train — `_check_firmware`
 `ap convert` is supported only on specific **release trains**, at/above a
@@ -51,6 +54,8 @@ per path — full detail in [[RADIUS and NAD Changes]]:
   subnet(s) as NAD ranges.
 - **MC, gateways retired** → **WARN**: every AP becomes the RADIUS client → add
   AP mgmt subnet(s) as a network-range NAD (per-AP doesn't scale).
+- **MC, gateways retired, bridge-only** (no former tunnel SSIDs) → **PASS** —
+  the APs were already the RADIUS clients, no NAD changes required.
 - **MC, gateways kept** → **WARN**: add the **GW management IP** as a new RADIUS
   client (bridge-mode SSIDs: each AP mgmt IP too).
 Always do this in ClearPass/RADIUS **BEFORE** `ap convert`.
@@ -87,7 +92,9 @@ No APs discovered → **WARN** (MC active? APs associated?). Otherwise **PASS**
 with AP/group counts.
 
 ## SSID → AP-group mapping — `_check_ssid_mapping`
-Skipped for Instant (SSIDs map via zones, no vap bindings). If `ssid_mapping_
+Instant: replaced by an SSID → Zone Mapping check — WARN when an SSID is zoned
+to a zone with no checked-in AP (it is parked in the instant-default group;
+verify zone names/case); silent when zones resolve cleanly. If `ssid_mapping_
 incomplete` (virtual-ap bindings couldn't be discovered for a group, so **all**
 SSIDs were assigned as a fallback) → **WARN**: in paste mode include the full
 running-config with ap-group blocks (their `virtual-ap` lines). Else **PASS**.
@@ -135,7 +142,8 @@ Within limit → no result emitted.
 
 ## Override
 Blockers (FAIL) gate the Provision button; Step 2 offers an explicit "Override
-blockers — I understand the risk" checkbox to proceed anyway.
+blockers — I understand the risk and will resolve them before cutover" checkbox
+to proceed anyway.
 
 ## Related
 [[Migration Paths]] · [[Gateway Strategy]] · [[Source - Mobility Controller]] ·

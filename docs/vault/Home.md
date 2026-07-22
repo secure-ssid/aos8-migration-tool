@@ -9,10 +9,10 @@ Controller/Conductor or Instant) onto **AOS 10** in [[Destination - New Central|
 
 | Step | Note |
 |---|---|
-| 1. Connect & Discover | [[Source - Mobility Controller]] · [[Source - Instant IAP]] |
+| 1. Connect | [[Source - Mobility Controller]] · [[Source - Instant IAP]] |
 | 2. Preflight | [[Preflight Checks]] |
-| 3. Provision | [[Destination - New Central]] · [[Destination - Classic Central]] |
-| 4. GreenLake | [[GreenLake Onboarding]] |
+| 3. Build Config | [[Destination - New Central]] · [[Destination - Classic Central]] |
+| 4. Onboard APs | [[GreenLake Onboarding]] |
 | 5. Runbook | [[Source - Mobility Controller]] (`ap convert`) / [[Source - Instant IAP]] (Central-driven) |
 | 6. Validate | matches converted APs by serial in Central |
 

@@ -18,7 +18,8 @@ RUN install -d -o appuser -g appuser -m 700 /home/appuser/.aos8-migration
 
 # Deployment knobs (override per environment — see docker-compose.yml):
 #   AOS8_AUTH_MODE=password  one shared gate password (simplest multi-user)
-#                  =accounts  per-person @hpe.com self-service login
+#                  =accounts  per-person self-service login (verified email;
+#                             optionally restrict with AOS8_ALLOWED_EMAIL_DOMAIN)
 #   AOS8_APP_PASSWORD=...     the shared password (password mode)
 #   AOS8_CREDSTORE_KEY=...    Fernet key enabling encrypted "Remember";
 #                             unset in a multi-user mode => persistence is OFF

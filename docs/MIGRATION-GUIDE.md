@@ -1,6 +1,6 @@
 # Migration Guide
 
-Operator walkthrough of the AOS 8 → AOS 10 Migration Console. Read this start to
+Operator walkthrough of the AOS 8 → Central Migration Console. Read this start to
 finish before your first engagement, then keep the per-step tables handy on
 subsequent runs.
 
@@ -113,7 +113,7 @@ MC paste commands (Step 1 lists them with hints):
 show running-config             # SSIDs, VLANs, ap-group→virtual-ap bindings, RADIUS
 show ap database long           # AP inventory WITH Group, Serial #, Wired MAC
 show version                    # exact firmware build for the ap convert check
-show lc-cluster group-membership# cluster topology (skip for a single MC)
+show lc-cluster group-membership    # cluster topology (skip for a single MC)
 show controller-ip              # controller IP + VLAN (RADIUS NAD reference)
 show aaa authentication-server all  # RADIUS summary (optional if running-config pasted)
 show ap active                  # fallback AP list only — has NO serial column
@@ -194,7 +194,8 @@ chooses the path.
 2. Pick the **Source platform** (Mobility Controller vs Instant cluster).
 3. Pull the config: **API mode** (MC IP + credentials → *Connect & Pull
    Config*) or **Paste CLI output** (one text box per show command → *Parse
-   Pasted Output*). No controller handy? Open the *Load test customer*
+   Pasted Output*; for Instant sources the button reads *Parse Instant
+   Output*). No controller handy? Open the *Load test customer*
    expander and load a synthetic scenario instead.
 4. Review the **Discovery summary** — AP groups with their SSIDs
    (color-coded tunnel/split/bridge), the AP table with AOS 10 compatibility
@@ -208,9 +209,9 @@ chooses the path.
 
    ![Step 1 — destination credentials](screenshots/03-destination.png)
 
-6. Optionally hit **Test API connectivity** — read-only probes that confirm
-   auth, scope/site/group reads, and detect hybrid tenants before anything
-   is written.
+6. Optionally hit **Test API connectivity** — auth and read checks against
+   the tenant, plus one disposable `zzprobe-` group-create (auto-deleted if
+   it succeeds) to detect hybrid clusters before any real provisioning.
 7. If tunnel/split SSIDs were discovered, pick the **Gateway strategy**
    (keep the MCs as AOS 10 gateways, or retire them → everything bridge).
 8. **Continue →** builds the target design and moves to Preflight.
@@ -241,8 +242,9 @@ URL, valid target firmware, **and** the destination credentials (New: client ID
 + secret; Classic: access token).
 
 On Continue the tool runs `translate()` to build the `CentralConfig` and advances
-to Step 2. **Re-running discovery wipes all downstream state** (see ARCHITECTURE.md
-→ reset-on-rediscovery) so a second customer's data can never leak forward.
+to Step 2. **Re-running discovery wipes all downstream state** (see
+[ARCHITECTURE.md → Reset-on-rediscovery flow](ARCHITECTURE.md#reset-on-rediscovery-flow))
+so a second customer's data can never leak forward.
 
 ---
 
@@ -258,8 +260,9 @@ acknowledging the risk) before you can advance to provisioning.
 
 1. Read every **warning** — each one names the exact object and the action
    to take before cutover (NAD updates, VLAN trunking, cluster sequencing…).
-2. Fix any **blocker** at the source (or map named VLANs in the inline
-   editor) and hit **Re-run**. Genuinely unavoidable blockers can be
+2. Fix any **blocker** at the source and hit **Re-run** — or map named
+   VLANs in the inline editor and click **Apply VLAN mapping** (this
+   re-runs preflight automatically). Genuinely unavoidable blockers can be
    overridden with the acknowledgement checkbox — the risk is yours.
 3. **Provision →** when the list is green enough to proceed.
 
@@ -272,7 +275,7 @@ acknowledging the risk) before you can advance to provisioning.
 | Instant Version (Instant source) | PASS if ≥ 8.6.0.0, else WARN | Central-driven conversion needs Instant 8.6+ (8.10/8.12 recommended). |
 | AP DHCP Requirement | FAIL if static-IP APs found; otherwise **WARN** (manual gate) | Static-IP provisioning isn't visible to discovery — you must confirm manually (`show ap provisioning ap-name <n>`). AOS 10 requires DHCP+DNS on AP mgmt VLAN. |
 | Tunnel/Bridge VLAN Check/Conflict | WARN when tunnel VLANs exist or overlap bridge VLANs; PASS otherwise | Tunnel client VLANs must NOT be on AP switchports; bridge data VLANs must be trunked. Conflict = a VLAN is used both ways. Suppressed when gateways retired. |
-| RADIUS NAD Update | WARN when RADIUS servers exist | The RADIUS client (NAD) changes after migration. Add the new NAD (GW mgmt IP, or AP mgmt subnets when bridge/retired) in ClearPass **before** converting. |
+| RADIUS NAD Update | WARN when RADIUS servers exist (PASS if gateways are retired and all SSIDs were already bridge — the APs were already the NADs) | The RADIUS client (NAD) changes after migration. Add the new NAD (GW mgmt IP, or AP mgmt subnets when bridge/retired) in ClearPass **before** converting. |
 | Gateway Retirement | WARN if retiring with former tunnel VLANs; PASS if already all-bridge | Lists the client VLANs that must be trunked to every AP switchport before conversion, plus DHCP/roaming/firewall implications. |
 | EAP-Offload / FastConnect | FAIL if `aaa-fastconnect` present | Not supported in AOS 10. Redesign to standard 802.1X first. |
 | Internal Authentication Server | FAIL if MC internal auth in use | Not supported in AOS 10. Move to external RADIUS first. |
@@ -286,7 +289,7 @@ acknowledging the risk) before you can advance to provisioning.
 | Conflicting Duplicate ESSIDs | FAIL if same ESSID has differing vlan/mode/auth/psk | Central keys WLANs by ESSID; only the first definition would provision. Rename or consolidate. |
 | Duplicate ESSIDs (same settings) | PASS, informational | Identical duplicate VAPs are consolidated into one Central WLAN. |
 | ESSID Length | FAIL if any ESSID > 32 chars | Central rejects them. Shorten first. |
-| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown auth → provisioned as WPA2-Enterprise; missing PSK → set in Central; enterprise → attach RADIUS server post-provision. |
+| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown auth → provisioned as WPA2-Enterprise; missing PSK → set in Central; enterprise → server-group is bound automatically (New Central) but the shared secrets are placeholders — set the real secrets in Central (Classic: create the auth-servers manually per group). |
 
 Navigation: Re-run re-evaluates checks; Back returns to Step 1; Provision
 advances (gated by the override checkbox when blockers exist).
@@ -380,7 +383,7 @@ Classic caveats you will see surfaced:
 
 ---
 
-## Step 4 — GreenLake Onboarding
+## Step 4 — Onboard APs (GreenLake)
 
 Claims the APs into the GreenLake workspace, assigns them to the Central
 application + a subscription, and (at cutover time) moves them into their
@@ -412,6 +415,9 @@ provision → claim → convert.
 6. At cutover: **Move APs into groups + assign persona/site** — the
    `devices` phase of provisioning. This is the conversion trigger for
    pre-assigned APs; it also assigns the CAMPUS_AP persona and the site.
+   The button stays disabled until you tick both the review checkbox at the
+   top and the "I'm in my cutover window — convert these N AP(s) now"
+   confirmation — moving live APs is the conversion trigger.
 
 What it does behind the scenes:
 1. Buckets APs into **claimable** (serial + MAC), **missing MAC**, **missing
@@ -436,8 +442,10 @@ Path notes:
   inventory. This GreenLake step applies to GLP-onboarded classic accounts
   (most current ones). If the account predates GreenLake onboarding, skip to the
   runbook.
-- **GLP credentials:** by default reuse the Central client (works if it's a
-  unified GreenLake client). Otherwise enter a separate GLP client ID/secret.
+- **GLP credentials:** for New Central destinations the tool defaults to
+  reusing the Central client (works if it's a unified GreenLake client); for
+  Classic destinations the checkbox defaults to off — enter a separate GLP
+  client ID/secret.
 
 GreenLake calls always go to the fixed base `https://global.api.greenlake.hpe.com`
 regardless of the Central region.
@@ -468,7 +476,7 @@ The runbook content depends on source and cluster topology:
 |---|---|
 | Instant source | Central-driven conversion — **no controller CLI, no `ap convert`, no gateways**. Remove conflicting Activate/AirWave rules; firmware compliance on the group pushes the image; canary one AP first. |
 | MC, single controller | Pre-reqs, optional MC→Gateway prep (or "MC only drives convert" when retiring), then the `ap convert` block. |
-| MC, **L2** cluster | Strict sequence: move all APs to MC1 → convert MC2 to gateway (or leave idle if retiring) → `ap convert` on MC1 → convert MC1. |
+| MC, **L2** cluster | Strict sequence: move all APs to MC1 → convert every other member to gateway (or leave them idle if retiring) → `ap convert` on MC1 → convert MC1. |
 | MC, **L3** cluster | Members convert independently: per member, move its APs to a peer, convert from the peer, then convert/decommission the emptied MC. |
 
 The `ap convert` block (verified against the AOS-W 8.x CLI reference):
@@ -534,7 +542,7 @@ What it does behind the scenes:
 4. All expected APs online → success + balloons (once). Otherwise a progress
    message (conversion takes 10–20 min/AP — re-run until counts converge).
 5. **Post-migration checklist** (manual): APs online, SSIDs broadcasting, RADIUS
-   working, roaming, no critical alerts, MC decommissioned, AirWave
+   working, roaming, no critical alerts, Mobility Conductor decommissioned, AirWave
    decommissioned, switchports updated. 8/8 marks the engagement closed out.
 
 If the device fetch fails entirely (returns nothing), the tool tells you to check
