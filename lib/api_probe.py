@@ -54,7 +54,7 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
 
     def sites():
         s = client.list_sites()
-        return f"{len(s)} site(s) readable via /network-config/v1/sites"
+        return f"{len(s)} site(s) readable via /network-config sites routes"
     results.append(_probe("Read — sites", sites))
 
     def groups():

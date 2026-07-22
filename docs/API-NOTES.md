@@ -5,8 +5,9 @@ caveats baked into the clients. Paths below are relative to each platform's base
 URL. The three cloud clients (New Central, Classic, GLP) raise on unexpected
 failure (errors are recorded per step, not swallowed) and auto-retry once on
 401 (re-auth/refresh) and once on 429 (Retry-After; both the delay-seconds and
-HTTP-date forms are tolerated). The **AOS 8 client has no auto-retry** — its
-calls are short-lived reads inside one login session.
+HTTP-date forms are tolerated). The AOS 8 client re-logins once on a 401
+(covers out-of-band session invalidation mid-pull) but has no 429 handling —
+its calls are short-lived reads inside one login session.
 
 ## Bases and auth
 

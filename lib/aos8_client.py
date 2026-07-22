@@ -131,15 +131,26 @@ class AOS8Client:
             params.update(extra)
         return params
 
-    def _get_object(self, name: str) -> list[dict]:
-        """GET a configuration object; returns its instance list."""
+    def _get_json(self, path: str, extra_params: Optional[dict] = None,
+                  _retried: bool = False) -> dict:
+        """Authenticated GET with ONE re-login retry on 401. The UIDARUBA
+        session can be invalidated out-of-band mid-pull (an admin clearing
+        mgmt-user sessions, conductor failover) — without the replay that
+        degrades into an empty/partial discovery instead of an error."""
         resp = self.session.get(
-            f"{self.base}{CONFIG_PATH_PREFIX}/object/{name}",
-            params=self._params(),
+            f"{self.base}{path}",
+            params=self._params(extra_params),
             timeout=self.timeout,
         )
+        if resp.status_code == 401 and not _retried:
+            self.connect()
+            return self._get_json(path, extra_params, _retried=True)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
+
+    def _get_object(self, name: str) -> list[dict]:
+        """GET a configuration object; returns its instance list."""
+        data = self._get_json(f"{CONFIG_PATH_PREFIX}/object/{name}")
         # Object payloads come back either under "_data" -> {name: [...]}
         # or directly under the object name.
         if isinstance(data.get("_data"), dict):
@@ -149,13 +160,8 @@ class AOS8Client:
 
     def _show(self, command: str) -> dict:
         """Run a show command; returns the parsed JSON document."""
-        resp = self.session.get(
-            f"{self.base}{CONFIG_PATH_PREFIX}/showcommand",
-            params=self._params({"command": command}),
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._get_json(f"{CONFIG_PATH_PREFIX}/showcommand",
+                              {"command": command})
 
     def _show_text(self, command: str) -> str:
         """Run a show command; flatten its _data block to plain text."""
