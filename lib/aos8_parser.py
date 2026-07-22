@@ -546,11 +546,17 @@ def _parse_cluster(text: str, mc_ip: str) -> Optional[ClusterInfo]:
             members.append(m.group(2))
         if re.search(r"L3-Connected", line, re.IGNORECASE):
             ctype = "L3"
-    if not members:  # older formats: any IPs in the member table
-        for line in text.splitlines():
-            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
-            if m and m.group(1) not in members:
-                members.append(m.group(1))
+    if not members:
+        # older formats: IPs from the member table — but ONLY when the pasted
+        # text actually looks like cluster output. Grabbing any two IPs from
+        # arbitrary text would fabricate a cluster (and its L2 sequencing
+        # warnings) out of unrelated paste content.
+        if re.search(r"lc-cluster|cluster\s+group[- ]membership|group profile",
+                     text, re.IGNORECASE):
+            for line in text.splitlines():
+                m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+                if m and m.group(1) not in members:
+                    members.append(m.group(1))
     if len(members) >= 2:
         return ClusterInfo(type=ctype, members=members, active_mc_ip=mc_ip)
     return None
@@ -608,8 +614,15 @@ def parse_instant_config(pasted_outputs: dict[str, str], vc_ip: str = "") -> Cus
     fw = _parse_firmware(running, pasted_outputs.get("version", ""))
 
     # zones → groups; SSIDs with no zone broadcast everywhere.
-    # Zone matching is case-insensitive (Instant operators typo case freely).
-    zones = sorted({ap.ap_group for ap in aps if ap.ap_group})
+    # Zone matching is case-insensitive (Instant operators typo case freely) —
+    # dedupe the zone names the same way, or 'Floor1' and 'floor1' become two
+    # device groups. First-seen casing wins; APs are folded into it.
+    _zone_canon: dict[str, str] = {}
+    for ap in aps:
+        if ap.ap_group:
+            canon = _zone_canon.setdefault(ap.ap_group.lower(), ap.ap_group)
+            ap.ap_group = canon
+    zones = sorted(_zone_canon.values())
     ssid_zones = {k: [z.lower() for z in v]
                   for k, v in _parse_instant_ssid_zones(running).items()}
     ap_groups: list[APGroup] = []

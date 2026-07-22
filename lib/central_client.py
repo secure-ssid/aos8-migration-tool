@@ -1079,6 +1079,18 @@ class CentralClient:
                          lambda s=ssid: self.create_captive_portal(
                              cp_profile_name(s), s.captive_portal_url,
                              s.captive_portal_redirect))
+                    if ssid.auth_type is not AuthType.OPEN:
+                        # the SSID body forces OPEN under an external portal
+                        # (the API rejects L2-auth + portal fields together) —
+                        # never let that opmode change go unremarked
+                        results.append((
+                            f"SSID {ssid.display_name} — NOTE: provisioned as "
+                            f"OPEN + external captive portal (source auth "
+                            f"'{ssid.auth_type.value}' is replaced by portal "
+                            "auth; review if L2 encryption was intended)",
+                            True, ""))
+                        if on_step:
+                            on_step(results[-1][0], True)
                 # Tunnel/split SSIDs always defer to the runbook: the gateway
                 # cluster only exists after the MCs convert at cutover, so
                 # there is nothing to bind the overlay to during the config

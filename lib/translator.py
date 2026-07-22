@@ -71,8 +71,11 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
         if not group_ssids:
             if not ap_group.ssids:
                 # no VAP bindings were discovered for this group at all —
-                # mirror discovery's assign-everything fallback
+                # mirror discovery's assign-everything fallback, and make sure
+                # preflight surfaces it (the API-pull path reaches here
+                # without the parser having set the flag)
                 group_ssids = cc.ssids
+                customer_config.ssid_mapping_incomplete = True
             else:
                 # bindings exist but none resolved to a discovered SSID
                 # (dangling refs) — flooding every SSID in would silently

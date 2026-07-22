@@ -40,8 +40,10 @@ Every request after login carries `UIDARUBA` and, on a Conductor, a
 | `/mm/mynode` | Standalone controller. |
 
 Config objects read: `ap_group` (with `virtual_ap` bindings), `ssid_prof`
-(essid/opmode/passphrase), `wlan_virtual_ap` (vlan/forward-mode/profile refs),
-`vlan_id`, `rad_server`, `server_group_prof`.
+(essid/opmode/passphrase), `virtual_ap` (vlan/forward-mode/profile refs —
+some builds answer the legacy name `wlan_virtual_ap` instead; the client
+tries both), `aaa_prof` (dot1x/mac server-group resolution), `vlan_id`,
+`rad_server`, `server_group_prof`.
 
 Show commands read: `show ap database long` (AP inventory incl. Serial #, Wired
 MAC, Group), `show controller-ip`, `show version`,

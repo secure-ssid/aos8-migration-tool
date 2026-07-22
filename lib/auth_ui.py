@@ -16,18 +16,24 @@ from lib import accounts, identity, mailer
 
 
 def _deliver_code(email: str, code: str) -> bool:
-    """Email the verification code; on failure (or no SMTP) log it to the server
-    console as a dev fallback. Returns True if it was actually emailed."""
+    """Email the verification code. With NO SMTP configured (dev mode) the
+    code is logged to the server console instead. Returns True if it was
+    actually emailed."""
     subject = "Your AOS 8 Migration Console verification code"
     body = (f"Your verification code is: {code}\n\n"
             f"It expires in {accounts.CODE_TTL_MINUTES} minutes. "
             f"If you didn't request this, ignore this email.")
     ok, err = mailer.send(email, subject, body)
     if not ok:
-        # Dev fallback only — never shown in the UI. Whoever can read the server
-        # logs can see it; production must configure SMTP.
-        print(f"[auth] verification code for {email}: {code} "
-              f"(email not sent: {err})", flush=True)
+        if mailer.configured():
+            # SMTP exists but the send failed — do NOT drop the secret into
+            # the (production) logs; the user can hit Resend.
+            print(f"[auth] verification email to {email} FAILED: {err}",
+                  flush=True)
+        else:
+            # Dev fallback only — never shown in the UI.
+            print(f"[auth] verification code for {email}: {code} "
+                  f"(no SMTP configured)", flush=True)
     return ok
 
 
