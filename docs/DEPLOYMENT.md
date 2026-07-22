@@ -60,7 +60,9 @@ encrypted credential store and the audit log.
   - **`AOS8_SMTP_MODE=direct`** — no account at all; the app does the MX
     lookup and delivers itself. May be spam-filtered from an unauthenticated
     IP; set `AOS8_SMTP_FROM` to a domain you control.
-  - With nothing set, codes are written to the **container log only** (dev).
+  - With nothing set, registration is **blocked** (fail closed). For
+    local development only, `AOS8_ALLOW_CONSOLE_CODES=true` prints codes to
+    the container log instead.
 - **Per-user credential isolation.** Saved creds are keyed and encrypted per
   signed-in user; one engineer's tenant secrets never load into another's
   session. With no `AOS8_CREDSTORE_KEY`, persistence is disabled entirely
@@ -115,7 +117,8 @@ rather than fall back to an unauthenticated mode.
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
 | `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address) |
-| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. No host (and not `direct`) ⇒ codes logged to console (dev only) |
+| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. With no delivery path configured, registration is blocked unless console codes are explicitly enabled (below) |
+| `AOS8_ALLOW_CONSOLE_CODES` | _(unset — off)_ | `true` = with no SMTP configured, print verification codes to the server console (local development ONLY — anyone with log access can take over registrations) |
 | `AOS8_SMTP_STARTTLS` / `AOS8_SMTP_SSL` | `true` / `false` | Relay-mode TLS: STARTTLS on port 587 (default), or set `_SSL=true` for implicit TLS (port 465) |
 | `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in a multi-user mode = persistence off |
 | `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |

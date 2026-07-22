@@ -260,14 +260,23 @@ class CentralClient:
     def get_global_scope_id(self) -> str:
         data = self._get("/network-config/v1/scope-maps")
         entries = data.get("scope-map", [])
+
+        def _scope_of(entry: dict) -> str:
+            # builds differ: some return scope-id, HPE's pycentral reads the
+            # numeric identifier from scope-name — accept either
+            sid = entry.get("scope-id")
+            if sid is None:
+                name = str(entry.get("scope-name", ""))
+                sid = name if name.isdigit() else None
+            return "" if sid is None else str(sid)
+
         for entry in entries:
-            if entry.get("persona") == "SERVICE_PERSONA" \
-                    and entry.get("scope-id") is not None:
-                return str(entry.get("scope-id"))
-        # fallback: most frequent scope-id across the map
+            if entry.get("persona") == "SERVICE_PERSONA" and _scope_of(entry):
+                return _scope_of(entry)
+        # fallback: most frequent scope id across the map
         counts: dict[str, int] = {}
         for entry in entries:
-            sid = str(entry.get("scope-id", ""))
+            sid = _scope_of(entry)
             if sid:
                 counts[sid] = counts.get(sid, 0) + 1
         if counts:
@@ -316,8 +325,9 @@ class CentralClient:
             self._sites_cache = []
             for path in ("/network-config/v1alpha1/sites", "/network-config/v1/sites"):
                 try:
-                    data = self._get(path)
-                    self._sites_cache = data.get("items") or data.get("sites") or []
+                    # documented page limit is 100 — paginate; _paginate's
+                    # repeat-page guard keeps builds that ignore offset safe
+                    self._sites_cache = self._paginate(path, page_size=100)
                     break
                 except CentralAPIError:
                     continue
@@ -591,7 +601,8 @@ class CentralClient:
         }
         body = {
             "ssid": ssid.display_name,
-            "enable": True,
+            # a source WLAN that was administratively disabled stays disabled
+            "enable": bool(getattr(ssid, "enabled", True)),
             "forward-mode": forward_mode,
             "opmode": OPMODE.get(ssid.auth_type, "WPA2_PERSONAL"),
             "vlan-selector": "VLAN_RANGES",
@@ -924,6 +935,14 @@ class CentralClient:
                 pass
 
         radius_group = ""
+        _source_sg_names: set = set()
+
+        def _ssid_server_group(s) -> str:
+            # bind the SSID's own (recreated) source group when it exists;
+            # fall back to the merged group otherwise
+            sg = getattr(s, "auth_server_group", "") or ""
+            return sg if sg in _source_sg_names else radius_group
+
         import re as _re
         _slug = _re.sub(r"[^a-z0-9-]+", "-", cc.customer_name.lower()).strip("-") or "migrated"
         has_enterprise = any(s.auth_type in (AuthType.WPA2_ENTERPRISE,
@@ -937,10 +956,17 @@ class CentralClient:
             for server in cc.radius_servers:
                 step(f"Create auth server: {server.name}",
                      lambda s=server: self.create_auth_server(s))
-            # RADIUS server-group — enterprise (802.1X) SSIDs bind to this so
-            # they actually authenticate.
+            # Source server-groups are recreated 1:1 so each 802.1X SSID
+            # keeps ITS OWN RADIUS group (failover order / policy separation
+            # survive). The merged fallback group only backs SSIDs whose
+            # source group couldn't be discovered.
+            for sg in getattr(cc, "server_groups", []) or []:
+                if sg.name and sg.servers:
+                    step(f"Create RADIUS server-group: {sg.name}",
+                         lambda g=sg: self.create_server_group(g.name, g.servers))
+                    _source_sg_names.add(sg.name)
             if radius_group:
-                step(f"Create RADIUS server-group: {radius_group}",
+                step(f"Create RADIUS server-group (fallback): {radius_group}",
                      lambda: self.create_server_group(
                          radius_group, [s.name for s in cc.radius_servers]))
 
@@ -1108,7 +1134,8 @@ class CentralClient:
                 else:
                     step(f"Create underlay SSID: {ssid.display_name} → {group_cfg.name}",
                          lambda s=ssid, sid=scope_id:
-                             self.create_underlay_ssid(s, sid, radius_group))
+                             self.create_underlay_ssid(s, sid,
+                                                       _ssid_server_group(s)))
 
             step(f"Set firmware compliance {group_cfg.firmware_version} → {group_cfg.name}",
                  lambda g=group_cfg, sid=scope_id:

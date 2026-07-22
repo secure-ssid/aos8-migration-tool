@@ -737,7 +737,9 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             m = re.match(r"opmode\s+([\w\-]+)", line, re.IGNORECASE)
             if m:
                 opmode = m.group(1)
-            m = re.match(r"wpa-passphrase\s+(\S+)", line, re.IGNORECASE)
+            # quoted passphrases may contain spaces — capture to end of
+            # line and strip the quotes (\S+ kept the quote and truncated)
+            m = re.match(r'wpa-passphrase\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
             if m:
                 passphrase = m.group(1)
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
@@ -776,7 +778,8 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             auth_known=auth_known,
             psk=passphrase,
             auth_server_group=auth_server,
-            broadcast=enabled,
+            # `disable` means administratively OFF — not a hidden SSID.
+            enabled=enabled,
             captive_portal_url=cp_url,
             captive_portal_redirect=cp_redirect,
         ))

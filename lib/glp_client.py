@@ -221,7 +221,7 @@ class GLPClient:
                     # 'completed' body, but every submitted device was rejected
                     raise GLPAPIError(self._rejected_msg(failed))
                 return result
-            if status in ("failed", "error", "timeout", "cancelled"):
+            if status in ("failed", "error", "timeout", "timed_out", "cancelled"):
                 if failed:
                     raise GLPAPIError(self._rejected_msg(failed))
                 raise GLPAPIError(f"GLP claim operation {task_id} failed: {result}")
@@ -243,6 +243,18 @@ class GLPClient:
         result = self._get("/subscriptions/v1/subscriptions",
                            params={"limit": limit, "offset": offset})
         return result.get("items", result.get("subscriptions", []))
+
+    def list_all_subscriptions(self) -> list[dict]:
+        """Every subscription in the workspace — workspaces can hold more
+        than the 100-per-page API limit, and a subscription the UI can't see
+        can't be assigned."""
+        subs, offset = [], 0
+        while True:
+            page = self.list_subscriptions(limit=100, offset=offset)
+            subs.extend(page)
+            if len(page) < 100:
+                return subs
+            offset += 100
 
     def _resolve_subscription_id(self, key_or_id: str) -> str:
         # canonical UUIDs pass through; keys are resolved via OData filter

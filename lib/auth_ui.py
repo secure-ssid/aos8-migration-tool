@@ -10,9 +10,23 @@ session isn't signed in yet. Three sub-states, driven by session_state:
 Identity established here flows into the per-user encrypted credstore and audit
 log via lib.identity.current_user() (which reads _auth_user in accounts mode).
 """
+import os
+
 import streamlit as st
 
 from lib import accounts, identity, mailer
+
+
+def _console_codes_allowed() -> bool:
+    """Explicit opt-in for the dev fallback that prints verification codes
+    to the server console. Fail closed by default: with no SMTP configured
+    and no opt-in, registration is blocked instead of leaking codes into
+    (potentially centralized) logs."""
+    return os.environ.get("AOS8_ALLOW_CONSOLE_CODES", "").strip().lower() == "true"
+
+
+def _delivery_available() -> bool:
+    return mailer.configured() or _console_codes_allowed()
 
 
 def _deliver_code(email: str, code: str) -> bool:
@@ -30,10 +44,15 @@ def _deliver_code(email: str, code: str) -> bool:
             # the (production) logs; the user can hit Resend.
             print(f"[auth] verification email to {email} FAILED: {err}",
                   flush=True)
-        else:
-            # Dev fallback only — never shown in the UI.
+        elif _console_codes_allowed():
+            # Dev fallback only — requires AOS8_ALLOW_CONSOLE_CODES=true.
             print(f"[auth] verification code for {email}: {code} "
                   f"(no SMTP configured)", flush=True)
+            return True
+        else:
+            print(f"[auth] verification code for {email} NOT delivered — no "
+                  "SMTP configured and AOS8_ALLOW_CONSOLE_CODES is not set",
+                  flush=True)
     return ok
 
 
@@ -48,8 +67,13 @@ def _verify_screen(email: str) -> None:
     st.markdown("#### Verify your email")
     st.caption(f"Enter the 6-digit code we sent to **{email}**.")
     if not mailer.configured():
-        st.warning("Email delivery isn't configured on this server — the code "
-                   "was written to the server console (dev mode).")
+        if _console_codes_allowed():
+            st.warning("Email delivery isn't configured on this server — the "
+                       "code was written to the server console (dev mode).")
+        else:
+            st.error("Email delivery isn't configured on this server — codes "
+                     "cannot be delivered. Configure SMTP (or set "
+                     "AOS8_ALLOW_CONSOLE_CODES=true for local dev).")
     code = st.text_input("Verification code", max_chars=6, key="verify_code_input")
     c1, c2, c3 = st.columns([1, 1, 1])
     if c1.button("Verify", type="primary", use_container_width=True):
@@ -61,8 +85,11 @@ def _verify_screen(email: str) -> None:
     if c2.button("Resend code", use_container_width=True):
         ok, msg, new_code = accounts.resend_code(email)
         if ok:
-            _deliver_code(email, new_code)
-            st.info(msg)
+            if _deliver_code(email, new_code):
+                st.info(msg)
+            else:
+                st.error("Could not send the verification email — check the "
+                         "server's SMTP settings and try again.")
         else:
             st.error(msg)
     if c3.button("Use a different email", use_container_width=True):
@@ -83,10 +110,18 @@ def _login_register() -> None:
             elif status == "unverified":
                 # account exists but never verified — re-arm a code and divert
                 ok, _msg, code = accounts.resend_code(email)
-                if ok:
-                    _deliver_code(email, code)
-                st.session_state["_pending_email"] = accounts._norm(email)
-                st.rerun()
+                delivered = _deliver_code(email, code) if ok else False
+                if ok and not delivered and mailer.configured():
+                    st.error("Your account isn't verified yet and the "
+                             "verification email could not be sent — check "
+                             "the server's SMTP settings and try again.")
+                elif not _delivery_available():
+                    st.error("Your account isn't verified yet and this server "
+                             "has no email delivery configured — ask the "
+                             "administrator to set up SMTP.")
+                else:
+                    st.session_state["_pending_email"] = accounts._norm(email)
+                    st.rerun()
             elif status == "locked":
                 st.error(f"Too many failed attempts — this account is locked "
                          f"for {accounts.LOGIN_LOCK_MINUTES} minutes. "
@@ -103,14 +138,24 @@ def _login_register() -> None:
                             type="password", key="reg_pw1")
         pw2 = st.text_input("Confirm password", type="password", key="reg_pw2")
         if st.button("Create account", type="primary", key="reg_btn"):
-            if pw1 != pw2:
+            if not _delivery_available():
+                st.error("Registration is unavailable: this server has no "
+                         "email delivery configured (and console codes are "
+                         "not enabled). Configure SMTP — see the Deployment "
+                         "guide — or set AOS8_ALLOW_CONSOLE_CODES=true for "
+                         "local development.")
+            elif pw1 != pw2:
                 st.error("Passwords don't match.")
             else:
                 ok, msg, code = accounts.register(email_r, pw1)
                 if ok:
-                    _deliver_code(email_r, code)
-                    st.session_state["_pending_email"] = accounts._norm(email_r)
-                    st.rerun()
+                    if _deliver_code(email_r, code):
+                        st.session_state["_pending_email"] = accounts._norm(email_r)
+                        st.rerun()
+                    else:
+                        st.error("Account created, but the verification email "
+                                 "could not be sent — check the server's SMTP "
+                                 "settings, then sign in to resend the code.")
                 else:
                     st.error(msg)
 

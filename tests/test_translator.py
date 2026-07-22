@@ -73,3 +73,12 @@ def test_dangling_bindings_do_not_flood_all_ssids():
     # (and the customer config flagged) rather than broadcast everything
     assert central.groups[0].ssids == []
     assert cfg.ssid_mapping_incomplete is True
+
+
+def test_server_groups_carried_into_central_config():
+    from lib.models import ServerGroup
+    cfg = _cfg([APGroup(name="campus", ssids=["s1"])],
+               [_ssid("s1", 10, ForwardMode.BRIDGE)])
+    cfg.server_groups = [ServerGroup(name="sg-a", servers=["r1"])]
+    central = translate(cfg, "Acme", "https://x")
+    assert [g.name for g in central.server_groups] == ["sg-a"]

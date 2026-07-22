@@ -853,15 +853,23 @@ def render():
                 return [(g.name, g.firmware_version)
                         for g in getattr(cfg, "groups", [])]
 
+            # the tenant itself is part of the target: pointing the same
+            # config at a different base URL / API client must invalidate
+            # provisioning state, or Step 3 reports tenant A's result while
+            # aimed at tenant B
+            from lib.session_clients import tenant_fingerprint
+            _tenant_fp = tenant_fingerprint()
             if prev is not None and (
                 getattr(prev, "destination", None) != central_cfg.destination
                 or getattr(prev, "gateways_retired", None) != central_cfg.gateways_retired
                 or getattr(prev, "gw_cluster_name", None) != central_cfg.gw_cluster_name
                 or getattr(prev, "sites", None) != central_cfg.sites
                 or _group_sig(prev) != _group_sig(central_cfg)
+                or st.session_state.get("_target_tenant_fp") not in (None, _tenant_fp)
             ):
                 st.session_state["_reset_downstream"]()
                 st.session_state.pop("glp_use_central_creds", None)
+            st.session_state["_target_tenant_fp"] = _tenant_fp
 
             updates = {
                 "customer_name":     customer_name.strip(),

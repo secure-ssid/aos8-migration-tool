@@ -41,6 +41,7 @@ def translate(customer_config: CustomerConfig, customer_name: str, central_base_
         base_url=central_base_url.rstrip("/"),
         sites=[site_name],
         radius_servers=cc.radius_servers,
+        server_groups=list(getattr(cc, "server_groups", []) or []),
         gateways_retired=retire,
     )
 

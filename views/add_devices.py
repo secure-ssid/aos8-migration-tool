@@ -313,7 +313,7 @@ def render():
             with st.spinner("Authenticating with GreenLake..."):
                 glp.authenticate()
             with st.spinner("Reading subscriptions + application instances..."):
-                st.session_state["add_subs"] = glp.list_subscriptions()
+                st.session_state["add_subs"] = glp.list_all_subscriptions()
                 st.session_state["add_sms"] = glp.list_service_managers()
             st.session_state["add_subs_fp"] = _glp_fp()
             st.success("GreenLake reachable — pick a subscription below.")

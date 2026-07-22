@@ -263,3 +263,112 @@ def test_glp_assign_subscription_polls_202(mock_api):
     # the 202 was polled to a terminal state, at the v2beta1 root it named
     assert polled["n"] >= 1
     assert any("v2beta1/async-operations" in p for _m, p in mock_api.calls)
+
+
+def test_central_scope_resolution_accepts_scope_name_only(mock_api):
+    """pycentral-shaped responses carry the numeric id in scope-name."""
+    mock_api.app = lambda m, p, q, b: (
+        _token_response() if p.endswith("oauth2")
+        else (200, {}, {"scope-map": [{"scope-name": "123",
+                                       "persona": "SERVICE_PERSONA",
+                                       "resource": "example"}]}))
+    c = _central(mock_api)
+    assert c.get_global_scope_id() == "123"
+
+
+def test_central_list_sites_paginates_past_100(mock_api):
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if "sites" in path and method == "GET":
+            offset = 0
+            for part in query.split("&"):
+                if part.startswith("offset="):
+                    offset = int(part.split("=")[1])
+            n = 100 if offset == 0 else 40
+            items = [{"id": offset + i, "name": f"site-{offset + i}"}
+                     for i in range(n)]
+            return (200, {}, {"items": items})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = _central(mock_api)
+    assert len(c.list_sites(refresh=True)) == 140
+
+
+def test_glp_timed_out_is_terminal(mock_api):
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if "async-operations" in path:
+            return (200, {}, {"status": "TIMED_OUT",
+                              "result": {"failedDevicesSerial": ["S1"]}})
+        return (200, {}, {})
+
+    mock_api.app = app
+    g = GLPClient("id", "secret", base_url=mock_api.url)
+    g.token = "tok"
+    g.session.headers.update({"Authorization": "Bearer tok"})
+    with pytest.raises(Exception):
+        g.poll_task("op-1", timeout=5, interval=0)
+
+
+def test_glp_list_all_subscriptions_paginates(mock_api):
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if "subscriptions" in path:
+            offset = 0
+            for part in query.split("&"):
+                if part.startswith("offset="):
+                    offset = int(part.split("=")[1])
+            n = 100 if offset == 0 else 20
+            return (200, {}, {"items": [{"id": f"s{offset + i}"} for i in range(n)]})
+        return (200, {}, {})
+
+    mock_api.app = app
+    g = GLPClient("id", "secret", base_url=mock_api.url)
+    g.token = "tok"
+    g.session.headers.update({"Authorization": "Bearer tok"})
+    assert len(g.list_all_subscriptions()) == 120
+
+
+def test_classic_hashed_psk_replaced_with_placeholder(mock_api):
+    from lib.central_client import PSK_PLACEHOLDER
+    from lib.models import AuthType, ForwardMode, SSID
+    captured = {}
+
+    def app(method, path, query, body):
+        if "full_wlan" in path:
+            import json as _json
+            captured.update(_json.loads(body["value"]) if isinstance(body, dict) else {})
+            return (200, {}, {})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    hashed = "a" * 64          # 64-hex-char AOS 8 hash — unusable as a PSK
+    ssid = SSID(name="corp", essid="Corp", vlan=10,
+                forward_mode=ForwardMode.BRIDGE,
+                auth_type=AuthType.WPA2_PSK, psk=hashed)
+    c.create_wlan("g1", ssid, 0)
+    assert captured["wlan"]["wpa_passphrase"] == PSK_PLACEHOLDER
+
+
+def test_cleanup_records_listing_failures():
+    from lib import cleanup as cl
+
+    class FailingCentral:
+        def _get(self, path, params=None):
+            raise RuntimeError("403 forbidden")
+        def list_device_groups(self, refresh=False):
+            return []
+        def list_sites(self, refresh=False):
+            return []
+        def _site_name(self, s): return ""
+        def _site_id(self, s): return None
+
+    res = cl.cleanup("zztest", central=FailingCentral())
+    failed = [r for r in res if not r[1]]
+    assert failed, "listing failures must be recorded as failed results"
+    assert not any("No objects named" in r[0] and r[1] for r in res if not failed)

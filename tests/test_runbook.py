@@ -75,3 +75,18 @@ def test_compatibility_matrix_boundary():
                 "AP-365", "AP-367", "AP-205", "AP-207", "AP-228", "AP-277",
                 "IAP-305", "AP-203R", "AP-105"):
         assert not is_model_compatible(bad), bad
+
+
+def test_runbook_contains_deferred_overlay_completion():
+    # Step 3 defers tunnel SSIDs 'see runbook' — the runbook must actually
+    # carry the post-cutover overlay instructions
+    text = _runbook()
+    assert "COMPLETE THE OVERLAY" in text
+    assert "acme-cluster" in text
+    assert "Corp" in text                # the tunnel SSID is listed
+
+    # retired gateways -> everything bridge -> no overlay block
+    customer = _customer()
+    central = translate(customer, "Acme", "https://x", gateway_mode="retire")
+    text2 = generate(customer, central, "Acme")
+    assert "COMPLETE THE OVERLAY" not in text2
