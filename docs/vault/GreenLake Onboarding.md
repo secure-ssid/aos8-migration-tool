@@ -61,10 +61,16 @@ mark APs already claimed (via CSV/UI) so only the delta is claimed.
 
 ## Optional / classic note
 
-The step is optional in the UI ("already claimed via CSV/GreenLake UI? just
-continue"). For [[Destination - Classic Central|classic destinations]], Step 3 already pre-added the
-serial+MAC pairs to the classic inventory; GreenLake claiming still applies to
-GLP-onboarded classic accounts (most current ones).
+Only **claiming** is optional (skip if devices were claimed via CSV/the
+GreenLake UI). On [[Destination - New Central|New Central]], Step 4 also contains the **mandatory
+cutover**: "Move APs into groups + assign persona/site" runs
+`provision(phase="devices")` — moving a live AOS 8 AP into its AOS 10 device
+group makes Central push the conversion (each AP reboots, ~10-20 min offline),
+gated by a review checklist and an "I'm in my cutover window" confirmation.
+On [[Destination - Classic Central|Classic]], the whole step can be skipped for pre-GreenLake accounts:
+Step 3 already pre-added the serial+MAC pairs to the classic inventory;
+GreenLake claiming still applies to GLP-onboarded classic accounts (most
+current ones).
 
 ## Related
 [[Migration Paths]] · [[Source - Mobility Controller]] · [[Source - Instant IAP]] ·

@@ -9,8 +9,8 @@ verbatim in the step's result log — match the message text below.
 |---|---|---|
 | `403` on a WLAN/`full_wlan` call (classic) | WLAN config APIs not allowlisted for the tenant | Ask your Aruba SE to enable the classic WLAN config APIs for the account. |
 | `401`/access check fails (classic) | Access token expired (~2h) or refresh token spent | Generate a fresh token in API Gateway; re-paste. Provide a (current) refresh token + client id/secret for auto-refresh. |
-| AOS 8 login fails / no UIDARUBA | Wrong `config_path`, wrong port, or REST API disabled | Set `config_path` (`/md` vs `/mm/mynode`), confirm 4343 reachable, or use paste mode. |
-| GLP claim fails: "macAddress is required" | AP discovered without a wired MAC | Re-discover with `show ap database long`; or add the device manually in GreenLake. |
+| AOS 8 login fails / no UIDARUBA | Wrong port, or REST API disabled | Confirm 4343 reachable and the REST API enabled, or use paste mode. (Wrong `config_path` shows up as read errors after login — see the AOS 8 login failures section.) |
+| GreenLake (GLP) claim fails: "macAddress is required" | AP discovered without a wired MAC | Re-discover with `show ap database long`; or add the device manually in GreenLake. |
 | Blank / stale page in the browser | Old Streamlit server process still bound | Stop and restart `streamlit run app.py`. |
 | Preflight blocker won't let you continue | A FAIL check (model/firmware/named VLAN/etc.) | Fix the root cause, or tick the override checkbox (acknowledge the risk). |
 | Group created but "Architecture reads back as X, not AOS10" (classic) | Known v3 group-create flaw | Delete the group in Central; confirm the tenant supports AOS10 groups; re-run. |
@@ -78,7 +78,7 @@ the new token into the session and shows a banner:
 |---|---|
 | Wrong `config_path` | Conductor (MM) uses `/md` (default); standalone controller uses `/mm/mynode`. Set it under Step 1 → Advanced — API options. |
 | Port 4343 firewalled or REST API disabled | The REST API is on TCP **4343** with a self-signed cert. Confirm reachability from the machine running the tool; otherwise switch to **Paste CLI output** mode. |
-| Bad credentials / non-zero login status | The MC returns `status != 0`; check username/password. The status can be int `0` or string `"0"` depending on build (the client handles both). |
+| Bad credentials / non-zero login status | The controller (MC — Mobility Conductor/Controller) returns `status != 0`; check username/password. The status can be int `0` or string `"0"` depending on build (the client handles both). |
 | Object/show read errors after login | Usually a `config_path` mismatch on a Conductor. Try the node path, or fall back to paste mode. |
 
 In paste mode, always include `show running-config` and `show ap database long`
@@ -95,7 +95,8 @@ macAddress is required to claim <serial> — re-discover with
 `show ap database long` (Wired MAC column)
 ```
 
-**Cause:** GLP requires the wired MAC to claim a network device. The AP was
+**Cause:** GLP (the HPE GreenLake Platform, where device inventory lives)
+requires the wired MAC to claim a network device. The AP was
 discovered without one (e.g. via `show ap active`, which has no MAC/serial
 columns, or a fixed-width table that overflowed).
 
@@ -145,7 +146,8 @@ the intended reset between engagements anyway).
 ## Preflight blockers explained
 
 Blockers (FAIL) stop you advancing to provisioning unless you tick the override
-checkbox ("I understand the risk and will resolve them before cutover"). Resolve
+checkbox ("Override blockers — I understand the risk and will resolve them
+before cutover"). Resolve
 them properly when you can — they represent things that will break the migration.
 
 | Blocker | What to do |

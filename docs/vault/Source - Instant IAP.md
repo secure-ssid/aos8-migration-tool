@@ -71,8 +71,9 @@ identity.
 
 ## Preflight differences
 
-Instant skips the [[Preflight Checks|cluster, SSID→AP-group mapping]] checks (no controllers, no
-vap bindings). Firmware check verifies **Instant 8.6+** (not the
+Instant skips the [[Preflight Checks|cluster]] check (no controllers); the SSID→AP-group
+mapping check becomes an SSID→Zone mapping check that WARNs when a zoned SSID
+has no checked-in AP. Firmware check verifies **Instant 8.6+** (not the
 8.10.0.12/8.12.0.1 trains the MC path requires). [[RADIUS and NAD Changes|NAD]] guidance: Instant
 typically sources RADIUS from the VC IP via dynamic-radius-proxy — after
 conversion each AP authenticates directly, so add the **AP management

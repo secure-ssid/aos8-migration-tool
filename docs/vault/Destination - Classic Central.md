@@ -14,8 +14,10 @@ the [[Destination - New Central|New Central scope model]]. See [[Tool Internals]
   body). On 401 the client auto-refreshes once.
 - **The refresh token ROTATES** — it is single-use; the response returns a NEW
   one that must be captured. The tool reads `client.refresh_token` back after a
-  run and, if it changed, re-saves it in session and warns the operator to
-  update wherever they store it (Step 3 / Step 6). Needs client ID+secret too.
+  run and, if it changed, re-saves it in session (and the encrypted credstore
+  when Remember is on) after every run that touches Classic (Steps 1, 3, 4, 6);
+  Step 3 additionally warns the operator to update wherever they store it.
+  Needs client ID+secret too.
 
 ## v3 AOS10 groups (+ readback flaw)
 

@@ -13,7 +13,7 @@ its calls are short-lived reads inside one login session.
 
 | Platform | Base URL | Auth | Source |
 |---|---|---|---|
-| AOS 8 MC / Conductor | `https://<mc-ip>:4343` | Form login → `UIDARUBA` session token (query param + cookie) | `lib/aos8_client.py` |
+| AOS 8 Mobility Controller (MC) / Mobility Conductor | `https://<mc-ip>:4343` | Form login → `UIDARUBA` session token (query param + cookie) | `lib/aos8_client.py` |
 | New Central (GreenLake) | regional, e.g. `https://us4.api.central.arubanetworks.com` | OAuth `client_credentials` at `https://sso.common.cloud.hpe.com/as/token.oauth2` → bearer | `lib/central_client.py` |
 | Classic Central | `https://apigw-<cluster>.central.arubanetworks.com` | UI-generated access token (~2h); refresh via `/oauth2/token` (rotating refresh token) | `lib/classic_central_client.py` |
 | HPE GreenLake Platform | `https://global.api.greenlake.hpe.com` (fixed) | OAuth `client_credentials` at the same SSO host | `lib/glp_client.py` |
@@ -32,8 +32,8 @@ it uses the UI access token, refreshed via a single-use, rotating refresh token.
 | GET | `/v1/configuration/object/<name>` | Read a config object instance list. |
 | GET | `/v1/configuration/showcommand?command=<cmd>` | Run a show command; JSON document (or `_data` text). |
 
-Every request after login carries `UIDARUBA` and, on a Conductor, a
-`config_path` query param.
+Every request after login carries `UIDARUBA` and a `config_path` query param
+(`/md` on a Conductor, `/mm/mynode` on a standalone controller).
 
 | `config_path` | Use |
 |---|---|
@@ -81,7 +81,7 @@ Calls made during **Step 3 (config phase)**:
 | GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Falls back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on 404. |
 | GET | `/network-config/v1/device-groups` | List device groups. |
 | POST | `/network-config/v1/device-groups` | Create empty group (`scopeName`). |
-| POST | `/network-config/v1/device-groups-create-and-add-devices` | Create group + add serials in one call. |
+| POST | `/network-config/v1/device-groups-create-and-add-devices` | Create group + add serials in one call (implemented in the client but not used by the wizard — Step 3 creates groups empty; APs are moved in Step 4 via `device-groups-add-devices`). |
 | POST/PUT | `/network-config/v1/layer2-vlan/{id}` | Create/replace VLAN profile (`{vlan, name, enable}`), then scope-map it. |
 | POST | `/network-config/v1alpha1/auth-servers/{name}` | RADIUS auth-server library profile. |
 | POST | `/network-config/v1alpha1/server-groups/{name}` | RADIUS server-group — 802.1X SSIDs bind to it via `auth-server-group`. |
@@ -162,8 +162,9 @@ self._post(f"/configuration/full_wlan/{group}/{name}", json_body=payload)
 `wlan` is a full ~90-field flat object (`_BASE_WLAN` in the client, taken verbatim
 from HPE's central-python-workflows examples); only per-SSID fields are
 overridden (`name`, `essid`, `index`, `opmode`, `type`, `vlan`, `hide_ssid`,
-`wpa_passphrase`, enterprise `access_type`/`auth_server1`, and `cluster_name` for
-tunnel SSIDs). `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
+`wpa_passphrase`, enterprise `access_type`/`auth_server1`,
+`mac_authentication` + `access_type`/`auth_server1` for MAC-auth SSIDs, and
+`cluster_name` for tunnel SSIDs). `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
 SSID name filled in.
 
 ### Runtime-verify caveats (Classic)

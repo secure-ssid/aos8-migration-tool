@@ -17,11 +17,26 @@ lib/
   glp_client.py            # HPE GreenLake Platform: claim + subscription assign
   runbook.py               # ap convert / Central-driven runbook text generator
   styles.py                # dark "mission control" design system + HTML helpers
+  identity.py              # operator identity resolution (AOS8_AUTH_MODE)
+  auth_ui.py               # login gate UI for password/accounts modes
+  accounts.py              # self-service account store (verified email)
+  credstore.py             # opt-in encrypted per-user credential store
+  audit.py                 # per-user audit log of write actions
+  session_clients.py       # cached per-session Central/GLP client factories
+  cleanup.py               # "Clean up test objects" tool (zztest-* deletion)
+  testdata.py              # built-in test customer for demos/labs
+  api_probe.py             # Step 1 "Test API connectivity" endpoint probes
+  api_catalog.py           # catalog of every REST endpoint the tool can call
+  help_docs.py             # "Help & Docs" mode renderer
+  help_content.py          # per-step help text content
+  mailer.py                # verification-email delivery (accounts mode)
+  postman.py               # Postman collection export
 views/
+  add_devices.py           # "Add devices only" mode (claim/assign outside the wizard)
   p1_connect.py            # Step 1: Connect & Discover (chooses the path)
   p2_preflight.py          # Step 2: Preflight Checks
-  p3_provision.py          # Step 3: Provision Central
-  p4_greenlake.py          # Step 4: GreenLake Onboarding
+  p3_provision.py          # Step 3: Build Config (provisions the target config in Central)
+  p4_greenlake.py          # Step 4: Onboard APs (GreenLake claim + subscription + cutover move)
   p5_runbook.py            # Step 5: AP Convert Runbook
   p6_validate.py           # Step 6: Validate
 ```
@@ -61,7 +76,7 @@ Each `CentralGroupConfig` carries its resolved `ssids`/`vlans` and
 
 `SSID` is the binding key between layers: `forward_mode` (ForwardMode enum),
 `auth_type` (AuthType enum), `auth_known`, `vlan_raw` (set for unresolved named
-VLANs), `display_name` (essid or falls back to the VAP name).
+VLANs), `display_name` (essid, falling back to the virtual-AP (VAP) profile name).
 
 ## Data flow
 
@@ -118,9 +133,14 @@ flowchart TD
 ## Step routing (app.py)
 
 `app.py` keeps the current step index in `st.session_state.step` (clamped to
-0..5). It renders the brand header and the step-progress bar, then imports and
-calls `render()` on exactly one view module based on the index. The sidebar
-summary renders **last** so it reflects any state changes made during the run.
+0..5). Before any page renders, app.py resolves the operator identity
+(`AOS8_AUTH_MODE`; login gate or proxy-header check) and a sidebar Mode radio
+selects one of three modes: Full migration (the 6-step wizard below), Add
+devices only (`views/add_devices.py`), and Help & Docs (`lib/help_docs.py`).
+The step router applies to Full migration mode: app.py renders the brand header
+and the step-progress bar, then imports and calls `render()` on exactly one
+view module based on the index. The sidebar summary renders **last** so it
+reflects any state changes made during the run.
 
 ```
 STEPS = [1_connect, 2_preflight, 3_provision, 4_greenlake, 5_runbook, 6_validate]
@@ -147,7 +167,7 @@ session — nothing is written to disk).
 | `dest_type` | p1 | "new" or "classic". |
 | `central_base` / `central_base_classic` | p1 | Regional New Central base / classic apigw base. |
 | `central_client_id`, `central_secret` | p1 | Central (and unified-GLP) credentials. |
-| `classic_access_token`, `classic_refresh_token` | p1, p3, p6 | Classic token + rotating refresh token (updated after refresh). |
+| `classic_access_token`, `classic_refresh_token` | p1, p3, p4, p6 | Classic token + rotating refresh token (updated after refresh). |
 | `aos10_fw` | p1 | Target AOS 10 version string. |
 | `gw_strategy` | p1 | "keep" or "retire". |
 | `glp_use_central_creds`, `glp_client_id`, `glp_secret` | p4 | GLP credential source. |
@@ -157,18 +177,22 @@ session — nothing is written to disk).
 
 | Key | Set by | Meaning |
 |---|---|---|
-| `customer_config` | p1 | The discovered `CustomerConfig`. |
-| `central_config` | p1 (on Continue) | The translated `CentralConfig`. |
+| `customer_config` | p1, p2 (VLAN fix), p4 (MAC edit) | The discovered `CustomerConfig`. |
+| `central_config` | p1 (on Continue), p2 (VLAN fix re-translate) | The translated `CentralConfig`. |
 | `preflight_results` | p2 | Cached `list[CheckResult]`. |
 | `provision_done`, `provision_results` | p3 | Provisioning completion flag + `[(label, ok, detail)]`. |
 | `glp_existing` | p4 | Sorted workspace serials snapshot. |
 | `glp_subscriptions` | p4 | Loaded subscription list. |
 | `glp_claim_result` | p4 | `{ok, failed}` reconciled against the workspace. |
 | `glp_sub_results` | p4 | `[(serial, ok, err)]` for subscription assignment. |
+| `glp_service_managers` | p4 | Central application instances (id/region) loaded from GLP. |
+| `onboard_results` | p4 | `[(label, ok, detail)]` from the devices-phase cutover move. |
+| `probe_results` | p1 | API endpoint probe results. |
+| `macedit_result` | p4 | `{applied, bad}` from the wired-MAC editor. |
 | `validation_results` | p6 | Raw AP list fetched from Central. |
 | `validation_celebrated` | p6 | One-shot guard so balloons fire once. |
 | `_reset_downstream` | app.py | Callable injected for the reset hook (below). |
-| `preflight_override`, `check_*` | p2, p6 | Blocker-override checkbox + checklist toggles. |
+| `preflight_override` (p2 widget key), `check_*`/`chk_*` | p2, p6 | Blocker-override checkbox; checklist widget keys mirrored into durable `chk_*` keys (the `chk_*` keys are what reset clears). |
 
 ### Reset-on-rediscovery flow
 
@@ -215,8 +239,8 @@ global scope can't be resolved (New Central) — nothing else can proceed.
 
 Idempotency is by name: sites, groups, VLANs, SSIDs, auth servers and clusters
 all check-or-reuse, and "already exists"/"duplicate" errors are swallowed as
-success. Both Central clients cache the group/site lists per run (New Central: `_groups_cache`/`_sites_cache`; classic: `_group_names_cache`/`_sites_cache`) and de-dups
-role/policy ensure-sequences via `_ensured_roles` / `_ensured_policies`.
+success. Both Central clients cache the group/site lists per run (New Central: `_groups_cache`/`_sites_cache`; classic: `_group_names_cache`/`_sites_cache`). The New Central client additionally
+de-dups role/policy ensure-sequences via `_ensured_roles` / `_ensured_policies`.
 
 ## Styling
 
@@ -225,5 +249,5 @@ IBM Plex / Barlow Condensed). All dynamic values rendered inside
 `unsafe_allow_html` markup pass through `esc()`. Component helpers
 (`page_header`, `section_label`, `badge`, `check_card`, `provision_step_line`,
 `step_progress`, `ssid_tag`, `mono_row`, `info_banner`, `sidebar_summary`,
-`telemetry_chip`) are the only things views use to draw the console — no raw
-markup is built in views.
+`telemetry_chip`) cover the shared components; views use these plus local
+inline-HTML blocks (also via `unsafe_allow_html`) for page-specific layout.
