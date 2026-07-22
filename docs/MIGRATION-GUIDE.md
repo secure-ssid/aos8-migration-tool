@@ -4,9 +4,23 @@ Operator walkthrough of the AOS 8 → AOS 10 Migration Console. Read this start 
 finish before your first engagement, then keep the per-step tables handy on
 subsequent runs.
 
+> **First time using the tool?** Do the 5-minute, zero-risk demo in
+> [Getting Started](GETTING-STARTED.md) first — it uses the built-in test
+> customer, so you'll recognize every screen in this guide before touching
+> anything real.
+
 The tool is a 6-step Streamlit wizard. It discovers an AOS 8 deployment, runs
 preflight checks, provisions the destination Central tenant, onboards the APs in
-HPE GreenLake, generates an `ap convert` runbook, and validates the result.
+HPE GreenLake, generates an `ap convert` runbook, and validates the result:
+
+```mermaid
+flowchart LR
+    A["1 Connect<br/>(read-only)"] --> B["2 Preflight<br/>(read-only)"]
+    B --> C["3 Build Config<br/>(writes to Central)"]
+    C --> D["4 Onboard APs<br/>(GreenLake claim)"]
+    D --> E["5 Runbook<br/>(conversion-day CLI)"]
+    E --> F["6 Validate<br/>(APs online?)"]
+```
 
 ```bash
 pip install -r requirements.txt
@@ -16,6 +30,17 @@ streamlit run app.py          # opens http://localhost:8501
 > **Screenshots** in this guide come from a real run of the wizard using the
 > built-in `zztest` test customer (Step 1 → *Load test customer*), so you can
 > reproduce every screen yourself without a controller or tenant.
+
+**Jargon buster** — the five terms this guide can't avoid:
+
+| Term | Meaning |
+|---|---|
+| **AOS 8 / AOS 10** | The old (controller-based) and new (cloud-managed) Aruba operating systems. This tool moves you from 8 to 10. |
+| **MC / MM** | Mobility Controller / Mobility Conductor — the on-prem AOS 8 appliances. |
+| **IAP / Instant** | Controller-less AOS 8 APs that elect a "virtual controller" among themselves. |
+| **Central (New vs Classic)** | Aruba's cloud manager. *New Central* lives on the HPE GreenLake platform; *Classic Central* is the earlier standalone version. Your tenant is one or the other — the tool supports both. |
+| **GLP / GreenLake** | HPE's cloud platform. Devices must be *claimed* into a GreenLake workspace and given a *subscription* before Central will manage them. |
+| **`ap convert`** | The AOS 8 CLI command that flips an AP to the AOS 10 image — the actual moment of migration for controller-based APs. |
 
 **The wizard at a glance:**
 

@@ -1,172 +1,135 @@
 # AOS 8 → Aruba Central Migration Console
 
-Web-based wizard for migrating customers from AOS 8 to AOS 10 on
-**New Central** (HPE GreenLake). Supported source platforms:
+**A guided web wizard that migrates Aruba AOS 8 wireless networks (Mobility
+Controllers or Instant APs) to AOS 10 on Aruba Central — discovery, safety
+checks, Central provisioning, GreenLake onboarding, conversion runbook, and
+validation, in six steps.**
 
-- **Mobility Controller / Conductor** — `ap convert` path, with the choice to
-  keep the MCs as AOS 10 gateways (overlay SSIDs) or retire them (all bridge)
-- **Instant cluster (IAP)** — Central-driven conversion: claim + subscribe in
-  GreenLake, pre-assign to an AOS 10 device group, Central pushes the image.
-  No controller commands, no gateways. Zones map to device groups.
+Migrating by hand means reading an old controller config, rebuilding it
+object-by-object in Central, registering every AP in HPE GreenLake, and
+running conversion commands in exactly the right order. This tool automates
+the tedious parts and generates the commands for the rest — and it shows you
+everything it's about to do before it does it.
 
-## Quick Start
+<img src="docs/screenshots/02-connect-discovered.png" alt="Step 1 — a discovered AOS 8 deployment: AP groups, SSIDs, APs with compatibility badges" width="900">
+
+## New here? Two links
+
+- 🚀 **[Getting Started](docs/GETTING-STARTED.md)** — zero to a full simulated
+  migration in 5 minutes, using the built-in test customer. No controller, no
+  tenant, no risk.
+- 📖 **[Migration Guide](docs/MIGRATION-GUIDE.md)** — the full operator
+  walkthrough for real migrations, with a screenshot and numbered click-path
+  for every step.
+
+## The six steps
+
+| # | Step | What happens | Writes anything? |
+|---|---|---|---|
+| 1 | **Connect & Discover** | Pulls the AOS 8 config over the REST API, or parses pasted CLI output. Shows everything it found. | No |
+| 2 | **Preflight Checks** | Pass/warn/fail report: AP hardware compatibility, firmware minimums, auth coverage, VLAN conflicts, cluster sequencing. | No |
+| 3 | **Build Config** | Creates sites, device groups, VLANs, SSIDs, RADIUS profiles and firmware compliance in Central — after showing you the full manifest. Every API call is logged with its result. | Central tenant |
+| 4 | **Onboard APs** | Claims APs into HPE GreenLake (serial + MAC), assigns the Central application + subscription, and at cutover moves them into their groups. | GreenLake + Central |
+| 5 | **Runbook** | Generates the customer-specific `ap convert` CLI script — single controller, L2 or L3 cluster ordering, gateway strategy included. | No |
+| 6 | **Validate** | Confirms every converted AP is back online in Central, by serial. Closeout checklist. | No |
+
+<details>
+<summary><b>See it in action</b> (click to expand more screenshots)</summary>
+
+**Preflight tells you what will and won't migrate — before anything is written:**
+
+<img src="docs/screenshots/04-preflight.png" alt="Step 2 — preflight checks" width="900">
+
+**Provisioning shows a live per-step log — nothing fails silently:**
+
+<img src="docs/screenshots/06-provision-results.png" alt="Step 3 — provisioning results" width="900">
+
+**The generated conversion runbook:**
+
+<img src="docs/screenshots/09-runbook.png" alt="Step 5 — ap convert runbook" width="900">
+
+**Validation confirms the migration worked:**
+
+<img src="docs/screenshots/10-validate.png" alt="Step 6 — validation" width="900">
+
+</details>
+
+## Quick start
 
 ```bash
+git clone https://github.com/secure-ssid/aos8-migration-tool.git
+cd aos8-migration-tool
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run app.py          # opens http://localhost:8501
 ```
 
-Open http://localhost:8501 in your browser.
+Then open the **🧪 Load test customer** expander in Step 1 and click through
+the whole wizard with zero infrastructure — the
+[Getting Started guide](docs/GETTING-STARTED.md) walks you through it.
 
-## Wizard Steps
+For a **real migration** you'll need three things (details and where to get
+them: [Migration Guide → Credentials setup](docs/MIGRATION-GUIDE.md#credentials-setup)):
 
-| Step | What it does |
+1. **AOS 8 access** — controller admin login (REST API, port 4343), or just
+   paste the output of a few `show` commands the wizard lists for you.
+2. **Central API credentials** — New Central (GreenLake client id/secret) or
+   Classic Central (API Gateway token).
+3. **GreenLake workspace access** — usually the same GreenLake client.
+
+Steps 1–2 are read-only; nothing is written anywhere until you press
+**🚀 Provision** in Step 3, and your AOS 8 network keeps running untouched
+until you execute the runbook in Step 5.
+
+## What's supported
+
+| Choice | Options |
 |---|---|
-| 1. Connect & Discover | Pulls AOS 8 config via REST API (or CLI paste fallback) — SSIDs with per-group bindings, auth types/PSKs, AP inventory with serials, VLANs, RADIUS, cluster topology |
-| 2. Preflight Checks | AP model compatibility, firmware train check (8.10 ≥ .0.12 / 8.12 ≥ .0.1), SSID mapping/auth coverage, serial coverage, cluster sequencing warnings |
-| 3. Build Config | Creates the site, device groups (one per AP group), VLANs, underlay SSIDs, auth-server profiles (+ 802.1X server-group) and firmware compliance in **New Central** — every API failure is reported per step. Overlay (tunnel) SSIDs and the gateway cluster are **deferred to cutover** (the cluster forms when the MCs convert; the runbook covers the binding) |
-| 4. GreenLake Onboarding | Claims the APs into the GLP workspace (serial + wired MAC, async claim with polling), assigns them to the **Central application instance + region** and a subscription, and at cutover moves them into their device groups with persona + site assignment — required for Central to adopt converted APs |
-| 5. AP Convert Runbook | Customer-specific `ap convert` CLI runbook (single MC, L2 or L3 cluster sequencing) |
-| 6. Validate | Confirms converted APs are online in Central by serial; post-migration checklist |
+| **Source** | Mobility Controller / Conductor (MM/MD) · Instant cluster (IAP) |
+| **Destination** | New Central (HPE GreenLake) · Classic Central |
+| **Gateway strategy** (MC + tunnel SSIDs only) | Keep the MCs as AOS 10 gateways (SSIDs stay overlay) · Retire them (everything becomes bridge) |
 
-A step-by-step walkthrough **with screenshots of every step** is in
-[docs/MIGRATION-GUIDE.md](docs/MIGRATION-GUIDE.md).
+All four source × destination combinations work; the wizard adapts each step
+to your path. Instant sources are Central-driven (no controller commands at
+all). See [Migration paths](docs/MIGRATION-GUIDE.md#the-four-migration-paths).
 
-## AOS 8 API Access
+## Beyond the wizard
 
-The tool logs in at `https://<mc-ip>:4343/v1/api/login` and reads configuration
-via `/v1/configuration/object/...` and `showcommand` with the UIDARUBA session
-token. On a Mobility Conductor use `config_path=/md` (default); on a standalone
-controller set it to `/mm/mynode` (Advanced options in Step 1).
+The sidebar **Mode** switch has two more tools:
 
-If port 4343 is firewalled or the API is disabled, use **Paste CLI output**
-mode in Step 1. Recommended commands to paste:
+- **Add devices only** — claim → subscribe → move APs into groups that
+  already exist in the tenant, skipping discovery/config entirely.
+- **Help & Docs** — in-app reference: how each page works, every API call as
+  curl, a downloadable Postman collection, and how to create the API keys.
 
-```
-show running-config
-show ap database long        # includes Group, Serial #, Wired MAC
-show version
-show lc-cluster group-membership
-show controller-ip
-show aaa authentication-server all
-```
+## Documentation
 
-## New Central API Credentials
-
-Create API client credentials in HPE GreenLake (Manage → API) with access to
-the Aruba Central service. The tool authenticates against
-`sso.common.cloud.hpe.com` (client-credentials grant) and calls your
-**regional** New Central base URL, e.g.
-`https://us4.api.central.arubanetworks.com`.
-
-Provisioning maps AOS 8 constructs onto the New Central model:
-
-| AOS 8 | New Central |
+| Doc | What's in it |
 |---|---|
-| ap-group | Device group (scope) |
-| virtual-ap (tunnel/split) | Overlay SSID bound to the GW cluster — deferred to cutover (see runbook) |
-| virtual-ap (bridge) | Underlay SSID scope-mapped to the device group |
-| VLAN | layer2-vlan profile scope-mapped to the group |
-| RADIUS server | auth-server library profile + server-group (bound to 802.1X SSIDs) |
-| MC cluster | Gateway cluster — formed in Central when the converted MCs join at cutover (manual follow-up recorded in Step 3) |
+| [Getting Started](docs/GETTING-STARTED.md) | 5-minute hands-on demo, no hardware needed |
+| [Migration Guide](docs/MIGRATION-GUIDE.md) | Full step-by-step operator walkthrough with screenshots |
+| [Deployment Guide](docs/DEPLOYMENT.md) | Docker, team logins (shared password / per-person accounts), HTTPS, env vars |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | The errors you're most likely to hit, decoded |
+| [API Notes](docs/API-NOTES.md) | Every API call the tool makes, per platform, with quirks |
+| [Architecture](docs/ARCHITECTURE.md) | How the code is put together |
+| [docs/vault](docs/vault/Home.md) | Deep-dive engineering notes (Obsidian vault) |
 
-## Deployment
+## Deployment in one paragraph
 
-### Single user (laptop / one engagement)
+Single user: `streamlit run app.py` (or the Dockerfile) — no login, secrets
+stay in the session. Teams: `docker compose up` gives a shared-password gate
+by default, or switch to per-person verified-email accounts; front it with
+Caddy for HTTPS (`deploy/Caddyfile` is ready to use). Full detail, including
+the security notes that matter, in the
+[Deployment Guide](docs/DEPLOYMENT.md).
+
+## Development
 
 ```bash
-# Docker
-docker build -t aos8-migration .
-docker run -p 8501:8501 aos8-migration
-
-# Or just run locally:
-streamlit run app.py
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests/ -q        # 40 tests, no hardware or tenant needed
+python -m pyflakes app.py lib/*.py views/*.py
 ```
 
-In this default (`AOS8_AUTH_MODE=local`) mode there is no app login. Live
-credentials stay in the Streamlit session only. The optional **Remember**
-toggle persists *destination* API creds (client id/secret + Classic refresh
-token, never source-side secrets) to `~/.aos8-migration/<user>/credentials.json`,
-**encrypted at rest** with a private auto-generated key. Uncheck to delete.
-
-### Multi-user (Docker farm, concurrent engineers)
-
-Two built-in login options — no OAuth, no IdP:
-
-**Simplest — one shared password (`AOS8_AUTH_MODE=password`, the default).** Set
-`AOS8_APP_PASSWORD` and everyone uses that one password to get in. No
-registration, no email. There's no per-person identity, so saved creds are a
-single shared store and audit lines are attributed to a generic `team`.
-
-```bash
-cp .env.example .env        # set AOS8_APP_PASSWORD
-docker compose up --build
-```
-
-**Per-person — self-service login (`AOS8_AUTH_MODE=accounts`).**
-Users register with a verified email; a 6-digit code is emailed to confirm the
-address, then they set a password. The signed-in email scopes the per-user
-encrypted credential store and the audit log. Needs email (below).
-
-How accounts mode works and what to know:
-
-- **Verified registration.** Open to any valid email by default. Set
-  `AOS8_ALLOWED_EMAIL_DOMAIN=example.com` to restrict to one domain. The
-  emailed code proves ownership so someone can't register a colleague's address.
-  Passwords are stored scrypt-hashed with a per-user salt; codes are
-  short-lived and hashed.
-- **HTTPS via Caddy (recommended).** Passwords/codes traverse the connection.
-  The shipped compose file publishes `8501` on **all interfaces** (so a Caddy
-  on a separate host can front it); put **Caddy** in front to terminate HTTPS
-  and reverse-proxy to it — `deploy/Caddyfile` is a ready example (Caddy
-  handles the websockets Streamlit needs automatically). If Caddy runs on the
-  **same** host, change the compose binding to `127.0.0.1:8501:8501`; either
-  way, firewall plain `:8501` from users. **In `proxy` mode the loopback (or
-  proxy-network-only) binding is mandatory** — anyone who can reach `:8501`
-  directly can impersonate any user with one header.
-- **Verification email.** The **From can be any account** (Gmail, throwaway,
-  transactional provider — anything that can SMTP-send).
-  - **Gmail (easiest + reliable):** `AOS8_SMTP_MODE=relay`,
-    `AOS8_SMTP_HOST=smtp.gmail.com`, port `587`, user/from = your Gmail address,
-    pass = a Google **App Password** (Security → App passwords).
-  - **Transactional provider** (SendGrid/Resend/Brevo free tier) — same shape,
-    a verified sender domain.
-  - **`AOS8_SMTP_MODE=direct`** — no account at all; the app does the MX lookup
-    and delivers itself. May be spam-filtered from an unauthenticated IP; set
-    `AOS8_SMTP_FROM` to a domain you control.
-  - With nothing set, codes are written to the **container log only** (dev).
-- **Per-user credential isolation.** Saved creds are keyed and encrypted per
-  signed-in user; one engineer's tenant secrets never load into another's
-  session. With no `AOS8_CREDSTORE_KEY`, persistence is disabled entirely
-  (session-only) — a fail-safe.
-- **Persistence.** The `aos8_state` volume holds `users.json` + the encrypted
-  cred files. Without it, accounts and saved creds reset on redeploy. Keep
-  `AOS8_CREDSTORE_KEY` stable across deploys.
-- **Audit trail.** Sensitive actions (provision, cutover, claim, cleanup) are
-  emitted as JSON audit lines to stdout, tagged with the signed-in user.
-- **Scaling.** Streamlit sessions are websocket-bound to one replica. If you
-  scale `app`, pin each user to one replica (cookie/IP affinity) at the LB and
-  share the volume so all replicas see the same accounts.
-
-> Login lasts for the browser session — a full page refresh signs the user out
-> and they log back in (no cookie/JWT persistence yet). Ask if you want
-> stay-signed-in across refreshes.
-
-A header-injecting reverse proxy is also supported as an alternative
-(`AOS8_AUTH_MODE=proxy` + `AOS8_IDENTITY_HEADER`), but the built-in `accounts`
-mode above is the recommended path.
-
-### Environment variables
-
-| Var | Default | Purpose |
-|---|---|---|
-| `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person verified-email login (any domain unless restricted); `proxy` = reverse-proxy header; `local` = single user. Any other value fails closed (the app refuses to serve). |
-| `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode (required in that mode; fail-closed if unset) |
-| `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
-| `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
-| `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
-| `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address); do **not** use @hpe.com |
-| `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. No host (and not `direct`) ⇒ codes logged to console (dev only) |
-| `AOS8_CREDSTORE_KEY` | _(unset)_ | Fernet key enabling per-user encrypted "Remember". Unset in a multi-user mode = persistence off |
-| `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |
-| `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in `local` mode |
+CI runs lint + tests + a Docker build on every push
+(`.github/workflows/ci.yml`). The test suite includes mocked-HTTP
+reproductions of real field bugs — see `tests/test_clients_http.py`.
