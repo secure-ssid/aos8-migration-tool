@@ -14,7 +14,7 @@ CLI operation (`ap convert`) on the MC. Code: `lib/aos8_client.py` (REST),
 - **Reads** — every request sends `UIDARUBA` (query param + cookie) plus a
   `config_path`:
   - `GET /v1/configuration/object/<name>` — config objects (`ap_group`,
-    `ssid_prof`, `wlan_virtual_ap`, `vlan_id`, `rad_server`,
+    `ssid_prof`, `virtual_ap` (legacy fallback `wlan_virtual_ap`), `vlan_id`, `rad_server`,
     `server_group_prof`).
   - `GET /v1/configuration/showcommand?command=...` — show commands.
 - **`config_path`** — on a **Mobility Conductor** use `/md` (default); on a
@@ -24,7 +24,7 @@ CLI operation (`ap convert`) on the MC. Code: `lib/aos8_client.py` (REST),
 ### What's pulled (`pull_config`)
 firmware (`show version`), controller IP + VLAN (`show controller-ip`), AP
 groups + their **virtual-ap bindings**, [[Glossary|ssid-profile]] (essid/opmode/passphrase) joined
-onto `wlan_virtual_ap`, VLANs, RADIUS servers, server-groups, AP inventory
+onto `virtual_ap`, VLANs, RADIUS servers, server-groups, AP inventory
 (`show ap database long` → serial/model/MAC/group), and cluster membership.
 APs whose group isn't in the configured list get a synthetic group so none are
 dropped. If virtual-ap bindings are missing for a group, **all** SSIDs are
@@ -77,8 +77,10 @@ Runbook flow per group:
 3. `ap convert active specific-aps activate` — **primary path**: APs fetch
    their own AOS 10 image from **Aruba Activate** (no image names needed).
 4. Alternative (air-gapped Activate): `ap convert active ... server http ...`
-   with per-model image families (`MODEL_FAMILIES`: 303/304/305→Ursa,
-   504/505→Scorpio, 535/555→Norma; unknown models get an explicit "do NOT
+   with per-model image families (`MODEL_FAMILIES`, from the Instant
+   release-notes image classes: 303→Scorpio, 318/37x→Gemini,
+   344/345 + 50x/51x/518/57x→Draco, 53x/55x/58x→Lupus, 635/655→Norma;
+   unknown models get an explicit "do NOT
    guess" placeholder).
 5. `show ap convert-status` — **10–20 min per AP**.
 

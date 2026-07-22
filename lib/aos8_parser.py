@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models import (
     AP, APGroup, ClusterInfo, CustomerConfig, ForwardMode,
-    AuthType, RadiusServer, SSID, VLAN,
+    RadiusServer, SSID, VLAN,
 )
 from .aos8_client import (
     AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
@@ -76,8 +76,20 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
             grp.ssids = list(all_ssid_names)
             mapping_incomplete = True
 
+    # EAP termination on the controller ("EAP offload") lives inside the
+    # dot1x auth profile as `termination enable` — the old aaa-fastconnect
+    # token is not an AOS 8 running-config keyword, so keep it only as a
+    # belt-and-suspenders extra.
     has_eap = "aaa-fastconnect" in running.lower()
-    has_internal = "internal" in pasted_outputs.get("aaa_auth_server", "").lower()
+    for _dot1x_name, _dot1x_block in _iter_blocks(running, r"aaa authentication dot1x"):
+        if any(l.strip().lower().startswith("termination") for l in _dot1x_block):
+            has_eap = True
+            break
+    # The built-in "Internal" server appears in EVERY `show aaa
+    # authentication-server all` output — its mere presence proves nothing.
+    # Internal auth is in USE only when a server-group references it.
+    has_internal = bool(re.search(r'^\s*auth-server\s+"?Internal"?\s*$',
+                                  running, re.IGNORECASE | re.MULTILINE))
 
     return CustomerConfig(
         mc_ip=mc_ip_parsed or mc_ip,
@@ -107,12 +119,18 @@ def parse_cli_table(text: str, required_cols: tuple[str, ...]) -> list[dict[str,
         ap-1    campus    335      10.0.0.5      Up 10d:2h     ...
     """
     lines = text.splitlines()
+
+    def _hdr_norm(s: str) -> str:
+        # header spellings vary ("IP Address" vs "IP-Address") — compare on
+        # alphanumerics only, mirroring what _row_get tolerates
+        return re.sub(r"[^a-z0-9]", "", s.lower())
+
     for i in range(1, len(lines)):
         sep = lines[i]
         if not re.fullmatch(r"[-\s]+", sep) or "-" not in sep:
             continue
         header = lines[i - 1]
-        if not all(c.lower() in header.lower() for c in required_cols):
+        if not all(_hdr_norm(c) in _hdr_norm(header) for c in required_cols):
             continue
         starts = [m.start() for m in re.finditer(r"-+", sep)]
         if len(starts) < 2:
@@ -149,10 +167,24 @@ def _row_get(row: dict[str, str], *names: str) -> str:
 # device-group name like "-" in Central.
 _GROUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none"}
 
+# allowed-band token sets → Central rf-band enum (shared by the ssid-profile
+# and virtual-ap parsers — the parameter officially lives on the virtual-ap)
+_BAND_MAP = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
+
 
 def _clean_group(token: str) -> str:
     t = (token or "").strip()
     return "default" if t.lower() in _GROUP_PLACEHOLDERS else t
+
+
+def _clean_zone(token: str) -> str:
+    """Instant Zone column: empty/placeholder means NO zone — keep it empty so
+    the instant-default catch-all grouping applies. (Unlike the MC Group
+    column, where the default group really is named 'default', mapping an
+    empty zone to 'default' would conflate zoneless APs with a genuinely
+    named 'default' zone and dead-end the catch-all branch.)"""
+    t = (token or "").strip()
+    return "" if t.lower() in _GROUP_PLACEHOLDERS else t
 
 
 # ─────────────────── AP inventory ───────────────────
@@ -217,7 +249,10 @@ def _parse_ap_groups(text: str) -> list[APGroup]:
         m = re.match(r"(?:AP Group|ap-group)\s*[:\s]\s*\"?([\w\-. ]+?)\"?\s*$", line, re.IGNORECASE)
         if m:
             name = m.group(1).strip()
-            if name and name.lower() not in ("default", "noauthapgroup") and name not in seen:
+            # "list" excluded: `show ap-group` titles its table "AP group
+            # List", which this pattern would otherwise read as a group
+            if name and name.lower() not in ("default", "noauthapgroup", "list") \
+                    and name not in seen:
                 seen.add(name)
                 groups.append(APGroup(name=name))
     if not groups:
@@ -262,7 +297,6 @@ def _iter_blocks(text: str, opener: str):
 def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     profiles = {}
     # AOS8 'a-band'/'g-band'/'wmm' → New Central rf-band enum
-    _BAND = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
         info = {"essid": "", "opmode": "", "passphrase": None,
                 "rf_band": "", "dtim_period": 0, "max_clients": 0}
@@ -274,7 +308,9 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             m = re.match(r"opmode\s+([\w\-]+)", line, re.IGNORECASE)
             if m:
                 info["opmode"] = m.group(1)
-            m = re.match(r"wpa-passphrase\s+(\S+)", line, re.IGNORECASE)
+            # quoted passphrases may contain spaces — capture to end of line
+            # and strip the quotes (\S+ would keep the quote and truncate)
+            m = re.match(r'wpa-passphrase\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
             if m:
                 info["passphrase"] = m.group(1)
             m = re.match(r"dtim-period\s+(\d+)", line, re.IGNORECASE)
@@ -288,7 +324,7 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             if m:
                 bands = {b for b in m.group(1).lower().split() if b in ("a", "g")}
         if bands:
-            info["rf_band"] = _BAND.get(tuple(sorted(bands)), "BAND_ALL")
+            info["rf_band"] = _BAND_MAP.get(tuple(sorted(bands)), "BAND_ALL")
         profiles[name] = info
     return profiles
 
@@ -330,15 +366,38 @@ def _mc_captive_portals(running: str) -> dict[str, dict]:
     return aaa_cp
 
 
+def _aaa_server_groups(running: str) -> dict[str, str]:
+    """aaa-profile → RADIUS server-group name. The virtual-ap references an
+    aaa-profile, but the actual server group hangs off `dot1x-server-group`
+    (802.1X) or `mac-server-group` (MAC auth) INSIDE that profile — the
+    profile name itself is not a server group and must not be exported as
+    one."""
+    groups: dict[str, str] = {}
+    for name, block in _iter_blocks(running, r"aaa profile"):
+        dot1x, mac = "", ""
+        for line in block:
+            m = re.match(r'dot1x-server-group\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                dot1x = m.group(1)
+            m = re.match(r'mac-server-group\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                mac = m.group(1)
+        if dot1x or mac:
+            groups[name] = dot1x or mac
+    return groups
+
+
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
     mc_cps = _mc_captive_portals(running)
+    aaa_sgs = _aaa_server_groups(running)
     for name, block in _iter_blocks(running, r"wlan virtual-ap"):
         vlan = 1
         vlan_raw = None
         fwd = ForwardMode.TUNNEL
         prof_ref = ""
         aaa_ref = ""
+        vap_bands: set = set()
         for line in block:
             low = line.lower()
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
@@ -357,6 +416,11 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
                 m = re.match(r"aaa-profile\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
                 if m:
                     aaa_ref = m.group(1)
+                # allowed-band is a virtual-ap parameter in AOS 8
+                m = re.match(r"allowed-band\s+(.+)$", line, re.IGNORECASE)
+                if m:
+                    vap_bands = {b for b in m.group(1).lower().split()
+                                 if b in ("a", "g")}
 
         prof = ssid_profiles.get(prof_ref, {})
         auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
@@ -370,8 +434,11 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             auth_known=auth_known,
             essid=prof.get("essid") or None,
             psk=prof.get("passphrase"),
-            auth_server_group=aaa_ref or None,
-            rf_band=prof.get("rf_band", ""),
+            # prefer the real server group from inside the aaa-profile; the
+            # profile name is only a last-resort placeholder
+            auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
+            rf_band=(_BAND_MAP.get(tuple(sorted(vap_bands)), "BAND_ALL")
+                     if vap_bands else prof.get("rf_band", "")),
             dtim_period=prof.get("dtim_period", 0),
             max_clients=prof.get("max_clients", 0),
             captive_portal_url=cp.get("url", ""),
@@ -413,9 +480,14 @@ def _parse_radius_servers(auth_text: str, running_text: str) -> list[RadiusServe
             servers.append(RadiusServer(name=name, address=host,
                                         auth_port=auth_port, acct_port=acct_port))
 
-    # `show aaa authentication-server radius` summary table fallback
+    # Summary-table fallbacks. Two shapes exist:
+    #   `show aaa authentication-server radius`:  <name> <ip> <port> ...
+    #   `show aaa authentication-server all`:     <name> <Type> <ip> ...
     for line in auth_text.splitlines():
-        m = re.match(r"([\w\-.]+)\s+([\d.]+)\s+\d+", line.strip())
+        line = line.strip()
+        m = (re.match(r"([\w\-.]+)\s+([\d.]+)\s+\d+", line)
+             or re.match(r"([\w\-.]+)\s+Radius\s+(\d+\.\d+\.\d+\.\d+)", line,
+                         re.IGNORECASE))
         if m and m.group(1) not in seen:
             seen.add(m.group(1))
             servers.append(RadiusServer(name=m.group(1), address=m.group(2)))
@@ -474,11 +546,17 @@ def _parse_cluster(text: str, mc_ip: str) -> Optional[ClusterInfo]:
             members.append(m.group(2))
         if re.search(r"L3-Connected", line, re.IGNORECASE):
             ctype = "L3"
-    if not members:  # older formats: any IPs in the member table
-        for line in text.splitlines():
-            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
-            if m and m.group(1) not in members:
-                members.append(m.group(1))
+    if not members:
+        # older formats: IPs from the member table — but ONLY when the pasted
+        # text actually looks like cluster output. Grabbing any two IPs from
+        # arbitrary text would fabricate a cluster (and its L2 sequencing
+        # warnings) out of unrelated paste content.
+        if re.search(r"lc-cluster|cluster\s+group[- ]membership|group profile",
+                     text, re.IGNORECASE):
+            for line in text.splitlines():
+                m = re.search(r"(\d+\.\d+\.\d+\.\d+)", line)
+                if m and m.group(1) not in members:
+                    members.append(m.group(1))
     if len(members) >= 2:
         return ClusterInfo(type=ctype, members=members, active_mc_ip=mc_ip)
     return None
@@ -536,8 +614,15 @@ def parse_instant_config(pasted_outputs: dict[str, str], vc_ip: str = "") -> Cus
     fw = _parse_firmware(running, pasted_outputs.get("version", ""))
 
     # zones → groups; SSIDs with no zone broadcast everywhere.
-    # Zone matching is case-insensitive (Instant operators typo case freely).
-    zones = sorted({ap.ap_group for ap in aps if ap.ap_group})
+    # Zone matching is case-insensitive (Instant operators typo case freely) —
+    # dedupe the zone names the same way, or 'Floor1' and 'floor1' become two
+    # device groups. First-seen casing wins; APs are folded into it.
+    _zone_canon: dict[str, str] = {}
+    for ap in aps:
+        if ap.ap_group:
+            canon = _zone_canon.setdefault(ap.ap_group.lower(), ap.ap_group)
+            ap.ap_group = canon
+    zones = sorted(_zone_canon.values())
     ssid_zones = {k: [z.lower() for z in v]
                   for k, v in _parse_instant_ssid_zones(running).items()}
     ap_groups: list[APGroup] = []
@@ -622,7 +707,10 @@ def _parse_instant_external_cp(running: str) -> dict[str, dict]:
             if m:
                 redirect = m.group(1)
         if server:
-            scheme = "http" if port and port not in (443, 8443) else "https"
+            # assume TLS unless the port is a well-known cleartext one —
+            # external captive portals on custom ports (4443, 9443, …) are
+            # far more likely to be https than http
+            scheme = "http" if port in (80, 8080) else "https"
             portpart = f":{port}" if port else ""
             if path and not path.startswith("/"):
                 path = "/" + path
@@ -746,7 +834,7 @@ def _parse_instant_aps(text: str) -> list[AP]:
             model=_normalize_model(_row_get(row, "Type", "AP Type", "Model")),
             mac=mac,
             name=name,
-            ap_group=_clean_group(_row_get(row, "Zone")),
+            ap_group=_clean_zone(_row_get(row, "Zone")),
             ip=ip,
             status="Up",
         ))

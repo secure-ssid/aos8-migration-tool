@@ -35,6 +35,13 @@ def render():
                         on_click=lambda: st.session_state.update({"step": 2}))
         return
 
+    _failed = [r for r in st.session_state.get("provision_results", [])
+               if not r[1]]
+    if _failed:
+        st.warning(f"⚠️ Step 3 finished with **{len(_failed)} failed step(s)** — "
+                   "converted APs may come up without parts of their config. "
+                   "Fix and re-run provisioning before converting.")
+
     rb = runbook.generate(customer, central_cfg, customer_name)
 
     if is_instant:

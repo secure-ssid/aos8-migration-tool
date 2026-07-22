@@ -16,18 +16,24 @@ from lib import accounts, identity, mailer
 
 
 def _deliver_code(email: str, code: str) -> bool:
-    """Email the verification code; on failure (or no SMTP) log it to the server
-    console as a dev fallback. Returns True if it was actually emailed."""
+    """Email the verification code. With NO SMTP configured (dev mode) the
+    code is logged to the server console instead. Returns True if it was
+    actually emailed."""
     subject = "Your AOS 8 Migration Console verification code"
     body = (f"Your verification code is: {code}\n\n"
             f"It expires in {accounts.CODE_TTL_MINUTES} minutes. "
             f"If you didn't request this, ignore this email.")
     ok, err = mailer.send(email, subject, body)
     if not ok:
-        # Dev fallback only — never shown in the UI. Whoever can read the server
-        # logs can see it; production must configure SMTP.
-        print(f"[auth] verification code for {email}: {code} "
-              f"(email not sent: {err})", flush=True)
+        if mailer.configured():
+            # SMTP exists but the send failed — do NOT drop the secret into
+            # the (production) logs; the user can hit Resend.
+            print(f"[auth] verification email to {email} FAILED: {err}",
+                  flush=True)
+        else:
+            # Dev fallback only — never shown in the UI.
+            print(f"[auth] verification code for {email}: {code} "
+                  f"(no SMTP configured)", flush=True)
     return ok
 
 
@@ -39,7 +45,7 @@ def _signed_in(email: str) -> None:
 
 
 def _verify_screen(email: str) -> None:
-    st.markdown(f"#### Verify your email")
+    st.markdown("#### Verify your email")
     st.caption(f"Enter the 6-digit code we sent to **{email}**.")
     if not mailer.configured():
         st.warning("Email delivery isn't configured on this server — the code "
@@ -81,6 +87,10 @@ def _login_register() -> None:
                     _deliver_code(email, code)
                 st.session_state["_pending_email"] = accounts._norm(email)
                 st.rerun()
+            elif status == "locked":
+                st.error(f"Too many failed attempts — this account is locked "
+                         f"for {accounts.LOGIN_LOCK_MINUTES} minutes. "
+                         f"Try again later.")
             else:
                 st.error("Invalid email or password.")
 
@@ -111,11 +121,16 @@ def _password_screen() -> None:
                        placeholder="Enter password and press Enter",
                        key="app_pw")
     if st.button("Unlock", type="primary", key="app_pw_btn"):
-        if identity.check_app_password(pw):
+        wait = identity.app_password_retry_after()
+        if wait:
+            error_slot.error(f"Too many failed attempts — wait {wait}s "
+                             "before trying again.")
+        elif identity.check_app_password(pw):
             st.session_state["_authenticated"] = True
             st.session_state["_auth_user"] = identity.SHARED_USER
             st.rerun()
         else:
+            identity.record_app_password_failure()
             error_slot.error("Incorrect password — try again.")
 
 
@@ -138,8 +153,9 @@ def render_gate() -> bool:
 
 
 def logout() -> None:
-    for k in ("_authenticated", "_auth_user", "_pending_email"):
-        st.session_state.pop(k, None)
-    # drop any loaded destination creds so the next user starts clean
-    st.session_state["_creds_loaded"] = False
+    # Clear the WHOLE session, not just the auth flags: the sign-out button
+    # exists for shared workstations, and the previous operator's decrypted
+    # API secrets, tokens and discovered customer data must not survive into
+    # the next sign-in on this browser session.
+    st.session_state.clear()
     st.rerun()

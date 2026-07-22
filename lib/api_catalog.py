@@ -12,6 +12,7 @@ substitute.
 # Environment variables surfaced in the Postman collection.
 VARIABLES = [
     ("aos8_host", "10.0.0.1", "Mobility Controller/Conductor IP (port 4343)"),
+    ("password", "", "AOS 8 admin password for the login call"),
     ("uidaruba", "", "AOS 8 session token from /v1/api/login"),
     ("config_path", "/md", "/md on a Conductor, /mm/mynode on a standalone MC"),
     ("central_base", "https://us4.api.central.arubanetworks.com", "New Central regional API base"),
@@ -26,9 +27,13 @@ VARIABLES = [
     ("vlan_id", "100", "VLAN id"),
     ("ssid_name", "Corp", "SSID / wlan-ssid name"),
     ("group", "ap-group-1", "Device group / AP group name"),
+    ("group_scope_id", "", "Device group scopeId (from List device groups)"),
+    ("site_scope_id", "", "Site scopeId (from List sites)"),
     ("serial", "CNABC12345", "AP serial number"),
     ("device_uuid", "", "GLP device UUID (resolve from serial first)"),
     ("op_id", "", "GLP async-operation id"),
+    ("app_id", "", "Central application-instance id (List Central app instances)"),
+    ("subscription_uuid", "", "Subscription UUID (List subscriptions)"),
 ]
 
 # Each request: name, method, url, headers, body, desc.
@@ -91,8 +96,8 @@ GROUPS = [
             {"name": "Create VLAN (layer2-vlan)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/layer2-vlan/{{vlan_id}}",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"id": "{{vlan_id}}"}},
-             "desc": "PUT on duplicate; then scope-map it to the group."},
+             "body": {"mode": "raw", "data": {"vlan": 100, "name": "vlan100", "enable": True}},
+             "desc": "PUT on duplicate; then scope-map layer2-vlan/{{vlan_id}} to the group."},
             {"name": "Create SSID (wlan-ssid)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/wlan-ssids/{{ssid_name}}",
              "headers": {"Authorization": "Bearer {{central_token}}"},
@@ -101,15 +106,27 @@ GROUPS = [
             {"name": "Create overlay-wlan (tunnel SSID -> GW cluster)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/overlay-wlan/{{ssid_name}}",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"ssid": "{{ssid_name}}"}}},
+             "body": {"mode": "raw", "data": {"ssid": "{{ssid_name}}"}},
+             "desc": "Reference only — the tool DEFERS overlay binding to cutover "
+                     "(the GW cluster doesn't exist until the MCs convert); it's "
+                     "listed as a manual follow-up on the runbook."},
             {"name": "Create scope-map (bind resource->scope)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/scope-maps",
              "headers": {"Authorization": "Bearer {{central_token}}"},
              "body": {"mode": "raw", "data": {"scope-map": [{"scope-name": "{{group}}", "scope-id": 0, "persona": "CAMPUS_AP", "resource": "wlan-ssids/{{ssid_name}}"}]}}},
             {"name": "Set firmware compliance", "method": "POST",
-             "url": "{{central_base}}/network-config/v1alpha1/firmware-compliance",
+             "url": "{{central_base}}/network-config/v1alpha1/firmware-compliance"
+                    "?scope-id={{group_scope_id}}&object-type=LOCAL&device-function=CAMPUS_AP",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"scope-id": 0, "device-function": "ACCESS_POINT"}}},
+             "body": {"mode": "raw", "data": {
+                 "name": "compliance-campus_ap", "enable": True,
+                 "version-chart": {"version": "10.7.0.0"},
+                 "upgrade-mode": "REGULAR",
+                 "enforcement-schedule": {
+                     "upgrade-schedule": {"upgrade-schedule-mode": "IMMEDIATE"},
+                     "reboot-schedule": {"reboot-schedule-mode": "IMMEDIATE"}}}},
+             "desc": "scope-id/object-type/device-function go in the QUERY string; "
+                     "412 or duplicate -> PATCH the same route to update."},
             {"name": "Move APs into group (cutover)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/device-groups-add-devices",
              "headers": {"Authorization": "Bearer {{central_token}}"},

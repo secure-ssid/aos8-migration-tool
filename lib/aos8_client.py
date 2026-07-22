@@ -31,20 +31,43 @@ CONFIG_PATH_PREFIX = "/v1/configuration"
 # AP models known to be incompatible with AOS 10.
 # NOTE: verify against Aruba's official AOS 10 supported-platform matrix for
 # each release; matching is exact-token (country variants like -US stripped).
+# From Wi-Fi 5 (802.11ac), ONLY the 303 series (303/303H/303P), AP-318, the
+# 340 series (344/345) and the 370 series (374/375/377) made it into AOS 10;
+# every other 2xx/3xx (and all Wi-Fi 4 and older) did not. AP-/IAP- prefixes
+# are treated as interchangeable by the lookup, so one prefix per model is
+# enough — both are listed for the models operators paste most.
 INCOMPATIBLE_MODELS = {
+    # Wi-Fi 4 and older
+    "AP-92", "AP-93", "AP-93H",
+    "AP-103", "AP-103H", "AP-104", "AP-105",
+    "AP-114", "AP-115",
+    "AP-134", "AP-135",
+    "AP-175", "AP-175P", "AP-175AC", "AP-175DC",
     "IAP-103", "IAP-104", "IAP-105",
     "IAP-134", "IAP-135",
     "IAP-175", "IAP-175P", "IAP-175AC",
-    "IAP-204", "IAP-205",
-    "IAP-214", "IAP-215",
-    "IAP-224", "IAP-225",
-    "IAP-274", "IAP-275",
-    "IAP-315",
-    "AP-204", "AP-205",
+    "RAP-3WN", "RAP-3WNP", "RAP-108", "RAP-109", "RAP-155", "RAP-155P",
+    # 200 series (Wi-Fi 5 wave 1 + hospitality/remote)
+    "AP-203H", "AP-203R", "AP-203RP",
+    "AP-204", "AP-205", "AP-205H", "AP-207",
     "AP-214", "AP-215",
-    "AP-224", "AP-225",
-    "AP-274", "AP-275",
-    "AP-315",
+    "AP-224", "AP-225", "AP-228",
+    "AP-274", "AP-275", "AP-277",
+    "IAP-204", "IAP-205", "IAP-205H", "IAP-207",
+    "IAP-214", "IAP-215",
+    "IAP-224", "IAP-225", "IAP-228",
+    "IAP-274", "IAP-275", "IAP-277",
+    # 300 series models NOT carried into AOS 10 (303/318/34x/37x are OK)
+    "AP-304", "AP-305",
+    "AP-314", "AP-315",
+    "AP-324", "AP-325",
+    "AP-334", "AP-335",
+    "AP-365", "AP-367",
+    "IAP-304", "IAP-305",
+    "IAP-314", "IAP-315",
+    "IAP-324", "IAP-325",
+    "IAP-334", "IAP-335",
+    "IAP-365", "IAP-367",
 }
 
 _COUNTRY_SUFFIXES = ("-US", "-RW", "-JP", "-IL", "-EG")
@@ -87,6 +110,19 @@ class AOS8Client:
             raise AOS8APIError("Login succeeded but no UIDARUBA token returned")
         return True
 
+    def logout(self) -> None:
+        """Best-effort session release. AOS 8 caps concurrent API sessions per
+        user — leaking one per pull eventually locks the account out of the
+        API until the old sessions age out."""
+        if not self.uidaruba:
+            return
+        try:
+            self.session.get(f"{self.base}/v1/api/logout",
+                             params={"UIDARUBA": self.uidaruba}, timeout=5)
+        except Exception:
+            pass
+        self.uidaruba = None
+
     def _params(self, extra: Optional[dict] = None) -> dict:
         params = {"UIDARUBA": self.uidaruba}
         if self.config_path:
@@ -95,15 +131,26 @@ class AOS8Client:
             params.update(extra)
         return params
 
-    def _get_object(self, name: str) -> list[dict]:
-        """GET a configuration object; returns its instance list."""
+    def _get_json(self, path: str, extra_params: Optional[dict] = None,
+                  _retried: bool = False) -> dict:
+        """Authenticated GET with ONE re-login retry on 401. The UIDARUBA
+        session can be invalidated out-of-band mid-pull (an admin clearing
+        mgmt-user sessions, conductor failover) — without the replay that
+        degrades into an empty/partial discovery instead of an error."""
         resp = self.session.get(
-            f"{self.base}{CONFIG_PATH_PREFIX}/object/{name}",
-            params=self._params(),
+            f"{self.base}{path}",
+            params=self._params(extra_params),
             timeout=self.timeout,
         )
+        if resp.status_code == 401 and not _retried:
+            self.connect()
+            return self._get_json(path, extra_params, _retried=True)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
+
+    def _get_object(self, name: str) -> list[dict]:
+        """GET a configuration object; returns its instance list."""
+        data = self._get_json(f"{CONFIG_PATH_PREFIX}/object/{name}")
         # Object payloads come back either under "_data" -> {name: [...]}
         # or directly under the object name.
         if isinstance(data.get("_data"), dict):
@@ -113,13 +160,8 @@ class AOS8Client:
 
     def _show(self, command: str) -> dict:
         """Run a show command; returns the parsed JSON document."""
-        resp = self.session.get(
-            f"{self.base}{CONFIG_PATH_PREFIX}/showcommand",
-            params=self._params({"command": command}),
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        return self._get_json(f"{CONFIG_PATH_PREFIX}/showcommand",
+                              {"command": command})
 
     def _show_text(self, command: str) -> str:
         """Run a show command; flatten its _data block to plain text."""
@@ -202,8 +244,19 @@ class AOS8Client:
     def _get_virtual_aps(self) -> list[dict]:
         """Virtual-AP profiles. The object is named "virtual_ap" (matching
         the key AOS embeds in ap_group responses); some builds answer the
-        legacy "wlan_virtual_ap" name instead, so try both."""
-        return self._get_object("virtual_ap") or self._get_object("wlan_virtual_ap")
+        legacy "wlan_virtual_ap" name instead, so try both. Either name can
+        404 on builds that don't expose it — an unknown-object error on one
+        name must not kill the pull while the other would have answered."""
+        try:
+            vaps = self._get_object("virtual_ap")
+        except Exception:
+            vaps = []
+        if vaps:
+            return vaps
+        try:
+            return self._get_object("wlan_virtual_ap")
+        except Exception:
+            return []
 
     def _node_has_config(self) -> bool:
         """True when the CURRENT config_path holds real (non-default) AP
@@ -289,6 +342,11 @@ class AOS8Client:
             ssid_profiles = self.get_ssid_profiles()
         except Exception:
             pass  # opmode/essid enrichment is best-effort
+        aaa_sgs: dict[str, str] = {}
+        try:
+            aaa_sgs = self.get_aaa_server_groups()
+        except Exception:
+            pass  # server-group resolution is best-effort
 
         ssids, seen = [], set()
         for item in self._get_virtual_aps():
@@ -300,6 +358,7 @@ class AOS8Client:
             vlan_token = self._field(item, "vlan", default=1)
             vlan = _safe_vlan(vlan_token)
             vlan_raw = str(vlan_token) if _vlan_is_named(vlan_token) else None
+            aaa_ref = self._profile_ref(item, "aaa_prof")
             fwd_raw = str(self._field(item, "forward-mode", "forward_mode", default="tunnel")).lower()
             if "bridge" in fwd_raw:
                 fwd = ForwardMode.BRIDGE
@@ -331,7 +390,9 @@ class AOS8Client:
                 auth_known=auth_known,
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
-                auth_server_group=self._profile_ref(item, "aaa_prof") or None,
+                # prefer the real server group from inside the aaa-profile;
+                # the profile name is only a last-resort placeholder
+                auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
                 rf_band=rf_band,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
@@ -362,6 +423,35 @@ class AOS8Client:
                     acct_port=_safe_int(self._field(item, "acctport", "rad_acctport", default=1813), 1813),
                 ))
         return servers
+
+    def get_aaa_server_groups(self) -> dict[str, str]:
+        """aaa-profile name → RADIUS server-group name. The virtual-ap
+        references an aaa-profile, but the actual server group hangs off the
+        profile's dot1x-server-group (802.1X) or mac-server-group (MAC auth)
+        — the aaa-profile name itself is NOT a server group."""
+        out: dict[str, str] = {}
+        for item in self._get_object("aaa_prof"):
+            name = self._field(item, "profile-name")
+            if not name:
+                continue
+            sg = ""
+            for key in ("dot1x_server_group", "dot1x-server-group",
+                        "mac_server_group", "mac-server-group"):
+                ref = item.get(key)
+                if isinstance(ref, dict):
+                    # reference dicts vary by build: profile-name / srv-group
+                    sg = str(ref.get("profile-name") or ref.get("srv-group")
+                             or ref.get("srv_group") or "")
+                    if not sg:
+                        strs = [v for v in ref.values() if isinstance(v, str)]
+                        sg = strs[0] if len(strs) == 1 else ""
+                elif isinstance(ref, str):
+                    sg = ref
+                if sg:
+                    break
+            if sg:
+                out[str(name)] = sg
+        return out
 
     def get_server_groups(self) -> list[ServerGroup]:
         groups = []
@@ -582,24 +672,37 @@ def _safe_int(value: Any, default: int) -> int:
 
 
 # digits not preceded by '-' (negatives) or another digit (mid-number)
-_VLAN_ID_RE = re.compile(r"(?<![-\d])\d+")
+# A VLAN token is only numeric when the whole (comma/space-separated) token is
+# a number or a numeric range — digits INSIDE a name ("guest2020") must not be
+# mistaken for a VLAN id.
+_VLAN_TOKEN_RE = re.compile(r"^(\d+)(?:-\d+)?$")
+
+
+def _vlan_tokens(value: Any) -> list[str]:
+    return [t for t in re.split(r"[,\s]+", str(value).strip()) if t]
 
 
 def _safe_vlan(value: Any, default: int = 1) -> int:
-    """VLAN fields can be '100', '100,200', or a named VLAN — take the first
-    valid id (1-4094). Named VLANs return default; callers should also record
-    the raw token (SSID.vlan_raw) so preflight can flag it."""
-    for m in _VLAN_ID_RE.finditer(str(value)):
-        vid = int(m.group())
-        if 1 <= vid <= 4094:
-            return vid
+    """VLAN fields can be '100', '100,200', '100-105', or a named VLAN — take
+    the first valid id (1-4094). Named VLANs (even ones containing digits,
+    like 'guest2020') return default; callers should also record the raw
+    token (SSID.vlan_raw) so preflight can flag it."""
+    for tok in _vlan_tokens(value):
+        m = _VLAN_TOKEN_RE.match(tok)
+        if m:
+            vid = int(m.group(1))
+            if 1 <= vid <= 4094:
+                return vid
     return default
 
 
 def _vlan_is_named(value: Any) -> bool:
     """True when the VLAN token has no usable numeric id (named VLAN pool)."""
-    return not any(1 <= int(m.group()) <= 4094
-                   for m in _VLAN_ID_RE.finditer(str(value)))
+    for tok in _vlan_tokens(value):
+        m = _VLAN_TOKEN_RE.match(tok)
+        if m and 1 <= int(m.group(1)) <= 4094:
+            return False
+    return True
 
 
 def _normalize_model(model: Any) -> str:

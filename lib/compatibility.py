@@ -59,23 +59,39 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
 
 
 def _check_ap_models(customer: CustomerConfig) -> list[CheckResult]:
-    incompatible = []
+    incompatible, unknown = [], []
     for ap in customer.aps:
-        if not is_model_compatible(ap.model):
+        if not ap.model:
+            unknown.append(ap.name or ap.serial or "(unnamed AP)")
+        elif not is_model_compatible(ap.model):
             incompatible.append(f"{ap.name} ({ap.model})")
 
+    results = []
     if incompatible:
-        return [CheckResult(
+        results.append(CheckResult(
             name="AP Model Compatibility",
             status=Status.FAIL,
             message=f"{len(incompatible)} AP(s) do not support AOS 10 — hardware refresh required before migration.",
             detail="Incompatible APs:\n" + "\n".join(incompatible),
-        )]
-    return [CheckResult(
-        name="AP Model Compatibility",
-        status=Status.PASS,
-        message=f"All {len(customer.aps)} APs support AOS 10.",
-    )]
+        ))
+    else:
+        known = len(customer.aps) - len(unknown)
+        results.append(CheckResult(
+            name="AP Model Compatibility",
+            status=Status.PASS,
+            message=f"All {known} APs with a known model support AOS 10.",
+        ))
+    if unknown:
+        # a blank model can't be checked — surface it instead of silently
+        # counting it as compatible
+        results.append(CheckResult(
+            name="AP Models Unknown",
+            status=Status.WARN,
+            message=f"{len(unknown)} AP(s) have no model in the discovery data — "
+                    "compatibility could not be checked.",
+            detail="APs without a model:\n" + "\n".join(unknown),
+        ))
+    return results
 
 
 def _parse_firmware_tuple(version: str) -> Optional[tuple]:
@@ -392,7 +408,7 @@ def _check_serials(customer: CustomerConfig) -> list[CheckResult]:
             name="AP Serial Numbers",
             status=Status.WARN,
             message=f"{len(missing)} AP(s) have no serial number — they cannot be "
-                    "pre-assigned to groups/sites, and Step 5 validation will not "
+                    "pre-assigned to groups/sites, and Step 6 validation will not "
                     "be able to match them in Central.",
             detail="Paste `show ap database long` output (it includes the Serial # column), "
                    "or use API mode.\nAffected: " + ", ".join(missing[:20]) +
@@ -519,9 +535,10 @@ def _check_ssid_auth(customer: CustomerConfig) -> list[CheckResult]:
         results.append(CheckResult(
             name="802.1X SSIDs",
             status=Status.WARN,
-            message=f"Enterprise SSIDs ({', '.join(enterprise)}) will need their RADIUS "
-                    "auth server attached in Central after provisioning, and the new GW/AP "
-                    "IPs added as RADIUS clients (see NAD check).",
+            message=f"Enterprise SSIDs ({', '.join(enterprise)}): provisioning binds a "
+                    "RADIUS server-group to them (New Central), but the shared secrets are "
+                    "placeholders — set the real secrets in Central, and add the new GW/AP "
+                    "IPs as RADIUS clients (see NAD check).",
         ))
     if not results:
         results.append(CheckResult(

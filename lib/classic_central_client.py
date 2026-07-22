@@ -26,6 +26,7 @@ central-python-workflows, and cencli — see docs/notes in repo history):
 """
 import copy
 import json
+import re
 import time
 from typing import Callable, Optional
 from urllib.parse import quote
@@ -146,16 +147,22 @@ class ClassicCentralClient:
         rotates — self.refresh_token holds the NEW one afterwards."""
         if not (self.client_id and self.client_secret and self.refresh_token):
             return False
-        resp = self.session.post(
-            f"{self.base}/oauth2/token",
-            params={
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "grant_type": "refresh_token",
-                "refresh_token": self.refresh_token,
-            },
-            timeout=self.timeout,
-        )
+        try:
+            resp = self.session.post(
+                f"{self.base}/oauth2/token",
+                params={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": self.refresh_token,
+                },
+                timeout=self.timeout,
+            )
+        except requests.exceptions.RequestException:
+            # a transport failure mid-refresh must read as "refresh didn't
+            # happen" (the caller then raises the clean 401 guidance), not as
+            # a raw requests exception escaping the client's error type
+            return False
         if not resp.ok:
             return False
         try:
@@ -171,7 +178,8 @@ class ClassicCentralClient:
         return True
 
     def _request(self, method: str, path: str, json_body=None,
-                 params: Optional[dict] = None, _retried: bool = False) -> dict:
+                 params: Optional[dict] = None, _auth_retried: bool = False,
+                 _rate_retried: bool = False) -> dict:
         try:
             resp = self.session.request(
                 method, f"{self.base}{path}", json=json_body, params=params,
@@ -182,8 +190,9 @@ class ClassicCentralClient:
         except requests.exceptions.ConnectionError as e:
             raise ClassicCentralAPIError(f"{method} {path}: connection failed — check the "
                                          f"apigw base URL ({type(e).__name__})")
-        if resp.status_code == 401 and not _retried and self.refresh():
-            return self._request(method, path, json_body, params, _retried=True)
+        if resp.status_code == 401 and not _auth_retried and self.refresh():
+            return self._request(method, path, json_body, params,
+                                 _auth_retried=True, _rate_retried=_rate_retried)
         if resp.status_code == 401:
             have_refresh = bool(self.client_id and self.client_secret
                                 and self.refresh_token)
@@ -195,10 +204,15 @@ class ClassicCentralClient:
                     "expire after ~2 hours)")
             raise ClassicCentralAPIError(
                 f"Classic API token expired/invalid (401). {hint}.")
-        if resp.status_code == 429 and not _retried:
-            time.sleep(min(int(resp.headers.get("Retry-After", 10)), 60))
-            return self._request(method, path, json_body, params, _retried=True)
-        if resp.status_code == 403 and "wlan" in path:
+        if resp.status_code == 429 and not _rate_retried:
+            # Retry-After may be an HTTP-date (RFC 7231) — fall back to 10s
+            # rather than crashing on int().
+            retry_after = resp.headers.get("Retry-After", "10").strip()
+            wait = int(retry_after) if retry_after.isdigit() else 10
+            time.sleep(min(wait, 60))
+            return self._request(method, path, json_body, params,
+                                 _auth_retried=_auth_retried, _rate_retried=True)
+        if resp.status_code == 403 and "full_wlan" in path:
             raise ClassicCentralAPIError(
                 f"{method} {path} → 403: the classic WLAN config APIs are "
                 "allowlisted per tenant — ask your Aruba SE to enable them "
@@ -242,6 +256,22 @@ class ClassicCentralClient:
                 self._group_names_cache = names
                 return names
 
+    def _read_back_architecture(self, name: str) -> str:
+        """Best-effort group-properties readback. Returns the architecture
+        string ONLY when it confirms something other than AOS10; transport
+        errors and missing data return '' (never fail on the readback)."""
+        try:
+            check = self._get("/configuration/v1/groups/properties",
+                              params={"groups": name})
+            for item in check.get("data", check.get("items", [])):
+                if item.get("group") == name:
+                    arch = (item.get("properties") or {}).get("Architecture", "")
+                    if arch and arch != "AOS10":
+                        return arch
+        except Exception:
+            pass
+        return ""
+
     def create_group(self, name: str, include_gateways: bool = False,
                      new_central: bool = False) -> str:
         """Idempotent AOS 10 UI-group create; verifies Architecture readback.
@@ -251,6 +281,15 @@ class ClassicCentralClient:
         device-collections — required for the hybrid path where SSIDs/VLANs are
         then configured on the New Central side. False = pure classic group."""
         if name in self.list_group_names():
+            # a pre-existing group is reused, but a hybrid (New-Central-managed)
+            # run must not silently reuse a group with the wrong architecture —
+            # that dead-ends later with unrelated-looking SSID/VLAN errors
+            wrong = self._read_back_architecture(name)
+            if wrong:
+                raise ClassicCentralAPIError(
+                    f"Group '{name}' already exists with Architecture "
+                    f"'{wrong}', not AOS10 — delete or rename it in Central "
+                    "(the tool will then create it correctly).")
             return name
         props = {
             "AllowedDevTypes": ["AccessPoints"] + (["Gateways"] if include_gateways else []),
@@ -275,17 +314,7 @@ class ClassicCentralClient:
         # verify the group actually reads back as AOS10. The readback itself
         # is best-effort (transport errors don't fail the step); only a
         # CONFIRMED wrong architecture raises.
-        wrong_arch = ""
-        try:
-            check = self._get("/configuration/v1/groups/properties",
-                              params={"groups": name})
-            for item in check.get("data", check.get("items", [])):
-                if item.get("group") == name:
-                    arch = (item.get("properties") or {}).get("Architecture", "")
-                    if arch and arch != "AOS10":
-                        wrong_arch = arch
-        except Exception:
-            pass
+        wrong_arch = self._read_back_architecture(name)
         if wrong_arch:
             raise ClassicCentralAPIError(
                 f"Group '{name}' was created but Architecture reads back as "
@@ -352,9 +381,11 @@ class ClassicCentralClient:
             # required — default to a zeroed geolocation when no address given
             body["geolocation"] = {"latitude": "0.0", "longitude": "0.0"}
         resp = self._post("/central/v2/sites", json_body=body)
+        self._sites_cache = None  # the pre-create list is stale now
         sid = resp.get("site_id")
         if sid is None:
-            for site in self.list_sites():
+            # POST didn't echo the id — re-list, bypassing the pre-create cache
+            for site in self.list_sites(refresh=True):
                 if site.get("site_name") == name:
                     return int(site.get("site_id"))
             raise ClassicCentralAPIError(f"Site '{name}' created but id not found")
@@ -423,7 +454,9 @@ class ClassicCentralClient:
         try:
             self._post("/firmware/v2/upgrade/compliance_version", json_body=body)
         except ClassicCentralAPIError as e:
-            if "404" not in str(e) and "405" not in str(e):
+            # match the status code the client itself formats ("failed 404:"),
+            # not any '404' that happens to appear in the error detail
+            if not re.search(r"failed (404|405):", str(e)):
                 raise
             self._post("/firmware/v1/upgrade/compliance_version", json_body=body)
 
@@ -443,7 +476,11 @@ class ClassicCentralClient:
                 if len(page) < 100:
                     return aps
                 offset += 100
-        except ClassicCentralAPIError:
+        except ClassicCentralAPIError as e:
+            # an expired token must surface as its own (actionable) message,
+            # not be flattened into "check monitoring permissions"
+            if "401" in str(e) or "expired" in str(e).lower():
+                raise
             return None
 
     # ─────────────────── Full provision flow ───────────────────
@@ -493,8 +530,11 @@ class ClassicCentralClient:
 
         for group_cfg in cc.groups:
             # serials are keyed by the AOS 8 source group name, not the
-            # (possibly renamed) Central group name
-            serials = ap_serials.get(group_cfg.source_group or group_cfg.name, [])
+            # (possibly renamed) Central group name; merged generic groups
+            # contribute serials from every folded source group
+            _srcs = ([group_cfg.source_group or group_cfg.name]
+                     + list(group_cfg.extra_source_groups))
+            serials = [s for src in _srcs for s in ap_serials.get(src, [])]
             if not step(f"Create AOS10 group: {group_cfg.name}"
                         + (" (APs+Gateways)" if keep_gws else " (APs)"),
                         lambda g=group_cfg: self.create_group(g.name, keep_gws)):

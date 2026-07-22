@@ -27,7 +27,7 @@ are allowlisted per tenant — ask your Aruba SE to enable them for this account
 ```
 
 **Cause:** the classic Central WLAN configuration APIs are gated per tenant. The
-client detects any `403` on a path containing `wlan` and raises this specific
+client detects a `403` on a `full_wlan` path and raises this specific
 message.
 
 **Fix:** open a case with your Aruba SE / TAC to enable the WLAN config APIs for

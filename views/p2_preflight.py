@@ -41,6 +41,14 @@ def _named_vlan_editor(customer, central) -> None:
             key=f"vlanmap_{token}", label_visibility="collapsed")
 
     if st.button("Apply VLAN mapping", type="primary"):
+        # the number inputs default to 1 — an untouched token silently mapping
+        # everything onto VLAN 1 is exactly the mistake this editor exists to
+        # prevent, so call those out explicitly
+        ones = [t for t, v in mapping.items() if int(v) == 1]
+        if ones:
+            st.warning("Mapped to **VLAN 1** (the input default): "
+                       + ", ".join(f"`{t}`" for t in ones)
+                       + " — confirm that is really the intended VLAN.")
         for s in customer.ssids:
             tok = getattr(s, "vlan_raw", None)
             if tok in mapping:
@@ -54,7 +62,10 @@ def _named_vlan_editor(customer, central) -> None:
         new_central = translate(
             customer,
             customer_name=st.session_state.get("customer_name", central.customer_name),
-            central_base_url=st.session_state.get("central_base", central.base_url),
+            # keep the base URL the config was built with — session's
+            # central_base holds the NEW-Central URL even in classic sessions
+            central_base_url=central.base_url
+                or st.session_state.get("central_base", ""),
             aos10_firmware=st.session_state.get("aos10_fw", "10.7.0.0"),
             site_name=(central.sites[0] if central.sites else ""),
             gateway_mode=gw_mode)

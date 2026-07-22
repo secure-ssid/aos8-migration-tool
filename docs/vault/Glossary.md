@@ -33,8 +33,9 @@ Terms used across the vault. Linked from most notes.
 - **virtual-ap** — see ssid-profile vs virtual-ap above. The AOS 8 binding object.
 - **gateway cluster** — AOS 10 gateways grouped for redundancy. ^gwcluster
   Overlay WLANs bind to it via `gw-cluster-list` (`cluster`, `cluster-scope-id`,
-  `cluster-type=CLUSTER_ID`, `tunnel-type=GRE`). On New Central it lives in a
-  `<name>-gws` device group; on Classic it auto-forms on join. [[Gateway Strategy]].
+  `cluster-type=CLUSTER_ID`, `tunnel-type=GRE`). It forms when the converted
+  MCs join Central at cutover (both destinations) — Step 3 records a manual
+  follow-up rather than pre-creating it. [[Gateway Strategy]].
 - **GLP** — HPE GreenLake Platform. Devices are **claimed** (serial + MAC) and
   **subscribed** there before Central adopts them. See [[GreenLake Onboarding]].
 - **GreenLake SSO** — `sso.common.cloud.hpe.com/as/token.oauth2`,

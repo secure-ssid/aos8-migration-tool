@@ -139,6 +139,10 @@ class CentralGroupConfig:
     firmware_version: str
     site_name: str
     source_group: str = ""          # AOS 8 ap-group name (for `ap convert` + serial lookup)
+    # Additional AOS 8 ap-groups folded into this Central group (generic
+    # source groups — "default", "NoAuthApGroup", … — all map to one
+    # customer-named group; their serials must all be looked up).
+    extra_source_groups: list[str] = field(default_factory=list)
     ssids: list[SSID] = field(default_factory=list)
     vlans: list[VLAN] = field(default_factory=list)
     roles: list[Role] = field(default_factory=list)

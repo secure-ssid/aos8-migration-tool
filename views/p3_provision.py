@@ -188,6 +188,11 @@ def render():
                 try:
                     client.list_group_names()  # also seeds the group cache
                 except Exception as e:
+                    # the failed check may still have consumed the single-use
+                    # refresh token — persist the rotation before bailing
+                    if persist_rotated_refresh_token(client):
+                        st.info("The Classic refresh token rotated during the "
+                                "check — the new one is saved in this session.")
                     st.error(f"Classic Central access check failed: {e}")
                     st.info("The access token may be expired (~2h lifetime) — "
                             "generate a fresh one in API Gateway → System Apps & Tokens.")

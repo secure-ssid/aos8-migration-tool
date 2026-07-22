@@ -60,9 +60,12 @@ HELP = {
 Steps are idempotent: existing sites/groups/WLANs with matching names are
 reused, so re-running after a partial failure is safe.
 
-- **New Central**: site → auth-server profiles → device groups (one per AP
-  group/zone) → VLANs → SSIDs (overlay SSIDs get role + policy + GRE cluster
-  binding) → firmware compliance → persona + site assignment.
+- **New Central**: site → auth-server profiles (+ server-group for 802.1X)
+  → device groups (one per AP group/zone) → VLANs → SSIDs → firmware
+  compliance. Tunnel/split SSIDs are **deferred**: the gateway cluster only
+  exists after the MCs convert at cutover, so overlay binding is a recorded
+  follow-up on the runbook. Persona + site assignment happen in Step 4
+  (they need claimed APs).
 - **Classic Central**: inventory pre-add (serial+MAC) → AOS 10 UI groups →
   device move → WLANs (`full_wlan`) → firmware compliance → site association.
   *Caveats*: the WLAN APIs are **allowlisted per tenant** (403 → ask your

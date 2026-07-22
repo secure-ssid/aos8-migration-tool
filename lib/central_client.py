@@ -71,7 +71,12 @@ class CentralAPIError(Exception):
 
 def _is_duplicate(err: Exception) -> bool:
     msg = str(err).lower()
-    return "already exists" in msg or "duplicate" in msg
+    # only inspect the response detail — the error prefix contains the URL
+    # path, and a customer-named object ("duplicate-lab") in the path must
+    # not make an unrelated failure read as idempotent success
+    m = re.search(r"failed \d+: (.*)", msg, re.S)
+    detail = m.group(1) if m else msg
+    return "already exists" in detail or "duplicate" in detail
 
 
 def _timezone(timezone_id: str) -> dict:
@@ -138,25 +143,38 @@ class CentralClient:
     # ─────────────────── Auth / HTTP ───────────────────
 
     def authenticate(self) -> bool:
-        resp = self.session.post(
-            TOKEN_URL,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=self.timeout,
-        )
+        try:
+            # plain requests.post, NOT self.session — the session carries the
+            # previous (possibly expired) Bearer header, which must not be
+            # sent to the token endpoint
+            resp = requests.post(
+                TOKEN_URL,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=self.timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            raise CentralAPIError(
+                f"Token request to GreenLake SSO failed ({type(e).__name__}) — "
+                "check network reachability to sso.common.cloud.hpe.com")
         if not resp.ok:
             raise CentralAPIError(
                 f"Token request failed {resp.status_code}: {resp.text[:300]}")
-        self.token = resp.json()["access_token"]
+        try:
+            self.token = resp.json()["access_token"]
+        except (ValueError, KeyError):
+            raise CentralAPIError("Token endpoint returned an unexpected body "
+                                  "(no access_token)")
         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         return True
 
     def _request(self, method: str, path: str, json: Optional[dict] = None,
-                 params: Optional[dict] = None, _retried: bool = False) -> dict:
+                 params: Optional[dict] = None, _auth_retried: bool = False,
+                 _rate_retried: bool = False) -> dict:
         try:
             resp = self.session.request(
                 method, f"{self.base}{path}", json=json, params=params,
@@ -167,13 +185,20 @@ class CentralClient:
         except requests.exceptions.ConnectionError as e:
             raise CentralAPIError(f"{method} {path}: connection failed — check the base URL "
                                   f"and network reachability ({type(e).__name__})")
-        if resp.status_code == 401 and not _retried:
+        if resp.status_code == 401 and not _auth_retried:
+            # separate flags: a 429 backoff followed by a token expiry (or
+            # vice versa) must still get its one retry of the other kind
             self.authenticate()
-            return self._request(method, path, json, params, _retried=True)
-        if resp.status_code == 429 and not _retried:
-            wait = min(int(resp.headers.get("Retry-After", 30)), 120)
-            time.sleep(wait)
-            return self._request(method, path, json, params, _retried=True)
+            return self._request(method, path, json, params,
+                                 _auth_retried=True, _rate_retried=_rate_retried)
+        if resp.status_code == 429 and not _rate_retried:
+            # Retry-After may be an HTTP-date (RFC 7231) — fall back to 30s
+            # rather than crashing on int().
+            retry_after = resp.headers.get("Retry-After", "30").strip()
+            wait = int(retry_after) if retry_after.isdigit() else 30
+            time.sleep(min(wait, 120))
+            return self._request(method, path, json, params,
+                                 _auth_retried=_auth_retried, _rate_retried=True)
         if not resp.ok:
             try:
                 detail = resp.json()
@@ -182,7 +207,12 @@ class CentralClient:
             raise CentralAPIError(f"{method} {path} failed {resp.status_code}: {detail}")
         if not resp.content:
             return {}
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError:
+            # a 2xx with a non-JSON body is still a success — never let a
+            # JSONDecodeError masquerade as a failed call
+            return {"_raw": resp.text[:300]}
         return {"items": body} if isinstance(body, list) else body
 
     def _get(self, path, params=None):
@@ -231,7 +261,8 @@ class CentralClient:
         data = self._get("/network-config/v1/scope-maps")
         entries = data.get("scope-map", [])
         for entry in entries:
-            if entry.get("persona") == "SERVICE_PERSONA":
+            if entry.get("persona") == "SERVICE_PERSONA" \
+                    and entry.get("scope-id") is not None:
                 return str(entry.get("scope-id"))
         # fallback: most frequent scope-id across the map
         counts: dict[str, int] = {}
@@ -245,10 +276,18 @@ class CentralClient:
 
     def map_to_scope(self, resource: str, scope_id: str, persona: str) -> None:
         try:
+            numeric_scope = int(scope_id)
+        except (TypeError, ValueError):
+            # a non-numeric id here means an upstream lookup fell back to a
+            # name — surface a clear error instead of a raw ValueError
+            raise CentralAPIError(
+                f"scope-map {resource}: scope id {scope_id!r} is not numeric "
+                "— the owning scope was probably not resolved correctly")
+        try:
             self._post("/network-config/v1/scope-maps", json={
                 "scope-map": [{
                     "scope-name": str(scope_id),
-                    "scope-id": int(scope_id),
+                    "scope-id": numeric_scope,
                     "persona": persona,
                     "resource": resource,
                 }],
@@ -327,6 +366,13 @@ class CentralClient:
                 break
             except CentralAPIError as e:
                 errs.append(str(e))
+                if _is_duplicate(e):
+                    # the pre-list can miss a just-created site (pagination /
+                    # eventual consistency) — a duplicate error IS the site
+                    for site in self.list_sites(refresh=True):
+                        if self._site_name(site) == name:
+                            return self._site_id(site) or name
+                    return name
                 if "404" in str(e) or "not found" in str(e).lower():
                     continue
                 raise
@@ -465,7 +511,9 @@ class CentralClient:
         try:
             self._post(f"/network-config/v1/layer2-vlan/{vlan_id}", json=body)
         except CentralAPIError as e:
-            if "duplicate" not in str(e).lower() and "exists" not in str(e).lower():
+            # bare "exists" also matches "does not exist" — use the shared
+            # duplicate matcher so only a real duplicate takes the PUT path
+            if not _is_duplicate(e):
                 raise
             self._put(f"/network-config/v1/layer2-vlan/{vlan_id}", json=body)
         self.map_to_scope(f"layer2-vlan/{vlan_id}", scope_id, persona)
@@ -849,12 +897,13 @@ class CentralClient:
                     on_step(label, False)
                 return False
 
-        # Resolve the global scope (needed for roles/policies)
+        # Resolve the global scope — a cheap read that authenticates AND
+        # proves scope-maps access before any write is attempted. (Roles /
+        # policies for a future automated overlay bind would also need it.)
         scope_holder: dict[str, str] = {}
         if not step("Resolve global scope",
                     lambda: scope_holder.update(g=self.get_global_scope_id())):
             return results  # nothing else can proceed
-        global_scope = scope_holder["g"]
 
         # Sites — created in the config phase; resolved from the tenant in the
         # devices phase (needed to assign APs to them).
@@ -875,7 +924,6 @@ class CentralClient:
                 pass
 
         radius_group = ""
-        gw_scope: dict[str, str] = {}
         import re as _re
         _slug = _re.sub(r"[^a-z0-9-]+", "-", cc.customer_name.lower()).strip("-") or "migrated"
         has_enterprise = any(s.auth_type in (AuthType.WPA2_ENTERPRISE,
@@ -916,8 +964,11 @@ class CentralClient:
 
         for group_cfg in cc.groups:
             # serials are keyed by the AOS 8 source group name, not the
-            # (possibly renamed) Central device-group name
-            serials = ap_serials.get(group_cfg.source_group or group_cfg.name, [])
+            # (possibly renamed) Central device-group name; merged generic
+            # groups contribute serials from every folded source group
+            _srcs = ([group_cfg.source_group or group_cfg.name]
+                     + list(group_cfg.extra_source_groups))
+            serials = [s for src in _srcs for s in ap_serials.get(src, [])]
             via = " (via Classic — hybrid)" if classic_client is not None else ""
 
             if do_config:
@@ -955,8 +1006,9 @@ class CentralClient:
                          lambda s=serials, sid=scope_id:
                              self.add_devices_to_group(sid, s))
 
-            if not do_config:
-                # devices phase: only persona + site assignment remain
+            if do_devices:
+                # persona + site assignment belong to the devices phase (they
+                # need claimed APs) — phase="all" runs them too, as documented
                 if serials:
                     step(f"Assign CAMPUS_AP persona → {len(serials)} APs in {group_cfg.name}",
                          lambda s=serials: self.assign_persona(s))
@@ -975,6 +1027,18 @@ class CentralClient:
                         step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
                              lambda s=serials, sn=group_cfg.site_name:
                                  self.assign_devices_to_site(site_ids[sn], s))
+                    else:
+                        # never skip silently mid-cutover — the operator must
+                        # know the APs are not on the site
+                        results.append((
+                            f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
+                            False,
+                            "site not found in the tenant — run the config "
+                            "phase (Step 3) first, or check the API client's "
+                            "site permissions"))
+                        if on_step:
+                            on_step(results[-1][0], False)
+            if not do_config:
                 continue  # skip the config-only VLAN/SSID/firmware block
 
             for vlan in group_cfg.vlans:
@@ -1003,6 +1067,8 @@ class CentralClient:
                         "(duplicate ESSID in group; first definition applies)",
                         True, "",
                     ))
+                    if on_step:
+                        on_step(results[-1][0], True)
                     continue
                 seen_essids.add(ssid.display_name)
                 # external captive portal profile must exist before the SSID
@@ -1013,14 +1079,24 @@ class CentralClient:
                          lambda s=ssid: self.create_captive_portal(
                              cp_profile_name(s), s.captive_portal_url,
                              s.captive_portal_redirect))
+                    if ssid.auth_type is not AuthType.OPEN:
+                        # the SSID body forces OPEN under an external portal
+                        # (the API rejects L2-auth + portal fields together) —
+                        # never let that opmode change go unremarked
+                        results.append((
+                            f"SSID {ssid.display_name} — NOTE: provisioned as "
+                            f"OPEN + external captive portal (source auth "
+                            f"'{ssid.auth_type.value}' is replaced by portal "
+                            "auth; review if L2 encryption was intended)",
+                            True, ""))
+                        if on_step:
+                            on_step(results[-1][0], True)
+                # Tunnel/split SSIDs always defer to the runbook: the gateway
+                # cluster only exists after the MCs convert at cutover, so
+                # there is nothing to bind the overlay to during the config
+                # phase (create_overlay_ssid is kept for a future automated
+                # post-cutover bind).
                 if ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
-                        and cc.gw_cluster_name and gw_scope.get("id"):
-                    step(f"Create overlay SSID: {ssid.display_name} → {group_cfg.name}",
-                         lambda s=ssid, sid=scope_id:
-                             self.create_overlay_ssid(s, sid, global_scope,
-                                                      cc.gw_cluster_name,
-                                                      gw_scope["id"], radius_group))
-                elif ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
                         and cc.gw_cluster_name:
                     results.append((
                         f"Overlay SSID {ssid.display_name} → {group_cfg.name} — "

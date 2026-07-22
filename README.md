@@ -24,10 +24,13 @@ Open http://localhost:8501 in your browser.
 |---|---|
 | 1. Connect & Discover | Pulls AOS 8 config via REST API (or CLI paste fallback) — SSIDs with per-group bindings, auth types/PSKs, AP inventory with serials, VLANs, RADIUS, cluster topology |
 | 2. Preflight Checks | AP model compatibility, firmware train check (8.10 ≥ .0.12 / 8.12 ≥ .0.1), SSID mapping/auth coverage, serial coverage, cluster sequencing warnings |
-| 3. Provision Central | Creates the site, device groups (one per AP group), VLANs, overlay/underlay SSIDs, gateway cluster, auth-server profiles and firmware compliance in **New Central** — every API failure is reported per step |
-| 4. GreenLake Onboarding | Claims the APs into the GLP workspace (serial + wired MAC, async claim with polling) and assigns subscriptions — required for Central to adopt converted APs |
+| 3. Build Config | Creates the site, device groups (one per AP group), VLANs, underlay SSIDs, auth-server profiles (+ 802.1X server-group) and firmware compliance in **New Central** — every API failure is reported per step. Overlay (tunnel) SSIDs and the gateway cluster are **deferred to cutover** (the cluster forms when the MCs convert; the runbook covers the binding) |
+| 4. GreenLake Onboarding | Claims the APs into the GLP workspace (serial + wired MAC, async claim with polling), assigns them to the **Central application instance + region** and a subscription, and at cutover moves them into their device groups with persona + site assignment — required for Central to adopt converted APs |
 | 5. AP Convert Runbook | Customer-specific `ap convert` CLI runbook (single MC, L2 or L3 cluster sequencing) |
 | 6. Validate | Confirms converted APs are online in Central by serial; post-migration checklist |
+
+A step-by-step walkthrough **with screenshots of every step** is in
+[docs/MIGRATION-GUIDE.md](docs/MIGRATION-GUIDE.md).
 
 ## AOS 8 API Access
 
@@ -61,11 +64,11 @@ Provisioning maps AOS 8 constructs onto the New Central model:
 | AOS 8 | New Central |
 |---|---|
 | ap-group | Device group (scope) |
-| virtual-ap (tunnel/split) | Overlay SSID + role/policy + overlay-wlan → GW cluster |
+| virtual-ap (tunnel/split) | Overlay SSID bound to the GW cluster — deferred to cutover (see runbook) |
 | virtual-ap (bridge) | Underlay SSID scope-mapped to the device group |
 | VLAN | layer2-vlan profile scope-mapped to the group |
-| RADIUS server | auth-server library profile |
-| MC cluster | Gateway cluster (in its own `-gws` device group) |
+| RADIUS server | auth-server library profile + server-group (bound to 802.1X SSIDs) |
+| MC cluster | Gateway cluster — formed in Central when the converted MCs join at cutover (manual follow-up recorded in Step 3) |
 
 ## Deployment
 
@@ -113,10 +116,14 @@ How accounts mode works and what to know:
   Passwords are stored scrypt-hashed with a per-user salt; codes are
   short-lived and hashed.
 - **HTTPS via Caddy (recommended).** Passwords/codes traverse the connection.
-  The compose file binds the app to `127.0.0.1:8501`; put **Caddy** in front
-  to terminate HTTPS and reverse-proxy to it — `deploy/Caddyfile` is a ready
-  example (Caddy handles the websockets Streamlit needs automatically). Never
-  serve plain `:8501` to users.
+  The shipped compose file publishes `8501` on **all interfaces** (so a Caddy
+  on a separate host can front it); put **Caddy** in front to terminate HTTPS
+  and reverse-proxy to it — `deploy/Caddyfile` is a ready example (Caddy
+  handles the websockets Streamlit needs automatically). If Caddy runs on the
+  **same** host, change the compose binding to `127.0.0.1:8501:8501`; either
+  way, firewall plain `:8501` from users. **In `proxy` mode the loopback (or
+  proxy-network-only) binding is mandatory** — anyone who can reach `:8501`
+  directly can impersonate any user with one header.
 - **Verification email.** The **From can be any account** (Gmail, throwaway,
   transactional provider — anything that can SMTP-send).
   - **Gmail (easiest + reliable):** `AOS8_SMTP_MODE=relay`,
@@ -153,7 +160,7 @@ mode above is the recommended path.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person `@hpe.com` login; `proxy` = reverse-proxy header; `local` = single user |
+| `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person verified-email login (any domain unless restricted); `proxy` = reverse-proxy header; `local` = single user. Any other value fails closed (the app refuses to serve). |
 | `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode (required in that mode; fail-closed if unset) |
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |

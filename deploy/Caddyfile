@@ -1,7 +1,14 @@
 # Example Caddy config fronting the migration console with automatic HTTPS.
 # Caddy terminates TLS and reverse-proxies to the app; reverse_proxy upgrades
-# websockets automatically (Streamlit needs that). The app stays on
-# 127.0.0.1:8501 (see docker-compose.yml) and is never exposed directly.
+# websockets automatically (Streamlit needs that).
+#
+# NOTE: the shipped docker-compose.yml publishes 8501 on ALL interfaces so a
+# Caddy on a separate host can reach it. If Caddy runs on the SAME host as
+# the app, tighten the compose binding to "127.0.0.1:8501:8501" and keep the
+# reverse_proxy below; otherwise firewall :8501 so only Caddy can reach it.
+# In AOS8_AUTH_MODE=proxy the loopback/proxy-only binding is MANDATORY —
+# direct access to :8501 lets anyone impersonate users via the identity
+# header.
 #
 # Replace the hostname. For a public host with public DNS, Caddy gets a
 # Let's Encrypt cert automatically. For an internal-only host, either use

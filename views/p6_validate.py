@@ -71,7 +71,12 @@ def render():
         if getattr(central_cfg, "destination", "new") == "classic":
             client = build_classic_client()
             with st.spinner("Fetching AP status from classic Central..."):
-                all_aps = client.list_all_aps()
+                try:
+                    all_aps = client.list_all_aps()
+                except Exception as e:
+                    persist_rotated_refresh_token(client)
+                    st.error(f"Could not fetch AP status: {e}")
+                    return
             persist_rotated_refresh_token(client)
         else:
             client = build_central_client()
@@ -97,8 +102,10 @@ def render():
             return str(ap.get("serialNumber") or ap.get("serial") or "").strip().upper()
 
         migrated        = [ap for ap in all_aps if serial_of(ap) in expected]
+        # Classic reports "Up"/"Down"; New Central device status is
+        # "ONLINE"-style — accept both spellings of online
         migrated_online = [ap for ap in migrated
-                           if str(ap.get("status", "")).lower() == "up"]
+                           if str(ap.get("status", "")).lower() in ("up", "online")]
 
         st.divider()
         section_label("Migration status")
