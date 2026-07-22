@@ -161,7 +161,7 @@ def _postman() -> None:
         "(the **GreenLake — auth** request) and paste it into `central_token` / "
         "`glp_token`.")
     st.download_button(
-        "⬇ Download Postman collection (.json)",
+        "Download Postman collection (.json)",
         data=postman.collection_json(),
         file_name="aos8-central-migration.postman_collection.json",
         mime="application/json",

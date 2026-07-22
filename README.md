@@ -11,14 +11,14 @@ running conversion commands in exactly the right order. This tool automates
 the tedious parts and generates the commands for the rest — and it shows you
 everything it's about to do before it does it.
 
-<img src="docs/screenshots/02-connect-discovered.png" alt="Step 1 — a discovered AOS 8 deployment: AP groups, SSIDs, APs with compatibility badges" width="900">
+![Step 1 — a discovered AOS 8 deployment: AP groups, SSIDs, APs with compatibility badges](docs/screenshots/02-connect-discovered.png)
 
 ## New here? Two links
 
-- 🚀 **[Getting Started](docs/GETTING-STARTED.md)** — zero to a full simulated
+- **[Getting Started](docs/GETTING-STARTED.md)** — zero to a full simulated
   migration in 5 minutes, using the built-in test customer. No controller, no
   tenant, no risk.
-- 📖 **[Migration Guide](docs/MIGRATION-GUIDE.md)** — the full operator
+- **[Migration Guide](docs/MIGRATION-GUIDE.md)** — the full operator
   walkthrough for real migrations, with a screenshot and numbered click-path
   for every step.
 
@@ -33,26 +33,23 @@ everything it's about to do before it does it.
 | 5 | **Runbook** | Generates the customer-specific `ap convert` CLI script — single controller, L2 or L3 cluster ordering, gateway strategy included. | No |
 | 6 | **Validate** | Confirms every converted AP is back online in Central, by serial. Closeout checklist. | No |
 
-<details>
-<summary><b>See it in action</b> (click to expand more screenshots)</summary>
+## See it in action
 
 **Preflight tells you what will and won't migrate — before anything is written:**
 
-<img src="docs/screenshots/04-preflight.png" alt="Step 2 — preflight checks" width="900">
+![Step 2 — preflight checks](docs/screenshots/04-preflight.png)
 
 **Provisioning shows a live per-step log — nothing fails silently:**
 
-<img src="docs/screenshots/06-provision-results.png" alt="Step 3 — provisioning results" width="900">
+![Step 3 — provisioning results](docs/screenshots/06-provision-results.png)
 
 **The generated conversion runbook:**
 
-<img src="docs/screenshots/09-runbook.png" alt="Step 5 — ap convert runbook" width="900">
+![Step 5 — ap convert runbook](docs/screenshots/09-runbook.png)
 
 **Validation confirms the migration worked:**
 
-<img src="docs/screenshots/10-validate.png" alt="Step 6 — validation" width="900">
-
-</details>
+![Step 6 — validation](docs/screenshots/10-validate.png)
 
 ## Quick start
 
@@ -63,7 +60,7 @@ pip install -r requirements.txt
 streamlit run app.py          # opens http://localhost:8501
 ```
 
-Then open the **🧪 Load test customer** expander in Step 1 and click through
+Then open the **Load test customer** expander in Step 1 and click through
 the whole wizard with zero infrastructure — the
 [Getting Started guide](docs/GETTING-STARTED.md) walks you through it.
 
@@ -77,7 +74,7 @@ them: [Migration Guide → Credentials setup](docs/MIGRATION-GUIDE.md#credential
 3. **GreenLake workspace access** — usually the same GreenLake client.
 
 Steps 1–2 are read-only; nothing is written anywhere until you press
-**🚀 Provision** in Step 3, and your AOS 8 network keeps running untouched
+**Provision** in Step 3, and your AOS 8 network keeps running untouched
 until you execute the runbook in Step 5.
 
 ## What's supported

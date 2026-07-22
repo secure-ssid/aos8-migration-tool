@@ -46,7 +46,7 @@ Your browser opens http://localhost:8501 and shows Step 1:
 ### 2. Load the built-in test customer
 
 Instead of connecting to a real controller, open the
-**🧪 Load test customer** expander, keep the default scenario, and click
+**Load test customer** expander, keep the default scenario, and click
 **Load test customer**. The wizard fills with a realistic fake deployment
 (2 AP groups, 3 SSIDs, 3 APs, RADIUS, an L2 controller cluster) — every
 object is named `zztest-…` so it's obviously disposable:
@@ -102,7 +102,7 @@ numbered click-path for every step:
 
 **Golden rule:** Steps 1–2 are read-only. You can connect to a production
 controller and run preflight as many times as you like — nothing is changed
-until you click **🚀 Provision** in Step 3, and even that only writes *new*
+until you click **Provision** in Step 3, and even that only writes *new*
 objects to Central (your AOS 8 network keeps running untouched until you run
 the conversion runbook in Step 5).
 
