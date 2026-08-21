@@ -22,6 +22,7 @@ AOS 8 credentials (MC password, PSKs, RADIUS secrets) are never persisted.
 Every public function takes the ``user`` (from lib.identity.current_user()); a
 falsy user means "no identity" and all operations no-op.
 """
+import binascii
 import json
 import os
 from pathlib import Path
@@ -58,13 +59,25 @@ FIELDS = (
 CREDENTIAL_FIELDS = ("central_client_id", "central_secret", "classic_refresh_token")
 
 
+# One-time diagnostic latch: a malformed key otherwise disables persistence
+# with no trace anywhere (the "Remember" toggle simply never renders).
+_key_warned = False
+
+
 def _env_fernet():
+    global _key_warned
     key = os.environ.get(_KEY_ENV)
     if not (Fernet and key):
         return None
     try:
         return Fernet(key.encode())
-    except Exception:
+    except (ValueError, TypeError, binascii.Error) as e:
+        if not _key_warned:
+            _key_warned = True
+            print(f"[credstore] {_KEY_ENV} is not a usable Fernet key ({e}) — "
+                  "credential persistence is DISABLED. Generate one with: "
+                  "python -c \"from cryptography.fernet import Fernet; "
+                  "print(Fernet.generate_key().decode())\"", flush=True)
         return None
 
 
@@ -112,6 +125,13 @@ def available() -> bool:
     return not is_multiuser()
 
 
+def key_invalid() -> bool:
+    """True when AOS8_CREDSTORE_KEY is set but isn't a usable Fernet key.
+    available() is False in that case, so the UI hides the 'Remember' toggle —
+    this lets the view say why instead of leaving an unexplained gap."""
+    return bool(os.environ.get(_KEY_ENV)) and _env_fernet() is None
+
+
 def _path(user: str) -> Path:
     return CRED_ROOT / user_slug(user) / "credentials.json"
 
@@ -120,11 +140,15 @@ def exists(user) -> bool:
     return bool(user) and _path(user).is_file()
 
 
-def load(user) -> dict:
-    """Saved creds for this user (known, non-empty fields only), or {} if
-    absent/unreadable/persistence-disabled."""
+def load_status(user) -> tuple[dict, str]:
+    """(saved fields, status) where status is 'ok' | 'absent' | 'undecryptable'.
+
+    'undecryptable' — a file exists but this key can't read it, which in
+    practice means AOS8_CREDSTORE_KEY changed. That MUST be distinguishable
+    from 'absent': a caller that merges onto {} would silently overwrite every
+    previously-saved field with whatever this render happens to hold."""
     if not user:
-        return {}
+        return {}, "absent"
     f = _fernet(create=False)
     if f is None:
         # Upgrade path: a pre-multiuser plaintext file exists but no key yet —
@@ -132,48 +156,82 @@ def load(user) -> dict:
         if not is_multiuser() and _LEGACY_PLAINTEXT.is_file():
             f = _fernet(create=True)
         if f is None:
-            return {}
+            return {}, "absent"
     _migrate_legacy(user, f)
     try:
-        data = json.loads(f.decrypt(_path(user).read_bytes()))
-    except (FileNotFoundError, OSError, ValueError, InvalidToken):
-        return {}
+        raw = _path(user).read_bytes()
+    except (FileNotFoundError, OSError):
+        return {}, "absent"
+    try:
+        data = json.loads(f.decrypt(raw))
+    except InvalidToken:
+        return {}, "undecryptable"
+    except ValueError:
+        # decrypted fine, contents are garbage — the key is right, so the file
+        # is safe to rewrite; that is 'absent', not a key mismatch
+        return {}, "absent"
     if not isinstance(data, dict):
-        return {}
-    return {k: v for k, v in data.items() if k in FIELDS and v}
+        return {}, "absent"
+    return {k: v for k, v in data.items() if k in FIELDS and v}, "ok"
 
 
-def save_from_session(session, user) -> None:
+def load(user) -> dict:
+    """Saved creds for this user (known, non-empty fields only), or {} if
+    absent/unreadable/persistence-disabled. Callers that must tell a missing
+    file apart from a key mismatch use load_status()."""
+    return load_status(user)[0]
+
+
+def save_from_session(session, user) -> bool:
     """Write the persistable fields from a mapping (Streamlit session_state) for
     this user, encrypted.
 
     No-ops unless a real credential is present (base URLs alone don't count) and
     a cipher is available, and MERGES onto any existing file so a field that's
-    momentarily blank this render never erases a previously-saved value."""
+    momentarily blank this render never erases a previously-saved value.
+
+    Returns False only when credentials the operator asked to keep were LOST —
+    the volume rejected the write, or an existing file can't be decrypted (a
+    changed AOS8_CREDSTORE_KEY) so merging would destroy it. A deliberate
+    no-op (no identity, persistence disabled, nothing worth saving yet)
+    returns True: there is nothing for the caller to warn about."""
     if not user:
-        return
+        return True
     f = _fernet(create=True)
     if f is None:
-        return
+        return True
     fresh = {k: session.get(k) for k in FIELDS if session.get(k)}
     # hybrid_tenant=False is meaningful (the operator disarmed the gate) — the
     # truthy filter above would otherwise leave a stale True merged in the file
     if "hybrid_tenant" in session:
         fresh["hybrid_tenant"] = bool(session.get("hybrid_tenant"))
     if not any(session.get(k) for k in CREDENTIAL_FIELDS):
-        return  # only defaults/URLs present — nothing worth saving yet
-    data = load(user)        # merge: keep already-saved fields not in this render
+        return True  # only defaults/URLs present — nothing worth saving yet
+    # merge: keep already-saved fields not in this render
+    data, status = load_status(user)
+    if status == "undecryptable":
+        return False  # refuse to overwrite creds we can't read back
     data.update(fresh)
     p = _path(user)
-    p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    blob = f.encrypt(json.dumps(data).encode())
     tmp = p.with_name("credentials.json.tmp")
-    # restrictive perms from creation, then atomic rename into place
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(blob)
-    os.replace(tmp, p)
-    os.chmod(p, 0o600)
+    try:
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        blob = f.encrypt(json.dumps(data).encode())
+        # restrictive perms from creation, then atomic rename into place
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(blob)
+        os.replace(tmp, p)
+        os.chmod(p, 0o600)
+    except OSError:
+        # full or read-only volume — the caller tells the operator instead of
+        # replacing Step 1 with a traceback
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def clear(user) -> None:

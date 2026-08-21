@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 import requests
 
+from .http_base import normalize_base
 from .models import CentralConfig, ForwardMode, AuthType, RadiusServer, SSID
 
 TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
@@ -56,6 +57,9 @@ def secret_looks_unusable(s: Optional[str]) -> bool:
 OPMODE = {
     AuthType.OPEN: "OPEN",
     AuthType.MAC: "OPEN",
+    # ENHANCED_OPEN is a first-class wlan-ssid.opmode value in the New Central
+    # Configuration API — OWE migrates encrypted, not as a bare OPEN SSID.
+    AuthType.OWE: "ENHANCED_OPEN",
     AuthType.WPA2_PSK: "WPA2_PERSONAL",
     AuthType.WPA3_SAE: "WPA3_SAE",
     AuthType.WPA2_ENTERPRISE: "WPA2_ENTERPRISE",
@@ -113,21 +117,10 @@ def _norm_country(country: str) -> str:
     return _COUNTRY_NORM.get(c.lower(), c) if c else "United States"
 
 
-
-def _normalize_base(url: str) -> str:
-    """Ensure the base URL has a scheme and no trailing slash. Operators often
-    paste a bare host (internal.api.central.arubanetworks.com) — default to
-    https:// so requests don't fail with 'No scheme supplied'."""
-    url = (url or "").strip().rstrip("/")
-    if url and not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
-
-
 class CentralClient:
     def __init__(self, base_url: str, client_id: str, client_secret: str,
                  timeout: int = 30):
-        self.base = _normalize_base(base_url)
+        self.base = normalize_base(base_url)
         self.client_id = client_id
         self.client_secret = client_secret
         self.timeout = timeout
@@ -139,6 +132,12 @@ class CentralClient:
         self._sites_cache: Optional[list[dict]] = None
         self._ensured_roles: set[str] = set()
         self._ensured_policies: set[str] = set()
+        # GreenLake tokens carry expires_in and no refresh token — track it so
+        # a long provision run refreshes before a write fails on a 401.
+        self._token_expiry: float = 0.0
+        # which /network-config API version this tenant answered on (ordering
+        # hint for _config_request; see its docstring)
+        self._config_version: Optional[str] = None
 
     # ─────────────────── Auth / HTTP ───────────────────
 
@@ -165,16 +164,27 @@ class CentralClient:
             raise CentralAPIError(
                 f"Token request failed {resp.status_code}: {resp.text[:300]}")
         try:
-            self.token = resp.json()["access_token"]
+            body = resp.json()
+            self.token = body["access_token"]
         except (ValueError, KeyError):
             raise CentralAPIError("Token endpoint returned an unexpected body "
                                   "(no access_token)")
+        try:
+            ttl = int(body.get("expires_in", 3600))
+        except (TypeError, ValueError):
+            ttl = 3600
+        self._token_expiry = time.time() + ttl - 60   # 60s clock skew
         self.session.headers.update({"Authorization": f"Bearer {self.token}"})
         return True
 
     def _request(self, method: str, path: str, json: Optional[dict] = None,
                  params: Optional[dict] = None, _auth_retried: bool = False,
                  _rate_retried: bool = False) -> dict:
+        # Proactive refresh. The `self._token_expiry and` guard is load-bearing:
+        # a client whose token was injected (tests, restored session) has 0.0
+        # here and must not fire a spurious token request.
+        if self._token_expiry and time.time() >= self._token_expiry:
+            self.authenticate()
         try:
             resp = self.session.request(
                 method, f"{self.base}{path}", json=json, params=params,
@@ -245,20 +255,57 @@ class CentralClient:
                         or data.get("data") or [])
             if not isinstance(page, list):
                 page = [page] if page else []
-            # guard against endpoints that ignore offset and echo the same page
+            # An endpoint that ignores offset echoes page 1 forever. Truncating
+            # here silently breaks every downstream idempotency check ("object
+            # not in the list" -> re-create), so this is an error, not a result.
             if page and page[0] == first_of_prev_page:
-                return items
+                raise CentralAPIError(
+                    f"GET {path}: server ignored offset={offset} (page repeated) "
+                    "— cannot enumerate completely")
             first_of_prev_page = page[0] if page else None
             items.extend(page)
             if len(page) < page_size:
                 return items
             offset += page_size
-        return items
+        raise CentralAPIError(
+            f"GET {path}: more than {max_pages * page_size} items — pagination cap hit")
+
+    # HPE's published v26.04 reference puts scope management on /v1 and feature
+    # configuration on /v1alpha1, while this repo's paths were runtime-verified
+    # against a live tenant serving /v1. The surface is Select Availability, so
+    # both can be true — try one, fall through on 404 ONLY, and remember which
+    # version answered so the rest of the run skips the dead route.
+    _CONFIG_VERSIONS = ("v1", "v1alpha1")
+
+    def _config_request(self, method: str, resource: str,
+                        json: Optional[dict] = None,
+                        params: Optional[dict] = None) -> dict:
+        order = self._CONFIG_VERSIONS
+        if self._config_version:
+            order = (self._config_version,) + tuple(
+                v for v in self._CONFIG_VERSIONS if v != self._config_version)
+        errs = []
+        for version in order:
+            path = f"/network-config/{version}/{resource}"
+            try:
+                out = self._request(method, path, json=json, params=params)
+            except CentralAPIError as e:
+                # a 404 means "this tenant doesn't serve that version"; a 400
+                # duplicate or a 403 is a real answer and must propagate
+                if re.search(r"failed 404:", str(e)):
+                    errs.append(str(e))
+                    continue
+                raise
+            self._config_version = version
+            return out
+        raise CentralAPIError(
+            f"{method} /network-config/<version>/{resource}: no configuration "
+            "API version answered — " + " | ".join(errs))
 
     # ─────────────────── Scopes ───────────────────
 
     def get_global_scope_id(self) -> str:
-        data = self._get("/network-config/v1/scope-maps")
+        data = self._config_request("GET", "scope-maps")
         entries = data.get("scope-map", [])
 
         def _scope_of(entry: dict) -> str:
@@ -293,7 +340,7 @@ class CentralClient:
                 f"scope-map {resource}: scope id {scope_id!r} is not numeric "
                 "— the owning scope was probably not resolved correctly")
         try:
-            self._post("/network-config/v1/scope-maps", json={
+            self._config_request("POST", "scope-maps", json={
                 "scope-map": [{
                     "scope-name": str(scope_id),
                     "scope-id": numeric_scope,
@@ -320,23 +367,29 @@ class CentralClient:
     def list_sites(self, refresh: bool = False) -> list[dict]:
         # Read from the config surface (works across tenants incl. hybrid).
         # v1alpha1 is where creates land, so prefer it, then v1, then the
-        # monitoring route. These endpoints ignore limit/offset — fetch whole.
+        # monitoring route.
         if self._sites_cache is None or refresh:
-            self._sites_cache = []
-            for path in ("/network-config/v1alpha1/sites", "/network-config/v1/sites"):
+            errs = []
+            for path in ("/network-config/v1alpha1/sites",
+                         "/network-config/v1/sites",
+                         "/network-monitoring/v1/sites"):
                 try:
-                    # documented page limit is 100 — paginate; _paginate's
-                    # repeat-page guard keeps builds that ignore offset safe
+                    # documented page limit is 100 — paginate; _paginate now
+                    # RAISES on a build that ignores offset rather than
+                    # truncating, so a partial list can't be cached
                     self._sites_cache = self._paginate(path, page_size=100)
                     break
-                except CentralAPIError:
-                    continue
+                except CentralAPIError as e:
+                    errs.append(str(e))
+                    if re.search(r"failed 404:", str(e)):
+                        continue    # wrong route for this tenant — try the next
+                    # a 403/500/timeout is a real answer ABOUT this tenant.
+                    # Caching [] here makes create_site re-POST and the devices
+                    # phase tell the operator to re-run a step that succeeded.
+                    raise
             else:
-                try:
-                    self._sites_cache = self._paginate("/network-monitoring/v1/sites",
-                                                       page_size=100)
-                except CentralAPIError:
-                    self._sites_cache = []
+                raise CentralAPIError(
+                    "Site listing failed on all routes: " + " | ".join(errs))
         return self._sites_cache
 
     def create_site(self, name: str, address: str = "", city: str = "",
@@ -383,7 +436,9 @@ class CentralClient:
                         if self._site_name(site) == name:
                             return self._site_id(site) or name
                     return name
-                if "404" in str(e) or "not found" in str(e).lower():
+                # match the status code the client itself formats ("failed 404:"),
+                # not any '404' that happens to appear in a site name or detail
+                if re.search(r"failed 404:", str(e)):
                     continue
                 raise
         if resp is None:
@@ -519,13 +574,13 @@ class CentralClient:
                     persona: str = "CAMPUS_AP") -> None:
         body = {"vlan": vlan_id, "name": name or f"vlan_{vlan_id}", "enable": True}
         try:
-            self._post(f"/network-config/v1/layer2-vlan/{vlan_id}", json=body)
+            self._config_request("POST", f"layer2-vlan/{vlan_id}", json=body)
         except CentralAPIError as e:
             # bare "exists" also matches "does not exist" — use the shared
             # duplicate matcher so only a real duplicate takes the PUT path
             if not _is_duplicate(e):
                 raise
-            self._put(f"/network-config/v1/layer2-vlan/{vlan_id}", json=body)
+            self._config_request("PUT", f"layer2-vlan/{vlan_id}", json=body)
         self.map_to_scope(f"layer2-vlan/{vlan_id}", scope_id, persona)
 
     # ─────────────────── Roles / policies (overlay prereqs) ───────────────────
@@ -679,11 +734,11 @@ class CentralClient:
         CURRENT config on re-runs — a plain duplicate-swallow would leave a
         stale binding (e.g. an SSID still pointing at a previous server-group)."""
         try:
-            self._post(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+            self._config_request("POST", f"wlan-ssids/{encoded}", json=body)
         except CentralAPIError as e:
             if not _is_duplicate(e):
                 raise
-            self._patch(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+            self._config_request("PATCH", f"wlan-ssids/{encoded}", json=body)
 
     def create_underlay_ssid(self, ssid: SSID, scope_id: str,
                              server_group: str = "") -> None:
@@ -714,12 +769,12 @@ class CentralClient:
         # -groups reuses the object); scope-maps below still bind this group.
         self._upsert_ssid(encoded, body)
         # the API silently drops default-role on POST — re-apply
-        self._patch(f"/network-config/v1/wlan-ssids/{encoded}",
-                    json={"default-role": name})
+        self._config_request("PATCH", f"wlan-ssids/{encoded}",
+                             json={"default-role": name})
 
         # bind to the gateway cluster (GRE tunnel)
-        self._swallow_duplicate(lambda: self._post(
-            f"/network-config/v1/overlay-wlan/{encoded}", json={
+        self._swallow_duplicate(lambda: self._config_request(
+            "POST", f"overlay-wlan/{encoded}", json={
                 "profile": name,
                 "overlay-profile-type": "WIRELESS_PROFILE",
                 "essid-name": name,
@@ -808,7 +863,9 @@ class CentralClient:
         except CentralAPIError as e:
             # compliance already set for this scope → PATCH to update the
             # version (412 precondition OR a 400 "duplicate/already exists")
-            if "412" not in str(e) and not _is_duplicate(e):
+            # match the status code the client itself formats ("failed 412:"),
+            # not any '412' appearing in a version string or scope id
+            if not re.search(r"failed 412:", str(e)) and not _is_duplicate(e):
                 raise
             self._patch("/network-config/v1alpha1/firmware-compliance",
                         json=body, params=params)
@@ -931,8 +988,13 @@ class CentralClient:
             try:
                 for site in self.list_sites(refresh=True):
                     site_ids[self._site_name(site)] = self._site_id(site)
-            except Exception:
-                pass
+            except Exception as e:
+                # a failed site read must not read as "the tenant has no sites"
+                # — every AP would then fall into the misleading "run Step 3
+                # first" branch mid-cutover
+                results.append(("Resolve sites in tenant", False, str(e)))
+                if on_step:
+                    on_step(results[-1][0], False)
 
         radius_group = ""
         _source_sg_names: set = set()

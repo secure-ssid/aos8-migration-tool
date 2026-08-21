@@ -5,7 +5,7 @@ auth servers, firmware compliance.
 import streamlit as st
 
 from lib.session_clients import (
-    build_central_client, build_classic_client, persist_rotated_refresh_token,
+    build_central_client, build_classic_client, persist_classic_tokens,
     use_classic_for_moves,
 )
 from lib.styles import (
@@ -190,7 +190,7 @@ def render():
                 except Exception as e:
                     # the failed check may still have consumed the single-use
                     # refresh token — persist the rotation before bailing
-                    if persist_rotated_refresh_token(client):
+                    if persist_classic_tokens(client):
                         st.info("The Classic refresh token rotated during the "
                                 "check — the new one is saved in this session.")
                     st.error(f"Classic Central access check failed: {e}")
@@ -199,12 +199,17 @@ def render():
                     return
             st.success("Classic Central reachable")
             ap_macs = {ap.serial: ap.mac for ap in customer.aps if ap.serial and ap.mac}
-            with st.spinner("Provisioning classic Central..."):
-                results = client.provision(central_cfg, ap_serials=ap_serials,
-                                           ap_macs=ap_macs, on_step=on_step)
-            if persist_rotated_refresh_token(client):
-                st.info("The refresh token rotated during this run — the new one is "
-                        "saved in this session. Update wherever you store it.")
+            try:
+                with st.spinner("Provisioning classic Central..."):
+                    results = client.provision(central_cfg, ap_serials=ap_serials,
+                                               ap_macs=ap_macs, on_step=on_step)
+            finally:
+                # a mid-run 401-refresh rotates the single-use token even when
+                # provisioning then fails — persist on EVERY exit path or the
+                # spent token is all that survives
+                if persist_classic_tokens(client) and client.refresh_token_rotated:
+                    st.info("The refresh token rotated during this run — the new one is "
+                            "saved in this session. Update wherever you store it.")
         else:
             client = build_central_client()
             with st.spinner("Authenticating with New Central (GreenLake SSO)..."):
@@ -227,13 +232,17 @@ def render():
                 st.warning("Tenant is marked hybrid but no usable Classic token is "
                            "registered — device-group create/move will fail. Add it "
                            "in Step 1 → 'Hybrid cluster?' before provisioning.")
-            with st.spinner("Building configuration (no APs are touched)..."):
-                results = client.provision(central_cfg, ap_serials=ap_serials,
-                                           on_step=on_step, classic_client=classic_client,
-                                           phase="config")
-            if classic_client is not None and persist_rotated_refresh_token(classic_client):
-                st.info("The Classic refresh token rotated during this run — the new "
-                        "one is saved in this session.")
+            try:
+                with st.spinner("Building configuration (no APs are touched)..."):
+                    results = client.provision(central_cfg, ap_serials=ap_serials,
+                                               on_step=on_step, classic_client=classic_client,
+                                               phase="config")
+            finally:
+                if (classic_client is not None
+                        and persist_classic_tokens(classic_client)
+                        and classic_client.refresh_token_rotated):
+                    st.info("The Classic refresh token rotated during this run — the new "
+                            "one is saved in this session.")
 
         audit.record(
             "provision",

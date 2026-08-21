@@ -65,6 +65,17 @@ def main():
     except Exception as e:
         print(f"node_hierarchy failed: {e}")
 
+    # node_hierarchy appears in no HPE published AOS 8 reference; `show
+    # switches` is HPE's documented way to enumerate the hierarchy, so dump it
+    # too — an empty node list must never be read as "no config exists".
+    print("\n===== showcommand: show switches (documented node enumeration) =====")
+    try:
+        r = s.get(f"{base}/v1/configuration/showcommand",
+                  params={"UIDARUBA": uid, "command": "show switches"}, timeout=30)
+        print(json.dumps(r.json(), indent=2)[:3000])
+    except Exception as e:
+        print(f"show switches failed: {e}")
+
     print(f"\nprobing nodes: {nodes}")
 
     for node in nodes:
@@ -73,7 +84,15 @@ def main():
             try:
                 r = s.get(f"{base}/v1/configuration/object/{obj}",
                           params={"UIDARUBA": uid, "config_path": node}, timeout=15)
-                data = r.json()
+                payload = r.json()
+                gr = payload.get("_global_result") or {}
+                if gr and str(gr.get("status", "0")) != "0":
+                    # HTTP 200 + an error payload — this is the shape that made
+                    # a wrong config_path look like an empty controller
+                    print(f"\n--- {obj}: _global_result ERROR "
+                          f"{gr.get('status_str') or gr} ---")
+                    continue
+                data = payload
                 if isinstance(data.get("_data"), dict):
                     data = data["_data"]
                 items = data.get(obj, [])

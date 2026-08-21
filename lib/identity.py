@@ -38,7 +38,10 @@ LOCAL_USER = "local@localhost"
 
 
 def identity_header() -> str:
-    return os.environ.get("AOS8_IDENTITY_HEADER", _DEFAULT_IDENTITY_HEADER).strip()
+    # `or` not a get() default: the deployment passes the whole .env into the
+    # container, so an unset var arrives as an EMPTY string, and an empty
+    # header name would silently match nothing (proxy mode never authenticates).
+    return os.environ.get("AOS8_IDENTITY_HEADER", "").strip() or _DEFAULT_IDENTITY_HEADER
 
 
 SHARED_USER = "team"
@@ -75,6 +78,29 @@ def check_app_password(password: str) -> bool:
     # input, which would crash the login gate instead of rejecting it
     return hmac.compare_digest((password or "").encode("utf-8"),
                                expected.encode("utf-8"))
+
+
+# The literal shipped in .env.example. Booting on it is the same as having no
+# password at all — compose's ${AOS8_APP_PASSWORD:?} only checks non-emptiness.
+_PLACEHOLDER_APP_PASSWORD = "change-me-to-a-strong-shared-password"
+MIN_APP_PASSWORD_LEN = 16
+
+
+def app_password_weak() -> str | None:
+    """Why the configured shared password must not be served on, or None when
+    it is acceptable. Shared-secret mode has no per-user lockout to fall back
+    on (only the process-wide throttle below), so a guessable value is the
+    whole security of the deployment."""
+    pw = os.environ.get("AOS8_APP_PASSWORD", "")
+    if not pw:
+        return "AOS8_APP_PASSWORD is not set"
+    if pw == _PLACEHOLDER_APP_PASSWORD:
+        return ("AOS8_APP_PASSWORD is still the placeholder from .env.example "
+                f"({_PLACEHOLDER_APP_PASSWORD!r})")
+    if len(pw) < MIN_APP_PASSWORD_LEN:
+        return (f"AOS8_APP_PASSWORD is only {len(pw)} characters — at least "
+                f"{MIN_APP_PASSWORD_LEN} are required")
+    return None
 
 
 # Shared-password mode has no per-user record to hang a lockout on, so the
@@ -130,7 +156,9 @@ def current_user() -> str | None:
     refuse to proceed / show the login gate."""
     mode = auth_mode()
     if mode == "local":
-        return os.environ.get("AOS8_LOCAL_USER", LOCAL_USER).strip().lower()
+        # `or` (not a get() default): an unset var arrives from .env as an
+        # EMPTY string, and an empty principal is falsy = "not signed in".
+        return os.environ.get("AOS8_LOCAL_USER", "").strip().lower() or LOCAL_USER
     if mode == "password":
         return SHARED_USER if st.session_state.get("_authenticated") else None
     if mode == "accounts":

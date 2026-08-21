@@ -9,7 +9,7 @@ from lib import audit
 from lib.glp_client import GLPClient
 from lib.session_clients import (
     build_central_client, build_classic_client, use_classic_for_moves,
-    persist_rotated_refresh_token,
+    persist_classic_tokens,
 )
 from lib.testdata import TEST_PREFIX
 from lib.styles import (
@@ -247,37 +247,38 @@ def render():
             with st.spinner("Reading workspace inventory..."):
                 existing = set()
                 assigned_app = None  # app id+region from a device already assigned
-                offset = 0
-                while True:
-                    page = client.list_devices(limit=100, offset=offset)
-                    for d in page:
-                        sn = str(d.get("serialNumber", "")).upper()
-                        if sn:
-                            existing.add(sn)
-                        if assigned_app is None:
-                            app = d.get("application")
-                            aid = None
-                            if isinstance(app, dict):
-                                aid = app.get("id") or app.get("applicationId")
-                            elif isinstance(app, str) and app:
-                                aid = app
-                            aid = aid or d.get("applicationId")
-                            if aid:
-                                region = (d.get("region")
-                                          or (app.get("region") if isinstance(app, dict) else "")
-                                          or "")
-                                nm = (app.get("name") if isinstance(app, dict) else "") \
-                                    or f"Central (from {d.get('deviceType','assigned device')})"
-                                assigned_app = {"id": aid, "name": nm, "region": region,
-                                                "verified": True}
-                    if len(page) < 100:
-                        break
-                    offset += 100
+                for d in client.list_all_devices():
+                    sn = str(d.get("serialNumber", "")).upper()
+                    if sn:
+                        existing.add(sn)
+                    if assigned_app is None:
+                        app = d.get("application")
+                        aid = None
+                        if isinstance(app, dict):
+                            aid = app.get("id") or app.get("applicationId")
+                        elif isinstance(app, str) and app:
+                            aid = app
+                        aid = aid or d.get("applicationId")
+                        if aid:
+                            region = (d.get("region")
+                                      or (app.get("region") if isinstance(app, dict) else "")
+                                      or "")
+                            nm = (app.get("name") if isinstance(app, dict) else "") \
+                                or f"Central (from {d.get('deviceType','assigned device')})"
+                            assigned_app = {"id": aid, "name": nm, "region": region,
+                                            "verified": True}
                 subs = client.list_all_subscriptions()
+                sm_error = ""
                 try:
                     sms = client.list_service_managers()
-                except Exception:
+                except Exception as e:
+                    # an application id read off an already-assigned device can
+                    # still carry this step — but never silently: a 403 here is
+                    # a permission fix, not "no Central instances"
                     sms = []
+                    sm_error = str(e)
+            if sm_error:
+                st.warning(f"Could not list Central application instances: {sm_error}")
             # an id read off an already-assigned device is GROUND TRUTH (GreenLake
             # accepted it) — prefer it over the service-catalog provision id
             if assigned_app:
@@ -319,7 +320,7 @@ def render():
                 with st.status(f"Claiming {len(payload)} devices (async — can take a few "
                                "minutes)...", expanded=True) as status_box:
                     task_id = client.add_devices(payload)
-                    client.poll_task(task_id, on_poll=lambda attempt, s: status_box.update(
+                    claim_op = client.poll_task(task_id, on_poll=lambda attempt, s: status_box.update(
                         label=f"Claiming {len(payload)} devices — poll {attempt}, "
                               f"status: {s}"))
                     # Never trust the async-op body shape alone: reconcile the
@@ -329,8 +330,12 @@ def render():
                     in_workspace = client.workspace_serials()
                 ok = sorted(submitted & in_workspace)
                 failed = sorted(submitted - in_workspace)
+                # a SUCCEEDED batch can still carry a per-device breakdown —
+                # GLP's own reason is more precise than the inventory diff
+                rejected = client.failed_serials(claim_op)
                 st.session_state["glp_existing"] = sorted(in_workspace)
-                st.session_state["glp_claim_result"] = {"ok": ok, "failed": failed}
+                st.session_state["glp_claim_result"] = {"ok": ok, "failed": failed,
+                                                        "rejected": rejected}
                 audit.record(
                     "claim",
                     user=st.session_state.get("_user"),
@@ -353,12 +358,17 @@ def render():
     claim_result = st.session_state.get("glp_claim_result")
     if claim_result:
         ok_list, failed = claim_result["ok"], claim_result["failed"]
+        rejected = claim_result.get("rejected") or []
+        if rejected:
+            st.warning(f"GreenLake explicitly rejected {len(rejected)} of the "
+                       "submitted serials in an otherwise successful batch:")
+            st.code("\n".join(str(s) for s in rejected), language="text")
         if failed:
             st.warning(f"Verified against the workspace — claimed: {len(ok_list)}, "
                        f"NOT in workspace: {len(failed)}. These must be resolved "
                        "before their APs are converted:")
             st.code("\n".join(str(s) for s in failed), language="text")
-        else:
+        elif not rejected:
             st.success(f"Verified: all {len(ok_list)} device(s) are in the workspace.")
 
     # Only CLAIMING is skippable (CSV / GreenLake UI) — for New Central the
@@ -533,12 +543,17 @@ def render():
                 with st.spinner("Authenticating with New Central..."):
                     client.authenticate()
                 classic = build_classic_client() if use_classic_for_moves() else None
-                with st.spinner("Moving APs and assigning persona/site..."):
-                    results = client.provision(central_cfg, ap_serials=ap_serials,
-                                               on_step=on_step, classic_client=classic,
-                                               phase="devices")
-                if classic is not None:
-                    persist_rotated_refresh_token(classic)
+                try:
+                    with st.spinner("Moving APs and assigning persona/site..."):
+                        results = client.provision(central_cfg, ap_serials=ap_serials,
+                                                   on_step=on_step, classic_client=classic,
+                                                   phase="devices")
+                finally:
+                    # the classic refresh token is single-use: persist it on the
+                    # failure path too, or the spent one is all that survives and
+                    # the session is permanently stranded
+                    if classic is not None:
+                        persist_classic_tokens(classic)
                 audit.record(
                     "cutover",
                     user=st.session_state.get("_user"),

@@ -1,5 +1,5 @@
 from lib.models import (
-    AP, APGroup, AuthType, CustomerConfig, ForwardMode, SSID, VLAN,
+    APGroup, AuthType, CustomerConfig, ForwardMode, SSID, VLAN,
 )
 from lib.translator import translate
 

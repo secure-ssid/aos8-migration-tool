@@ -28,6 +28,7 @@ VARIABLES = [
     ("ssid_name", "Corp", "SSID / wlan-ssid name"),
     ("group", "ap-group-1", "Device group / AP group name"),
     ("group_scope_id", "", "Device group scopeId (from List device groups)"),
+    ("gw_cluster", "", "Gateway cluster name (overlay/tunnel SSID binding)"),
     ("site_scope_id", "", "Site scopeId (from List sites)"),
     ("serial", "CNABC12345", "AP serial number"),
     ("device_uuid", "", "GLP device UUID (resolve from serial first)"),
@@ -101,19 +102,49 @@ GROUPS = [
             {"name": "Create SSID (wlan-ssid)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/wlan-ssids/{{ssid_name}}",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"ssid-name": "{{ssid_name}}", "forward-mode": "FORWARD_MODE_BRIDGE"}},
-             "desc": "Bridge = underlay; tunnel uses FORWARD_MODE_L2 + an overlay-wlan binding."},
+             "body": {"mode": "raw", "data": {
+                 "ssid": "{{ssid_name}}",
+                 "enable": True,
+                 "forward-mode": "FORWARD_MODE_BRIDGE",
+                 "opmode": "WPA2_PERSONAL",
+                 "vlan-selector": "VLAN_RANGES",
+                 "vlan-id-range": ["100"],
+                 "rf-band": "BAND_ALL",
+                 "essid": {"use-alias": False, "name": "{{ssid_name}}"},
+                 "hide-ssid": False}},
+             "desc": "Bridge = underlay; tunnel uses FORWARD_MODE_L2 + an overlay-wlan "
+                     "binding. The name goes in BOTH 'ssid' and the 'essid' object — "
+                     "there is no 'ssid-name' member. The tool also sends data rates, "
+                     "radio capabilities, DTIM and WMM; PSK SSIDs add "
+                     "'personal-security', 802.1X SSIDs add 'dot1x' + "
+                     "'auth-server-group'."},
             {"name": "Create overlay-wlan (tunnel SSID -> GW cluster)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/overlay-wlan/{{ssid_name}}",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"ssid": "{{ssid_name}}"}},
-             "desc": "Reference only — the tool DEFERS overlay binding to cutover "
-                     "(the GW cluster doesn't exist until the MCs convert); it's "
-                     "listed as a manual follow-up on the runbook."},
+             "body": {"mode": "raw", "data": {
+                 "profile": "{{ssid_name}}",
+                 "overlay-profile-type": "WIRELESS_PROFILE",
+                 "essid-name": "{{ssid_name}}",
+                 "gw-cluster-list": [{
+                     "cluster-redundancy-type": "PRIMARY",
+                     "cluster": "{{gw_cluster}}",
+                     "cluster-scope-id": "{{group_scope_id}}",
+                     "cluster-type": "CLUSTER_ID",
+                     "tunnel-type": "GRE"}]}},
+             "desc": "The tool DOES make this call during Step 3 (config phase) for "
+                     "tunnel/split SSIDs, and cleanup deletes it. Note HPE's published "
+                     "overlay-wlan schema instead uses the bulk key 'ssid-cluster' with "
+                     "a 'gw-cluster-list[]' and has no 'essid-name' member — on a 400 "
+                     "here, verify the shape against the live tenant before assuming "
+                     "this entry is stale."},
             {"name": "Create scope-map (bind resource->scope)", "method": "POST",
              "url": "{{central_base}}/network-config/v1/scope-maps",
              "headers": {"Authorization": "Bearer {{central_token}}"},
-             "body": {"mode": "raw", "data": {"scope-map": [{"scope-name": "{{group}}", "scope-id": 0, "persona": "CAMPUS_AP", "resource": "wlan-ssids/{{ssid_name}}"}]}}},
+             "body": {"mode": "raw", "data": {"scope-map": [{"scope-name": "{{group_scope_id}}", "scope-id": 12345, "persona": "CAMPUS_AP", "resource": "wlan-ssids/{{ssid_name}}"}]}},
+             "desc": "'scope-name' is the NUMERIC scope id as a string (not the group "
+                     "name), and 'scope-id' is the same id as an int. HPE's schema and "
+                     "pycentral send scope-name/persona/resource only — the extra "
+                     "'scope-id' is this tool's divergence; see docs/API-NOTES.md."},
             {"name": "Set firmware compliance", "method": "POST",
              "url": "{{central_base}}/network-config/v1alpha1/firmware-compliance"
                     "?scope-id={{group_scope_id}}&object-type=LOCAL&device-function=CAMPUS_AP",

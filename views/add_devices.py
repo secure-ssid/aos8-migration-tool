@@ -25,7 +25,7 @@ from lib import credstore
 from lib.aos8_parser import _parse_ap_database
 from lib.glp_client import GLPClient
 from lib.session_clients import (build_central_client, build_classic_client,
-                                 persist_rotated_refresh_token,
+                                 persist_classic_tokens,
                                  use_classic_for_moves)
 from lib.styles import (OK, FAIL, WARN, FAINT, TEXT, HPE_GREEN,
                         page_header, section_label, esc, mono_caption)
@@ -497,8 +497,13 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
     try:
         with st.spinner("Reading workspace inventory..."):
             existing = glp.workspace_serials()
-    except Exception:
-        existing = set()
+    except Exception as e:
+        # an empty set here re-submits every serial including the already
+        # claimed ones, and GreenLake's rejection then blames serial/MAC
+        # pairings for perfectly healthy APs
+        results.append(("Read workspace inventory", False,
+                        str(e)[:200] + " — claiming aborted"))
+        return
     to_claim = [s for s in serials if s.upper() not in existing]
     if existing and len(to_claim) < len(serials):
         results.append((f"{len(serials) - len(to_claim)} device(s) already in "
@@ -509,8 +514,15 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
                            "(async — can take a few minutes)...") as box:
                 task = glp.add_devices(
                     [{"serialNumber": s, "macAddress": macs[s]} for s in to_claim])
-                glp.poll_task(task, on_poll=lambda a, s_: box.update(
+                claim_op = glp.poll_task(task, on_poll=lambda a, s_: box.update(
                     label=f"Claiming {len(to_claim)} device(s) — poll {a}, status: {s_}"))
+            # a terminal-success batch can still carry a per-device breakdown
+            rejected = glp.failed_serials(claim_op)
+            if rejected:
+                results.append((f"GreenLake rejected {len(rejected)} device(s) "
+                                "inside an otherwise successful claim", False,
+                                ", ".join(rejected[:8])
+                                + ("…" if len(rejected) > 8 else "")))
         except Exception as e:
             results.append((f"Claim {len(to_claim)} device(s) in GreenLake",
                             False, str(e)[:200]))
@@ -573,7 +585,7 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
         except Exception as e:
             results.append(("List Classic groups", False,
                             str(e)[:200] + " — group move skipped"))
-            _persist_classic(classic)
+            persist_classic_tokens(classic)
             return
     else:
         try:
@@ -605,15 +617,7 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
                      central.add_devices_to_group(sid, s))
             step(f"CAMPUS_AP persona → {len(gserials)} device(s) in '{gname}'",
                  lambda s=gserials: central.assign_persona(s))
-    _persist_classic(classic)
-
-
-def _persist_classic(classic) -> None:
-    """The classic refresh token is single-use and rotates on any mid-run
-    401-refresh — persist it on EVERY exit path that touched the classic
-    client, not just the happy one, or later steps inherit a dead token."""
-    if classic is None:
-        return
-    persist_rotated_refresh_token(classic)
-    if st.session_state.get("remember_creds"):
-        credstore.save_from_session(st.session_state, st.session_state.get("_user"))
+    if classic is not None:
+        # the classic refresh token is single-use and rotates on any mid-run
+        # 401-refresh — persist on EVERY exit path that touched the client
+        persist_classic_tokens(classic)

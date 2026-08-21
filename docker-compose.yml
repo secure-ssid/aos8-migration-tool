@@ -3,13 +3,15 @@
 # password — no OAuth, no IdP.
 #
 # ── HTTPS via Caddy ──────────────────────────────────────────────────────────
-# This service publishes 8501 on ALL interfaces so a Caddy on a separate host
-# can front it with HTTPS (see deploy/Caddyfile).
-#   - Caddy on a SEPARATE host -> proxy to this host's :8501 (the binding below).
-#   - Caddy on the SAME host   -> tighten the binding to "127.0.0.1:8501:8501".
+# This service publishes 8501 on LOOPBACK ONLY. That is the safe default, and
+# it is MANDATORY in AOS8_AUTH_MODE=proxy: reaching :8501 directly lets anyone
+# impersonate an operator by sending the identity header themselves.
+#   - Caddy on the SAME host   -> the binding below is exactly right (see
+#     deploy/Caddyfile, which also strips the identity headers inbound).
+#   - Caddy on a SEPARATE host -> override the binding to "8501:8501" AND
+#     firewall :8501 so only Caddy's address can reach it.
 #   - Caddy in a CONTAINER     -> drop the published port, put both on one
 #     network, and proxy to http://app:8501 instead.
-# Either way, firewall plain :8501 from users.
 # Passwords + verification codes ride the connection, so always go through Caddy
 # (HTTPS), never plain :8501 over an untrusted network.
 #
@@ -25,7 +27,16 @@ services:
   app:
     build: .
     ports:
-      - "8501:8501"   # externally reachable — Caddy on separate host fronts HTTPS
+      - "127.0.0.1:8501:8501"   # loopback only — front it with Caddy (HTTPS)
+    # Both blocks are needed. env_file passes the WHOLE .env into the
+    # container, which is the only way variables that have no entry below
+    # (AOS8_SMTP_SSL, AOS8_SMTP_STARTTLS, AOS8_ALLOW_CONSOLE_CODES,
+    # AOS8_IDENTITY_HEADER, AOS8_LOCAL_USER, AOS8_USERS_FILE) can reach the
+    # app at all — compose's own .env only feeds ${...} interpolation, not the
+    # container environment. `environment:` below then takes precedence, so
+    # the ${VAR:?} required-checks and ${VAR:-} defaults still apply.
+    env_file:
+      - .env
     environment:
       # Simplest multi-user: one shared gate password (no registration, no email).
       AOS8_AUTH_MODE: "${AOS8_AUTH_MODE:-password}"

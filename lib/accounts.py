@@ -50,8 +50,11 @@ RESEND_MIN_INTERVAL_S = 60
 _SCRYPT = dict(n=2 ** 14, r=8, p=1)   # ~16 MB work factor; safe under default maxmem
 _KEYLEN = 64
 
-USERS_FILE = Path(os.environ.get(
-    "AOS8_USERS_FILE", str(Path.home() / ".aos8-migration" / "users.json")))
+# `or` not a get() default: the deployment passes the whole .env into the
+# container, so an unset var arrives as an EMPTY string — Path("") would put
+# the registry in the working directory instead of the persistent volume.
+USERS_FILE = Path(os.environ.get("AOS8_USERS_FILE", "").strip()
+                  or str(Path.home() / ".aos8-migration" / "users.json"))
 
 # Generic valid-email pattern; domain suffix appended only when a domain is set.
 _ANY_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$", re.I)

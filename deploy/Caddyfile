@@ -2,10 +2,10 @@
 # Caddy terminates TLS and reverse-proxies to the app; reverse_proxy upgrades
 # websockets automatically (Streamlit needs that).
 #
-# NOTE: the shipped docker-compose.yml publishes 8501 on ALL interfaces so a
-# Caddy on a separate host can reach it. If Caddy runs on the SAME host as
-# the app, tighten the compose binding to "127.0.0.1:8501:8501" and keep the
-# reverse_proxy below; otherwise firewall :8501 so only Caddy can reach it.
+# NOTE: the shipped docker-compose.yml publishes 8501 on LOOPBACK ONLY, which
+# is what the reverse_proxy below expects (Caddy on the SAME host as the app).
+# If Caddy runs on a separate host, override the compose binding to
+# "8501:8501" and firewall :8501 so only Caddy can reach it.
 # In AOS8_AUTH_MODE=proxy the loopback/proxy-only binding is MANDATORY —
 # direct access to :8501 lets anyone impersonate users via the identity
 # header.
@@ -16,7 +16,22 @@
 
 migrate.your-domain.example {
     encode zstd gzip
-    reverse_proxy 127.0.0.1:8501
+    # Strip the identity headers the app trusts, on EVERY inbound request:
+    # lib/identity._header_identity() believes X-Forwarded-Email verbatim, so
+    # a client that sets it itself would become that operator. Caddy alone
+    # does NOT authenticate anyone — put a real authenticator in front and let
+    # IT re-add the header after these strips, e.g.:
+    #     forward_auth 127.0.0.1:4180 {
+    #         uri /oauth2/auth
+    #         copy_headers X-Auth-Request-Email>X-Forwarded-Email
+    #     }
+    # Without such a block, run AOS8_AUTH_MODE=password or =accounts, never
+    # =proxy.
+    reverse_proxy 127.0.0.1:8501 {
+        header_up -X-Forwarded-Email
+        header_up -X-Forwarded-User
+        header_up -X-Auth-Request-Email
+    }
 
     # Internal/offline host without public DNS? Use Caddy's local CA instead of
     # Let's Encrypt (clients must trust Caddy's root, or swap for your own certs):

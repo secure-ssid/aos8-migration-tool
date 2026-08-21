@@ -13,6 +13,9 @@ class AuthType(str, Enum):
     OPEN = "open"
     WPA2_PSK = "wpa2-psk"
     WPA3_SAE = "wpa3-sae"
+    # Enhanced Open / OWE — opportunistic wireless encryption. NOT open:
+    # mapping it to OPEN silently strips encryption from the migrated SSID.
+    OWE = "owe"
     WPA2_ENTERPRISE = "wpa2-enterprise"
     WPA3_ENTERPRISE = "wpa3-enterprise"
     MAC = "mac"

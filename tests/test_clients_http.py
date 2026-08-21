@@ -1,7 +1,12 @@
 """Mocked-HTTP regression tests for the three API clients — the retry,
 token-refresh, and cache behaviors that broke in the field. No real Aruba/HPE
 endpoint is contacted: every test spins a local HTTP server."""
+import ipaddress
 import json
+import os
+import shutil
+import ssl
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -10,18 +15,57 @@ import pytest
 import lib.central_client as central_mod
 import lib.classic_central_client as classic_mod
 import lib.glp_client as glp_mod
+from lib.aos8_client import AOS8APIError, AOS8Client
 from lib.central_client import CentralAPIError, CentralClient, _is_duplicate
-from lib.classic_central_client import ClassicCentralClient
-from lib.glp_client import GLPClient
+from lib.classic_central_client import ClassicCentralAPIError, ClassicCentralClient
+from lib.glp_client import GLPAPIError, GLPClient
+
+
+def _localhost_tls_files() -> tuple[str, str, str]:
+    """Ephemeral self-signed cert + key for the AOS 8 mock, in a temp dir.
+
+    AOS 8 controllers ship a self-signed cert and AOS8Client sets
+    session.verify = False, so serving real TLS here exercises the production
+    https:// code path instead of pretending port 4343 speaks plain HTTP."""
+    import datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName(
+                [x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False)
+            .sign(key, hashes.SHA256()))
+    tmp = tempfile.mkdtemp()
+    cert_path, key_path = os.path.join(tmp, "c.pem"), os.path.join(tmp, "k.pem")
+    with open(cert_path, "wb") as fh:
+        fh.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_path, "wb") as fh:
+        fh.write(key.private_bytes(serialization.Encoding.PEM,
+                                   serialization.PrivateFormat.PKCS8,
+                                   serialization.NoEncryption()))
+    return cert_path, key_path, tmp
 
 
 class MockAPI:
     """Tiny per-test HTTP server. Set .app to a callable
     (method, path, query, body) -> (status, headers, obj). Every request is
-    recorded in .calls as (method, path)."""
+    recorded in .calls as (method, path) and, in full, in .requests as
+    {"method", "path", "query", "headers", "body"}."""
 
-    def __init__(self):
+    def __init__(self, tls: bool = False):
         self.calls = []
+        self.requests = []
         self.app = lambda m, p, q, b: (200, {}, {})
         outer = self
 
@@ -35,6 +79,10 @@ class MockAPI:
                 except ValueError:
                     body = raw.decode(errors="replace")
                 outer.calls.append((self.command, path))
+                outer.requests.append({
+                    "method": self.command, "path": path, "query": query,
+                    "headers": dict(self.headers), "body": body,
+                })
                 status, headers, obj = outer.app(self.command, path, query, body)
                 data = (obj if isinstance(obj, (bytes, str)) else json.dumps(obj))
                 if isinstance(data, str):
@@ -54,12 +102,22 @@ class MockAPI:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self._tmpdir = None
+        if tls:
+            cert_path, key_path, self._tmpdir = _localhost_tls_files()
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_path, key_path)
+            self.server.socket = ctx.wrap_socket(self.server.socket,
+                                                 server_side=True)
+        self.port = self.server.server_port
+        self.url = f"{'https' if tls else 'http'}://127.0.0.1:{self.port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+        if self._tmpdir:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
 
 
 @pytest.fixture()
@@ -75,6 +133,20 @@ def mock_api(monkeypatch):
     api.sleeps = sleeps
     yield api
     api.close()
+
+
+@pytest.fixture()
+def aos8_api():
+    """HTTPS mock for the AOS 8 controller API (port 4343 is TLS-only)."""
+    api = MockAPI(tls=True)
+    yield api
+    api.close()
+
+
+def _aos8(api) -> AOS8Client:
+    c = AOS8Client("127.0.0.1", "admin", "pw", port=api.port)
+    c.uidaruba = "sess-1"          # skip the login round trip
+    return c
 
 
 def _token_response():
@@ -218,6 +290,13 @@ def test_classic_firmware_v2_falls_back_to_v1_on_404(mock_api):
 
 # ─────────────────── GreenLake ───────────────────
 
+def _glp(api) -> GLPClient:
+    g = GLPClient("id", "secret", base_url=api.url)
+    g.token = "tok"
+    g.session.headers.update({"Authorization": "Bearer tok"})
+    return g
+
+
 def test_glp_claim_returns_op_id_and_poll_completes(mock_api):
     def app(method, path, query, body):
         if path.endswith("/as/token.oauth2"):
@@ -306,10 +385,8 @@ def test_glp_timed_out_is_terminal(mock_api):
         return (200, {}, {})
 
     mock_api.app = app
-    g = GLPClient("id", "secret", base_url=mock_api.url)
-    g.token = "tok"
-    g.session.headers.update({"Authorization": "Bearer tok"})
-    with pytest.raises(Exception):
+    g = _glp(mock_api)
+    with pytest.raises(GLPAPIError, match="GreenLake rejected these serials"):
         g.poll_task("op-1", timeout=5, interval=0)
 
 
@@ -327,9 +404,7 @@ def test_glp_list_all_subscriptions_paginates(mock_api):
         return (200, {}, {})
 
     mock_api.app = app
-    g = GLPClient("id", "secret", base_url=mock_api.url)
-    g.token = "tok"
-    g.session.headers.update({"Authorization": "Bearer tok"})
+    g = _glp(mock_api)
     assert len(g.list_all_subscriptions()) == 120
 
 
@@ -372,3 +447,287 @@ def test_cleanup_records_listing_failures():
     failed = [r for r in res if not r[1]]
     assert failed, "listing failures must be recorded as failed results"
     assert not any("No objects named" in r[0] and r[1] for r in res if not failed)
+
+
+# ─────────────── New behaviour: failures must not look like empty results ───
+
+def test_glp_401_reauth_does_not_send_stale_bearer(mock_api):
+    """The token endpoint must never see the expired session Bearer."""
+    state = {"n": 0}
+
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        state["n"] += 1
+        if state["n"] == 1:
+            return (401, {}, {})
+        return (200, {}, {"items": [{"id": "d1", "serialNumber": "S1"}]})
+
+    mock_api.app = app
+    g = _glp(mock_api)
+    g.token = "stale"
+    g.session.headers.update({"Authorization": "Bearer stale"})
+    assert g.list_devices() == [{"id": "d1", "serialNumber": "S1"}]
+    token_reqs = [r for r in mock_api.requests
+                  if r["path"].endswith("/as/token.oauth2")]
+    assert token_reqs, "the 401 must have triggered a token request"
+    assert all("Authorization" not in r["headers"] for r in token_reqs)
+
+
+def test_central_list_sites_raises_when_all_routes_fail(mock_api):
+    """A 403 is an answer about this tenant — caching [] makes create_site
+    re-POST and the devices phase blame a step that already succeeded."""
+    mock_api.app = lambda m, p, q, b: (
+        _token_response() if p.endswith("oauth2") else (403, {}, {"error": "forbidden"}))
+    c = _central(mock_api)
+    with pytest.raises(CentralAPIError):
+        c.list_sites(refresh=True)
+    assert c._sites_cache is None
+
+
+def test_central_paginate_raises_when_offset_ignored(mock_api):
+    """A server that echoes page 1 forever used to silently return 100 rows."""
+    page = [{"id": i} for i in range(100)]
+    mock_api.app = lambda m, p, q, b: (
+        _token_response() if p.endswith("oauth2") else (200, {}, {"items": page}))
+    c = _central(mock_api)
+    with pytest.raises(CentralAPIError, match="ignored offset"):
+        c._paginate("/network-config/v1/sites", page_size=100)
+
+
+def test_classic_is_duplicate_ignores_url_path():
+    from lib.classic_central_client import _is_duplicate as classic_is_duplicate
+    e = ClassicCentralAPIError(
+        "POST /configuration/full_wlan/duplicate-lab/x failed 500: internal error")
+    assert not classic_is_duplicate(e)
+    e2 = ClassicCentralAPIError(
+        "POST /configuration/full_wlan/corp/x failed 400: object already exists")
+    assert classic_is_duplicate(e2)
+
+
+def test_glp_assign_application_two_sequential_patches(mock_api):
+    """GreenLake rejects a combined device+subscription patch, so this must be
+    two merge-patches in order."""
+    sub_id = "3f2e1d00-0000-4000-8000-000000000001"
+
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if path == "/devices/v1/devices" and method == "GET":
+            return (200, {}, {"items": [{"id": "dev-1", "serialNumber": "S1"}]})
+        return (200, {}, {})
+
+    mock_api.app = app
+    g = _glp(mock_api)
+    g.assign_application("S1", "app-1", "us-west", sub_id)
+    patches = [r for r in mock_api.requests if r["method"] == "PATCH"]
+    assert [p["body"] for p in patches] == [
+        {"application": {"id": "app-1"}, "region": "us-west"},
+        {"subscription": [{"id": sub_id}]},
+    ]
+    assert all(p["headers"].get("Content-Type") == "application/merge-patch+json"
+               for p in patches)
+
+
+def test_glp_partial_batch_failure_is_returned_not_raised(mock_api):
+    """A SUCCEEDED batch can still reject devices — the caller needs the body
+    to record the failed step."""
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        return (200, {}, {"status": "SUCCEEDED",
+                          "result": {"successfulDevicesSerial": ["S1"],
+                                     "failedDevicesSerial": ["S2"]}})
+
+    mock_api.app = app
+    g = _glp(mock_api)
+    result = g.poll_task("op-1", timeout=5, interval=0)
+    assert GLPClient.failed_serials(result) == ["S2"]
+
+
+@pytest.mark.parametrize("spelling", ["TIMEDOUT", "TIMED_OUT", "TIMEOUT"])
+def test_glp_timedout_enum_is_terminal(mock_api, spelling):
+    """HPE spells this three ways; all must fail on the FIRST poll."""
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        return (200, {}, {"status": spelling,
+                          "result": {"failedDevicesSerial": ["S1"]}})
+
+    mock_api.app = app
+    g = _glp(mock_api)
+    with pytest.raises(GLPAPIError, match="GreenLake rejected these serials"):
+        g.poll_task("op-1", timeout=300, interval=10)
+    assert mock_api.sleeps == []
+
+
+def test_glp_202_without_pollable_id_is_not_success(mock_api):
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if path == "/devices/v1/devices" and method == "GET":
+            return (200, {}, {"items": [{"id": "dev-1", "serialNumber": "S1"}]})
+        if method == "PATCH":
+            return (202, {}, {})          # no Location, no transactionId
+        return (200, {}, {})
+
+    mock_api.app = app
+    g = _glp(mock_api)
+    with pytest.raises(GLPAPIError, match="no pollable operation id"):
+        g.assign_subscription("S1", "3f2e1d00-0000-4000-8000-000000000001")
+
+
+def test_central_profile_route_falls_back_to_v1alpha1(mock_api):
+    """v1 and v1alpha1 legitimately disagree per tenant — fall through on 404
+    only, and reuse whichever version answered."""
+    def app(method, path, query, body):
+        if path.endswith("/as/token.oauth2"):
+            return _token_response()
+        if path.startswith("/network-config/v1/wlan-ssids"):
+            return (404, {}, {"error": "not found"})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = _central(mock_api)
+    c._upsert_ssid("Corp", {"ssid": "Corp"})
+    assert [p for _m, p in mock_api.calls] == [
+        "/network-config/v1/wlan-ssids/Corp",
+        "/network-config/v1alpha1/wlan-ssids/Corp",
+    ]
+    mock_api.calls.clear()
+    c._upsert_ssid("Corp2", {"ssid": "Corp2"})
+    assert [p for _m, p in mock_api.calls] == [
+        "/network-config/v1alpha1/wlan-ssids/Corp2",
+    ]
+
+
+def test_classic_move_devices_batches_at_fifty(mock_api):
+    """HPE returns 400 'More than 50 devices cannot be moved to a group'."""
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    c.move_devices("g1", [f"S{i}" for i in range(120)])
+    moves = [r for r in mock_api.requests
+             if r["path"] == "/configuration/v1/devices/move"]
+    assert len(moves) == 3
+    assert [len(r["body"]["serials"]) for r in moves] == [50, 50, 20]
+
+
+def test_classic_create_group_raises_when_architecture_reads_back_wrong(mock_api):
+    """Known API flaw: the create returns 200 without applying AOS10."""
+    def app(method, path, query, body):
+        if path == "/configuration/v2/groups":
+            return (200, {}, {"data": [], "total": 0})
+        if path == "/configuration/v3/groups":
+            return (200, {}, {})
+        if path == "/configuration/v1/groups/properties":
+            return (200, {}, {"data": [{"group": "g1",
+                                        "properties": {"Architecture": "AOS8"}}]})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    with pytest.raises(ClassicCentralAPIError, match="AOS8"):
+        c.create_group("g1")
+
+
+def test_classic_create_group_survives_readback_failure(mock_api):
+    """The readback is best-effort — a 500 on it must not fail the create."""
+    def app(method, path, query, body):
+        if path == "/configuration/v2/groups":
+            return (200, {}, {"data": [], "total": 0})
+        if path == "/configuration/v1/groups/properties":
+            return (500, {}, {"error": "boom"})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    assert c.create_group("g1") == "g1"
+
+
+def test_owe_migrates_as_owe_and_blocks_on_classic():
+    """OWE is encrypted — mapping it to OPEN publishes an unencrypted SSID."""
+    from lib.aos8_client import _opmode_to_auth
+    from lib.central_client import OPMODE
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+
+    assert _opmode_to_auth("wpa3-owe") == (AuthType.OWE, True)
+    assert _opmode_to_auth("enhanced-open") == (AuthType.OWE, True)
+    assert OPMODE[AuthType.OWE] == "ENHANCED_OPEN"
+
+    ssid = SSID(name="guest", essid="Guest", vlan=20,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.OWE)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid])
+
+    def _dest(kind: str) -> CentralConfig:
+        return CentralConfig(customer_name="acme", base_url="https://example",
+                             destination=kind)
+
+    fails = [r for r in compatibility.run_all(customer, _dest("classic"))
+             if r.status == compatibility.Status.FAIL]
+    assert any("Guest" in r.message and "Enhanced Open" in r.name for r in fails)
+    # New Central has a real opmode for it, so it must NOT be blocked there
+    new_fails = [r for r in compatibility.run_all(customer, _dest("new"))
+                 if r.status == compatibility.Status.FAIL]
+    assert not any("Enhanced Open" in r.name for r in new_fails)
+
+
+def test_classic_captive_portal_ssid_is_refused(mock_api):
+    """full_wlan cannot express an external portal — creating it anyway would
+    publish a fully open guest network."""
+    from lib.models import AuthType, ForwardMode, SSID
+
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="guest", essid="Guest", vlan=30,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.OPEN,
+                captive_portal_url="https://portal.example.com/login")
+    with pytest.raises(ClassicCentralAPIError, match="captive portal"):
+        c.create_wlan("g1", ssid, 0)
+    assert not any("full_wlan" in p for _m, p in mock_api.calls)
+
+
+# ─────────────────── AOS 8 controller ───────────────────
+
+def test_aos8_object_error_payload_raises(aos8_api):
+    """AOS 8 answers a bad config_path / unknown object with HTTP 200 plus a
+    _global_result error. Decoding that into [] is exactly what made a wrong
+    node indistinguishable from "this controller has no WLANs"."""
+    aos8_api.app = lambda m, p, q, b: (
+        200, {}, {"_global_result": {"status": 1,
+                                     "status_str": "config path invalid"}})
+    c = _aos8(aos8_api)
+    with pytest.raises(AOS8APIError, match="config path invalid"):
+        c.get_ap_groups()
+
+
+def test_aos8_html_response_gives_actionable_error(aos8_api):
+    """Port 4343 answering with the WebUI must not surface as a JSON traceback."""
+    aos8_api.app = lambda m, p, q, b: (
+        200, {"Content-Type": "text/html"},
+        "<html><body>Aruba login</body></html>")
+    c = _aos8(aos8_api)
+    with pytest.raises(AOS8APIError, match="REST API is probably disabled"):
+        c.get_ap_groups()
+
+
+def test_aos8_showcommand_config_path_is_caller_controlled(aos8_api):
+    """The show fallback must be able to run WITHOUT the config_path that made
+    the object reads fail — otherwise it re-runs at the same dead node."""
+    aos8_api.app = lambda m, p, q, b: (200, {}, {"_data": ["ok"]})
+    c = _aos8(aos8_api)
+    c._show_text("show running-config")
+    assert "config_path=%2Fmd" in aos8_api.requests[-1]["query"]
+    c._show_text("show running-config", config_path=None)
+    assert "config_path" not in aos8_api.requests[-1]["query"]
+
+
+def test_aos8_list_config_nodes_records_why_it_failed(aos8_api):
+    """An unreadable hierarchy must not read as "no config nodes exist"."""
+    aos8_api.app = lambda m, p, q, b: (
+        200, {}, {"_global_result": {"status": 1, "status_str": "no such object"}})
+    c = _aos8(aos8_api)
+    assert c.list_config_nodes() == []
+    assert "no such object" in c.node_scan_error

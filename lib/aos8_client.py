@@ -28,6 +28,10 @@ AOS8_API_PORT = 4343
 LOGIN_PATH = "/v1/api/login"
 CONFIG_PATH_PREFIX = "/v1/configuration"
 
+# sentinel: `config_path=None` means "send no config_path at all", which is
+# different from "use the client's configured node"
+_UNSET = object()
+
 # AP models known to be incompatible with AOS 10.
 # NOTE: verify against Aruba's official AOS 10 supported-platform matrix for
 # each release; matching is exact-token (country variants like -US stripped).
@@ -79,28 +83,57 @@ class AOS8APIError(Exception):
 
 class AOS8Client:
     def __init__(self, ip: str, username: str, password: str,
-                 config_path: str = "/md", timeout: int = 15):
-        self.base = f"https://{ip}:{AOS8_API_PORT}"
+                 config_path: str = "/md", timeout: int = 15,
+                 port: int = AOS8_API_PORT):
+        self.base = f"https://{ip}:{port}"
         self.ip = ip
+        self.port = port
         self.username = username
         self.password = password
         self.config_path = config_path
         self.timeout = timeout
         self.uidaruba: Optional[str] = None
         self.pull_method = "object-api"  # or "showcommand" after a fallback pull
+        # degradation records — a zero result must never be indistinguishable
+        # from "this controller has nothing configured"
+        self.node_scan_error = ""
+        self.ap_scan_error = ""
+        self.object_read_error = ""
+        self.running_config_error = ""
+        self.show_errors: dict[str, str] = {}
         self.session = requests.Session()
         self.session.verify = False
 
     # ─────────────────── Auth ───────────────────
 
     def connect(self) -> bool:
-        resp = self.session.post(
-            f"{self.base}{LOGIN_PATH}",
-            data={"username": self.username, "password": self.password},
-            timeout=self.timeout,
-        )
+        # Release any previous session FIRST. AOS 8 caps concurrent API
+        # sessions (64 across CLI + WebUI + API, 900s idle default), so a
+        # re-login without a logout burns one every time — including the
+        # re-login _get_json performs on a 401.
+        if self.uidaruba:
+            self.logout()
+        try:
+            resp = self.session.post(
+                f"{self.base}{LOGIN_PATH}",
+                data={"username": self.username, "password": self.password},
+                timeout=self.timeout,
+            )
+        except requests.exceptions.Timeout:
+            raise AOS8APIError(f"POST {LOGIN_PATH}: timed out after {self.timeout}s")
+        except requests.exceptions.ConnectionError as e:
+            raise AOS8APIError(f"POST {LOGIN_PATH}: connection failed — is TCP "
+                               f"{self.port} reachable from here? "
+                               f"({type(e).__name__})")
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise AOS8APIError(
+                f"{LOGIN_PATH}: expected JSON, got "
+                f"{resp.headers.get('Content-Type', '?')} — the REST API is "
+                f"probably disabled on this controller (port {self.port} "
+                "answered with the WebUI)")
         result = data.get("_global_result", {})
         # status comes back as int 0 or string "0" depending on build
         if str(result.get("status", "1")) != "0":
@@ -123,34 +156,68 @@ class AOS8Client:
             pass
         self.uidaruba = None
 
-    def _params(self, extra: Optional[dict] = None) -> dict:
+    def _params(self, extra: Optional[dict] = None,
+                config_path: Any = _UNSET) -> dict:
         params = {"UIDARUBA": self.uidaruba}
-        if self.config_path:
-            params["config_path"] = self.config_path
+        cp = self.config_path if config_path is _UNSET else config_path
+        if cp:
+            params["config_path"] = cp
         if extra:
             params.update(extra)
         return params
 
     def _get_json(self, path: str, extra_params: Optional[dict] = None,
-                  _retried: bool = False) -> dict:
+                  _retried: bool = False, config_path: Any = _UNSET,
+                  timeout: Optional[int] = None) -> dict:
         """Authenticated GET with ONE re-login retry on 401. The UIDARUBA
         session can be invalidated out-of-band mid-pull (an admin clearing
         mgmt-user sessions, conductor failover) — without the replay that
-        degrades into an empty/partial discovery instead of an error."""
-        resp = self.session.get(
-            f"{self.base}{path}",
-            params=self._params(extra_params),
-            timeout=self.timeout,
-        )
-        if resp.status_code == 401 and not _retried:
-            self.connect()
-            return self._get_json(path, extra_params, _retried=True)
-        resp.raise_for_status()
-        return resp.json()
+        degrades into an empty/partial discovery instead of an error.
 
-    def _get_object(self, name: str) -> list[dict]:
+        AOS 8 answers a bad config_path, an unknown object and an expired
+        session with HTTP 200 plus a _global_result error payload. Decoding
+        that into an empty list is what makes a wrong node indistinguishable
+        from "this controller has no WLANs", so it raises here.
+        """
+        timeout = self.timeout if timeout is None else timeout
+        try:
+            resp = self.session.get(
+                f"{self.base}{path}",
+                params=self._params(extra_params, config_path=config_path),
+                timeout=timeout,
+            )
+        except requests.exceptions.Timeout:
+            raise AOS8APIError(f"GET {path}: timed out after {timeout}s")
+        except requests.exceptions.ConnectionError as e:
+            raise AOS8APIError(f"GET {path}: connection failed — is TCP "
+                               f"{self.port} reachable from here? "
+                               f"({type(e).__name__})")
+        if resp.status_code == 401 and not _retried:
+            # connect() releases the dead session before re-logging in
+            self.connect()
+            return self._get_json(path, extra_params, _retried=True,
+                                  config_path=config_path, timeout=timeout)
+        resp.raise_for_status()
+        try:
+            payload = resp.json()
+        except ValueError:
+            raise AOS8APIError(
+                f"{path}: expected JSON, got "
+                f"{resp.headers.get('Content-Type', '?')} — the REST API is "
+                f"probably disabled on this controller (port {self.port} "
+                "answered with the WebUI)")
+        if not isinstance(payload, dict):
+            raise AOS8APIError(f"{path}: expected a JSON object, got "
+                               f"{type(payload).__name__}")
+        gr = payload.get("_global_result") or {}
+        if gr and str(gr.get("status", "0")) != "0":
+            raise AOS8APIError(f"{path}: {gr.get('status_str') or gr}")
+        return payload
+
+    def _get_object(self, name: str, config_path: Any = _UNSET) -> list[dict]:
         """GET a configuration object; returns its instance list."""
-        data = self._get_json(f"{CONFIG_PATH_PREFIX}/object/{name}")
+        data = self._get_json(f"{CONFIG_PATH_PREFIX}/object/{name}",
+                              config_path=config_path)
         # Object payloads come back either under "_data" -> {name: [...]}
         # or directly under the object name.
         if isinstance(data.get("_data"), dict):
@@ -158,14 +225,22 @@ class AOS8Client:
         items = data.get(name, [])
         return items if isinstance(items, list) else [items]
 
-    def _show(self, command: str) -> dict:
-        """Run a show command; returns the parsed JSON document."""
-        return self._get_json(f"{CONFIG_PATH_PREFIX}/showcommand",
-                              {"command": command})
+    def _show(self, command: str, config_path: Any = _UNSET,
+              timeout: Optional[int] = None) -> dict:
+        """Run a show command; returns the parsed JSON document.
 
-    def _show_text(self, command: str) -> str:
+        HPE documents only `command` + `UIDARUBA` for showcommand, but this
+        controller's behaviour is not guaranteed — the caller decides whether
+        to send a config_path (None = send none)."""
+        return self._get_json(f"{CONFIG_PATH_PREFIX}/showcommand",
+                              {"command": command},
+                              config_path=config_path, timeout=timeout)
+
+    def _show_text(self, command: str, config_path: Any = _UNSET,
+                   timeout: Optional[int] = None) -> str:
         """Run a show command; flatten its _data block to plain text."""
-        data = self._show(command).get("_data", "")
+        data = self._show(command, config_path=config_path,
+                          timeout=timeout).get("_data", "")
         if isinstance(data, list):
             return "\n".join(str(line) for line in data)
         return str(data)
@@ -208,17 +283,19 @@ class AOS8Client:
     _DEFAULT_GROUPS = ("default", "default-campus-ap-group", "NoAuthApGroup")
 
     def list_config_nodes(self) -> list[str]:
-        """Node paths from the configuration hierarchy (MM only; best-effort —
-        returns [] on standalone controllers / managed devices)."""
+        """Node paths from the configuration hierarchy (MM only; returns []
+        on standalone controllers / managed devices).
+
+        A failure here is recorded in node_scan_error rather than swallowed:
+        an empty list collapses find_config_node's candidate set to three
+        literals, so a conductor whose config lives at /md/<Group> would never
+        be probed and the UI would report "no config exists"."""
+        self.node_scan_error = ""
         try:
-            resp = self.session.get(
-                f"{self.base}{CONFIG_PATH_PREFIX}/object/node_hierarchy",
-                params={"UIDARUBA": self.uidaruba},
-                timeout=self.timeout,
-            )
-            resp.raise_for_status()
-            tree = resp.json()
-        except Exception:
+            tree = self._get_json(f"{CONFIG_PATH_PREFIX}/object/node_hierarchy",
+                                  config_path="/mm")
+        except (AOS8APIError, requests.RequestException, ValueError) as e:
+            self.node_scan_error = str(e)
             return []
         if isinstance(tree.get("_data"), dict):
             tree = tree["_data"]
@@ -272,16 +349,22 @@ class AOS8Client:
             pass
         return False
 
+    def node_candidates(self) -> list[str]:
+        """Config-node paths worth probing, deepest first, with the standard
+        conductor/managed-device fallbacks appended."""
+        candidates = list(self.list_config_nodes())
+        for p in ("/mm/mynode", "/mm", "/md"):
+            if p not in candidates:
+                candidates.append(p)
+        return candidates
+
     def find_config_node(self) -> Optional[str]:
         """When the configured node has no config objects — typical when the
         operator points at a Managed Device, or at the /md root while the
         config lives on a child node — probe the hierarchy + the standard
         fallbacks and return the first node that actually holds config.
         Leaves config_path untouched; returns None when nothing is found."""
-        candidates = list(self.list_config_nodes())
-        for p in ("/mm/mynode", "/mm", "/md"):
-            if p not in candidates:
-                candidates.append(p)
+        candidates = self.node_candidates()
         original = self.config_path
         try:
             for path in candidates:
@@ -336,7 +419,14 @@ class AOS8Client:
             }
         return profiles
 
-    def get_ssids(self) -> list[SSID]:
+    def get_ssids(self, captive_portals: Optional[dict[str, dict]] = None) -> list[SSID]:
+        """Virtual APs as SSIDs.
+
+        captive_portals maps aaa-profile → {url, redirect} (from
+        aos8_parser.mc_captive_portals on the running-config): the object API
+        does not expose the external-captive-portal chain, and dropping it
+        migrates a guest SSID as a fully open network."""
+        captive_portals = captive_portals or {}
         ssid_profiles = {}
         try:
             ssid_profiles = self.get_ssid_profiles()
@@ -381,6 +471,7 @@ class AOS8Client:
                                        default="")).lower()
             rf_band = {"all": "BAND_ALL", "a": "5GHZ", "g": "24GHZ"}.get(band_raw, "")
 
+            cp = captive_portals.get(aaa_ref, {})
             ssids.append(SSID(
                 name=name,
                 vlan=vlan,
@@ -396,6 +487,13 @@ class AOS8Client:
                 rf_band=rf_band,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
+                # an administratively disabled virtual-AP must not migrate as
+                # active. A build exposing neither key falls back to the
+                # current behaviour (enabled) rather than disabling live WLANs.
+                enabled=bool(self._field(item, "vap-enable", "vap_enable",
+                                         default=True)),
+                captive_portal_url=cp.get("url", ""),
+                captive_portal_redirect=cp.get("redirect", ""),
             ))
         return ssids
 
@@ -545,11 +643,10 @@ class AOS8Client:
 
     # ─────────────────── Full pull ───────────────────
 
-    def _pull_objects(self):
-        """The config_path-sensitive object reads (show commands run box-wide
-        and don't care about the node)."""
+    def _pull_objects(self, captive_portals: Optional[dict[str, dict]] = None):
+        """The config_path-sensitive object reads."""
         ap_groups, vap_bindings = self.get_ap_groups()
-        ssids = self.get_ssids()
+        ssids = self.get_ssids(captive_portals)
         vlans = self.get_vlans()
         radius = self.get_radius_servers()
         sgroups = self.get_server_groups()
@@ -572,33 +669,90 @@ class AOS8Client:
                 if ap.model and ap.model not in grp.ap_models:
                     grp.ap_models.append(ap.model)
 
+    _SHOW_COMMANDS = (
+        ("running_config", "show running-config"),
+        ("ap_group", "show ap-group"),
+        ("ap_database", "show ap database long"),
+        ("aaa_auth_server", "show aaa authentication-server radius"),
+        ("lc_cluster", "show lc-cluster group-membership"),
+        ("controller_ip", "show controller-ip"),
+        ("version", "show version"),
+    )
+
+    def _show_outputs(self, config_path: Any) -> tuple[dict, dict]:
+        """Every discovery show command at one node. Returns (outputs, errors)
+        — a per-command failure must be recorded, not flattened into "" and
+        reported as "this controller has no config"."""
+        outputs: dict[str, str] = {}
+        errors: dict[str, str] = {}
+        for key, cmd in self._SHOW_COMMANDS:
+            # `show running-config` routinely takes 30-60s on a production
+            # conductor; self.timeout (15s) would turn that into an empty parse
+            timeout = max(self.timeout, 120) if key == "running_config" else None
+            try:
+                outputs[key] = self._show_text(cmd, config_path=config_path,
+                                               timeout=timeout)
+            except (AOS8APIError, requests.RequestException, ValueError) as e:
+                outputs[key] = ""
+                errors[key] = str(e)
+        return outputs, errors
+
     def pull_config_via_show(self) -> CustomerConfig:
         """Fallback discovery from the same CLI outputs paste mode parses,
-        fetched over the API's showcommand endpoint — show commands run on
-        any box (conductor, managed device, standalone) regardless of
-        config_path, unlike the configuration-object API."""
+        fetched over the API's showcommand endpoint.
+
+        HPE documents only `command` + `UIDARUBA` for showcommand, so a
+        config_path is not guaranteed to be ignored — re-running the fallback
+        at the same failing node returns the same empty parse. Try every node
+        find_config_node would probe, then None (send no config_path at all),
+        and take the first parse that actually yields config."""
         from .aos8_parser import parse_customer_config
-        outputs = {}
-        for key, cmd in (
-            ("running_config", "show running-config"),
-            ("ap_group", "show ap-group"),
-            ("ap_database", "show ap database long"),
-            ("aaa_auth_server", "show aaa authentication-server radius"),
-            ("lc_cluster", "show lc-cluster group-membership"),
-            ("controller_ip", "show controller-ip"),
-            ("version", "show version"),
-        ):
-            try:
-                outputs[key] = self._show_text(cmd)
-            except Exception:
-                outputs[key] = ""
-        return parse_customer_config(outputs, mc_ip=self.ip)
+        candidates: list = []
+        for cp in [self.config_path] + self.node_candidates() + [None]:
+            if cp not in candidates:
+                candidates.append(cp)
+        first: Optional[CustomerConfig] = None
+        for cp in candidates:
+            outputs, errors = self._show_outputs(cp)
+            cfg = parse_customer_config(outputs, mc_ip=self.ip)
+            if cfg.ap_groups or cfg.ssids:
+                self.show_errors = errors
+                return cfg
+            if first is None:
+                first = cfg
+                self.show_errors = errors
+        return first
 
     def pull_config(self) -> CustomerConfig:
+        from .aos8_parser import detect_auth_flags, mc_captive_portals
         self.pull_method = "object-api"
         fw = self.get_mc_firmware()
         mc_ip, ctrl_vlan = self.get_controller_ip()
-        ap_groups, vap_bindings, ssids, vlans, radius, sgroups = self._pull_objects()
+        # The running-config text carries what the object API does not expose:
+        # EAP termination and internal-auth usage (both BLOCKING preflight
+        # checks, which could never fire on an API pull) and the external
+        # captive-portal chain.
+        self.running_config_error = ""
+        try:
+            running = self._show_text("show running-config",
+                                      timeout=max(self.timeout, 120))
+        except (AOS8APIError, requests.RequestException, ValueError) as e:
+            running = ""
+            self.running_config_error = str(e)
+        has_eap, has_internal = detect_auth_flags(running)
+        captive_portals = mc_captive_portals(running) if running else {}
+        # A wrong config_path answers HTTP 200 + a _global_result error, which
+        # _get_json now raises on. That is a reason to PROBE other nodes, not
+        # to abort — but the error must not be forgotten either: if nothing
+        # answers, it is re-raised instead of reporting an empty controller.
+        node_error: Optional[Exception] = None
+        try:
+            ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
+                self._pull_objects(captive_portals)
+        except AOS8APIError as e:
+            node_error = e
+            ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
+                [], {}, [], [], [], []
         if not ssids:
             # SSIDs missing (even if groups came back) — the WLAN config may
             # live at a different node than the AP group config. Re-probe.
@@ -606,7 +760,8 @@ class AOS8Client:
             if detected:
                 self.config_path = detected
                 ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
-                    self._pull_objects()
+                    self._pull_objects(captive_portals)
+                node_error = None
         if not ssids:
             # Last resort: the object API exposes no WLAN config on this box
             # (managed devices often don't) — parse the CLI show output
@@ -628,8 +783,27 @@ class AOS8Client:
                     cfg.cluster = self.get_cluster_info()
                 if cfg.mc_firmware in ("", "unknown"):
                     cfg.mc_firmware = fw
+                # the object-API run may have read a running-config the show
+                # fallback's node could not — never downgrade a True flag
+                cfg.has_eap_offload = cfg.has_eap_offload or has_eap
+                cfg.has_internal_auth = cfg.has_internal_auth or has_internal
+                # the CLI fallback answered, but the object API did not — the
+                # operator still needs to know WHY, or a group-only pull with
+                # no SSIDs looks like the controller simply has none
+                self.object_read_error = str(node_error) if node_error else ""
                 return cfg
-        aps = self.get_active_aps()
+        if node_error is not None and not (ap_groups or ssids):
+            # nothing anywhere answered — surface the controller's own reason
+            raise node_error
+        self.ap_scan_error = ""
+        try:
+            aps = self.get_active_aps()
+        except Exception as e:
+            # one hiccup on `show ap database long` must not discard a fully
+            # successful group/SSID/VLAN/RADIUS pull — but the degradation is
+            # recorded so a zero-AP result isn't read as "no APs on this box"
+            aps = []
+            self.ap_scan_error = str(e)
         cluster = self.get_cluster_info()
         self._attach_aps(ap_groups, aps)
 
@@ -661,6 +835,8 @@ class AOS8Client:
             radius_servers=radius,
             server_groups=sgroups,
             cluster=cluster,
+            has_eap_offload=has_eap,
+            has_internal_auth=has_internal,
             ssid_mapping_incomplete=mapping_incomplete,
         )
 
@@ -734,8 +910,10 @@ def _opmode_to_auth(opmode: str) -> tuple[AuthType, bool]:
     if "opensystem" in op or op == "open":
         return AuthType.OPEN, True
     if "enhanced-open" in op or "owe" in op:
-        # OWE (Enhanced Open) — no AuthType member for it, so map to OPEN
-        return AuthType.OPEN, True
+        # OWE / Enhanced Open is ENCRYPTED. Mapping it to OPEN silently
+        # publishes the migrated network with no encryption at all, and
+        # known=True keeps preflight quiet while it happens.
+        return AuthType.OWE, True
     if "sae" in op or "wpa3-personal" in op:
         return AuthType.WPA3_SAE, True
     if "psk" in op:

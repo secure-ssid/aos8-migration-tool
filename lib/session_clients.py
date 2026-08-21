@@ -69,20 +69,31 @@ def build_classic_client() -> ClassicCentralClient:
     )
 
 
-def persist_rotated_refresh_token(client: ClassicCentralClient) -> bool:
-    """The classic refresh token is single-use and rotates — losing the new
-    one strands later steps with a dead token. Returns True if it rotated.
+def persist_classic_tokens(client: ClassicCentralClient) -> bool:
+    """Write BOTH classic tokens back into the session. Returns True if either
+    changed.
+
+    The refresh token is single-use and rotates, so losing the new one strands
+    every later step with a dead token. The access token matters just as much:
+    nothing else in the repo writes it back, so each wizard step would rebuild
+    its client with the stale one, eat a 401, and burn one more rotation.
     Also re-syncs the encrypted credstore when Remember is on, so the next
     launch doesn't auto-fill an already-spent token."""
-    if client.refresh_token and client.refresh_token != \
-            st.session_state.get("classic_refresh_token"):
-        st.session_state["classic_refresh_token"] = client.refresh_token
-        if st.session_state.get("remember_creds"):
-            try:
-                from . import credstore
-                credstore.save_from_session(st.session_state,
-                                            st.session_state.get("_user"))
-            except Exception:
-                pass  # never let credstore IO break the API flow
-        return True
-    return False
+    ss = st.session_state
+    changed = False
+    if client.access_token and client.access_token != ss.get("classic_access_token"):
+        ss["classic_access_token"] = client.access_token
+        changed = True
+    if client.refresh_token and client.refresh_token != ss.get("classic_refresh_token"):
+        ss["classic_refresh_token"] = client.refresh_token
+        changed = True
+    if changed and ss.get("remember_creds"):
+        try:
+            from . import credstore
+            credstore.save_from_session(ss, ss.get("_user"))
+        except Exception as e:
+            # a lost rotated refresh token strands the NEXT session, so this
+            # must be visible rather than swallowed
+            st.warning(f"Rotated Classic refresh token could not be saved: {e} "
+                       "— copy it from Step 1 before closing this session.")
+    return changed

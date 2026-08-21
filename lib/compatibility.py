@@ -50,7 +50,8 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
     results += _check_static_ips(customer)
     results += _check_ssid_mapping(customer)
     results += _check_serials(customer)
-    results += _check_ssid_auth(customer)
+    results += _check_ssid_auth(customer, central)
+    results += _check_captive_portal(customer, central)
     results += _check_named_vlans(customer)
     results += _check_split_tunnel(customer, central)
     results += _check_duplicate_essids(customer)
@@ -508,8 +509,41 @@ def _check_essid_limits(customer: CustomerConfig) -> list[CheckResult]:
     return []
 
 
-def _check_ssid_auth(customer: CustomerConfig) -> list[CheckResult]:
+def _check_captive_portal(customer: CustomerConfig,
+                          central: CentralConfig) -> list[CheckResult]:
+    """Classic Central's full_wlan API has no external-captive-portal field
+    this tool can populate, so a guest SSID would be provisioned wide open."""
+    if central.destination != "classic":
+        return []
+    cp_ssids = [s.display_name for s in customer.ssids if s.captive_portal_url]
+    if not cp_ssids:
+        return []
+    return [CheckResult(
+        name="Captive-Portal SSIDs (classic destination)",
+        status=Status.FAIL,
+        message=f"External captive-portal SSIDs: {', '.join(cp_ssids)}. Classic "
+                "Central's WLAN API cannot express an external portal — these "
+                "would be created as fully OPEN guest networks.",
+        detail="Migrate these SSIDs to New Central, or build the captive-portal "
+               "profile by hand in Classic and bind it before enabling the SSID.",
+    )]
+
+
+def _check_ssid_auth(customer: CustomerConfig,
+                     central: CentralConfig) -> list[CheckResult]:
     results = []
+    owe = [s.display_name for s in customer.ssids if s.auth_type == AuthType.OWE]
+    if owe and central.destination == "classic":
+        results.append(CheckResult(
+            name="Enhanced Open (OWE) SSIDs",
+            status=Status.FAIL,
+            message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Classic AOS10 "
+                    "has no Enhanced-Open opmode — these SSIDs would migrate "
+                    "unencrypted.",
+            detail="New Central supports these natively (opmode ENHANCED_OPEN). "
+                   "Target New Central for them, or accept and document the "
+                   "downgrade explicitly before provisioning.",
+        ))
     unknown = [s.display_name for s in customer.ssids if not s.auth_known]
     if unknown:
         results.append(CheckResult(

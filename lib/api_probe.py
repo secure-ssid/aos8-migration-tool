@@ -5,8 +5,10 @@ quirks that otherwise surface one provisioning error at a time: which site
 route works, whether the tenant is a hybrid cluster, scope reads, GLP reach,
 classic token validity.
 
-Every check is a GET (or a write with dry-run semantics where the API offers
-it) — nothing is created. Each returns a ProbeResult the UI renders as a row.
+Every check is a GET, with ONE exception: the device-group write check really
+does create a disposable group (there is no dry-run on that route) and then
+deletes it, reporting a WARNING if the deletion could not be confirmed. Each
+check returns a ProbeResult the UI renders as a row.
 """
 from dataclasses import dataclass
 
@@ -64,36 +66,67 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
 
     def aps():
         a = client.list_all_aps()
-        n = len(a) if a is not None else 0
-        return f"{n} AP(s) readable via /network-monitoring/v1/devices"
+        if a is None:
+            # None is this client's "the read itself failed" signal — turning
+            # it into "0 AP(s)" probes green on a 403 monitoring scope
+            raise RuntimeError("monitoring read failed — check API-client "
+                               "monitoring scope")
+        return f"{len(a)} AP(s) readable via /network-monitoring/v1/devices"
     results.append(_probe("Read — monitored devices (validation source)", aps))
 
     # hybrid detection: a dry probe of the group-create route. The API has no
     # dry-run, so we send a clearly-disposable name and treat a hybrid block as
     # the (informative) answer. Any real 4xx other than hybrid is reported.
+    _PROBE_GROUP = "zzprobe-donotcreate-readonly"
+
+    def _delete_probe_group(scope_id) -> None:
+        client._request("DELETE", "/network-config/v1/device-groups/bulk",
+                        json={"items": [{"id": scope_id}]})
+
     def group_write():
         try:
-            client._post("/network-config/v1/device-groups",
-                         json={"scopeName": "zzprobe-donotcreate-readonly"})
-            # the create went through — remove the probe group again, and
-            # SAY SO if the delete fails (a leftover zzprobe group in a
-            # production tenant must never be silent)
-            try:
-                for grp in client.list_device_groups(refresh=True):
-                    if grp.get("scopeName") == "zzprobe-donotcreate-readonly":
-                        client._request("DELETE",
-                                        "/network-config/v1/device-groups/bulk",
-                                        json={"items": [{"id": grp.get("scopeId")}]})
-            except Exception as e:
-                return ("device-group WRITE allowed — WARNING: the disposable "
-                        "'zzprobe-donotcreate-readonly' group could not be "
-                        f"deleted ({str(e)[:80]}) — remove it in Central")
-            return "device-group WRITE allowed (native New Central, not hybrid)"
+            resp = client._post("/network-config/v1/device-groups",
+                                json={"scopeName": _PROBE_GROUP})
         except CentralAPIError as e:
             if "HYBRID_CLUSTER" in str(e) or "API_ACCESS_RESTRICTED" in str(e):
                 raise  # surfaced as warn by _probe
             # other 4xx — the route exists and accepts writes, body just rejected
             return f"device-group write route reachable (probe body rejected: {str(e)[:80]})"
+        # The create went through, so a real group now exists in a production
+        # tenant. New Central group propagation is not instant, so the id from
+        # the POST body is authoritative — a re-list can legitimately miss the
+        # group it just created, and "not in the list" must never be read as
+        # "already gone".
+        scope_id = resp.get("scopeId") or resp.get("id")
+        try:
+            if scope_id is None:
+                for grp in client.list_device_groups(refresh=True):
+                    if grp.get("scopeName") == _PROBE_GROUP:
+                        scope_id = grp.get("scopeId")
+                        break
+            if scope_id is None:
+                return ("device-group WRITE allowed — WARNING: the disposable "
+                        f"'{_PROBE_GROUP}' group was created but its id could "
+                        "not be resolved, so it was NOT deleted — remove it in "
+                        "Central")
+            _delete_probe_group(scope_id)
+        except Exception as e:
+            return ("device-group WRITE allowed — WARNING: the disposable "
+                    f"'{_PROBE_GROUP}' group could not be deleted "
+                    f"({str(e)[:80]}) — remove it in Central")
+        # confirm the deletion actually took
+        try:
+            still_there = any(g.get("scopeName") == _PROBE_GROUP
+                              for g in client.list_device_groups(refresh=True))
+        except Exception as e:
+            return ("device-group WRITE allowed — delete issued but could not "
+                    f"be verified ({str(e)[:80]}) — confirm '{_PROBE_GROUP}' "
+                    "is gone in Central")
+        if still_there:
+            return ("device-group WRITE allowed — WARNING: the disposable "
+                    f"'{_PROBE_GROUP}' group is STILL present after the delete "
+                    "— remove it in Central")
+        return "device-group WRITE allowed (native New Central, not hybrid)"
     results.append(_probe("Write check — device-group create (hybrid?)", group_write))
 
     return results
@@ -131,6 +164,12 @@ def probe_classic(base_url: str, access_token: str, client_id: str = "",
                           lambda: f"{len(client.list_group_names())} group(s) readable"))
     results.append(_probe("Read — classic sites",
                           lambda: f"{len(client.list_sites())} site(s) readable"))
-    results.append(_probe("Read — classic monitored APs",
-                          lambda: f"{len(client.list_all_aps() or [])} AP(s) via /monitoring/v2/aps"))
+
+    def classic_aps():
+        a = client.list_all_aps()
+        if a is None:
+            raise RuntimeError("monitoring read failed — check the token's "
+                               "monitoring scope")
+        return f"{len(a)} AP(s) via /monitoring/v2/aps"
+    results.append(_probe("Read — classic monitored APs", classic_aps))
     return results, client

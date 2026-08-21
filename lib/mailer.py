@@ -77,7 +77,13 @@ def _send_relay(to, subject, body):
     host = os.environ.get("AOS8_SMTP_HOST")
     if not host:
         return False, "smtp-unconfigured"
-    port = int(os.environ.get("AOS8_SMTP_PORT", "587"))
+    # inside a guard, not at import of the value: a non-numeric port must come
+    # back as (False, reason) like every other failure, not raise a ValueError
+    # into the registration screen
+    try:
+        port = int((os.environ.get("AOS8_SMTP_PORT") or "587").strip())
+    except ValueError:
+        return False, "AOS8_SMTP_PORT is not a number"
     user = os.environ.get("AOS8_SMTP_USER")
     password = os.environ.get("AOS8_SMTP_PASS")
     sender = os.environ.get("AOS8_SMTP_FROM") or user or _default_from()
@@ -121,13 +127,24 @@ def _send_direct(to, subject, body):
     if not hosts:
         return False, f"no MX records for {domain}"
     msg = _message(sender, to, subject, body)
+    # Opportunistic TLS, deliberately NOT verifying: MX hosts routinely serve
+    # certificates that don't validate for the name the MX lookup returned
+    # (shared hosting certs, no matching SAN). A verifying context fails on
+    # most of them, the per-host except below then skips every host, and
+    # direct mode never delivers anything. Encrypt when offered; don't
+    # authenticate the peer. _send_relay stays verifying — that host is
+    # operator-configured and we hand it credentials, so its certificate must
+    # check out.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     last = "no MX host reachable"
     for host in hosts:
         try:
             with smtplib.SMTP(host, 25, timeout=20) as s:
                 s.ehlo()
                 if s.has_extn("starttls"):
-                    s.starttls(context=ssl.create_default_context())
+                    s.starttls(context=ctx)
                     s.ehlo()
                 s.send_message(msg)
             return True, ""

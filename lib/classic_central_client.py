@@ -33,12 +33,18 @@ from urllib.parse import quote
 
 import requests
 
+from .http_base import normalize_base
 from .models import AuthType, CentralConfig, ForwardMode, SSID
 from .central_client import PSK_PLACEHOLDER, secret_looks_unusable
 
 OPMODE_CLASSIC = {
     AuthType.OPEN: "opensystem",
     AuthType.MAC: "opensystem",
+    # Classic AOS 10 has NO Enhanced-Open (OWE) opmode. This entry exists only
+    # so the enum mapping is total: compatibility._check_ssid_auth FAILS
+    # preflight for an OWE SSID with a classic destination, so provisioning
+    # never reaches this value with a real OWE network.
+    AuthType.OWE: "opensystem",
     AuthType.WPA2_PSK: "wpa2-psk-aes",
     AuthType.WPA3_SAE: "wpa3-sae-aes",
     AuthType.WPA2_ENTERPRISE: "wpa2-aes",
@@ -110,29 +116,24 @@ class ClassicCentralAPIError(Exception):
 
 def _is_duplicate(err: Exception) -> bool:
     msg = str(err).lower()
-    return "already exists" in msg or "duplicate" in msg
-
-
-
-def _normalize_base(url: str) -> str:
-    """Ensure the base URL has a scheme and no trailing slash. Operators often
-    paste a bare host (internal.api.central.arubanetworks.com) — default to
-    https:// so requests don't fail with 'No scheme supplied'."""
-    url = (url or "").strip().rstrip("/")
-    if url and not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
+    # only inspect the response detail — the error prefix contains the URL
+    # path, and a customer-named object ("duplicate-lab") in the path must
+    # not make an unrelated failure read as idempotent success
+    m = re.search(r"failed \d+: (.*)", msg, re.S)
+    detail = m.group(1) if m else msg
+    return "already exists" in detail or "duplicate" in detail
 
 
 class ClassicCentralClient:
     def __init__(self, base_url: str, access_token: str,
                  client_id: str = "", client_secret: str = "",
                  refresh_token: str = "", timeout: int = 30):
-        self.base = _normalize_base(base_url)
+        self.base = normalize_base(base_url)
         self.access_token = access_token
         self.client_id = client_id
         self.client_secret = client_secret
         self.refresh_token = refresh_token  # rotates — read back after runs
+        self.refresh_token_rotated = False   # True once refresh() rotated it
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {access_token}"})
@@ -149,7 +150,10 @@ class ClassicCentralClient:
         if not (self.client_id and self.client_secret and self.refresh_token):
             return False
         try:
-            resp = self.session.post(
+            # plain requests.post, NOT self.session — the session carries the
+            # expired Bearer header, which must never be sent to the token
+            # endpoint (some gateways reject the request outright)
+            resp = requests.post(
                 f"{self.base}/oauth2/token",
                 params={
                     "client_id": self.client_id,
@@ -174,7 +178,9 @@ class ClassicCentralClient:
         if not token:
             return False  # malformed 200 — let the caller surface the real 401
         self.access_token = token
-        self.refresh_token = data.get("refresh_token", self.refresh_token)
+        # an explicit null/empty refresh_token must not wipe the working one
+        self.refresh_token = data.get("refresh_token") or self.refresh_token
+        self.refresh_token_rotated = "refresh_token" in data
         self.session.headers.update({"Authorization": f"Bearer {self.access_token}"})
         return True
 
@@ -228,8 +234,10 @@ class ClassicCentralClient:
             return {}
         try:
             body = resp.json()
-        except Exception:
-            return {}
+        except ValueError:
+            # a 2xx with a non-JSON body is still a success — flattening it to
+            # {} makes list_group_names return [] and create_group re-POST
+            return {"_raw": resp.text[:300]}
         return {"items": body} if isinstance(body, list) else body
 
     def _get(self, path, params=None):
@@ -238,24 +246,48 @@ class ClassicCentralClient:
     def _post(self, path, json_body=None, params=None):
         return self._request("POST", path, json_body=json_body, params=params)
 
+    def _paginate(self, path: str, items_key: Optional[str] = None,
+                  params: Optional[dict] = None, page_size: int = 100,
+                  max_pages: int = 50) -> list:
+        """Bounded offset pagination. A gateway that ignores `offset` would
+        otherwise loop forever inside a Streamlit spinner, and a truncated
+        list silently breaks every "does this object already exist?" check —
+        so both conditions raise instead of returning partial results."""
+        items, offset = [], 0
+        params = dict(params or {})
+        first_of_prev_page = object()
+        for _ in range(max_pages):
+            params.update({"limit": page_size, "offset": offset})
+            data = self._get(path, params=params)
+            page = data.get(items_key) if items_key else None
+            if page is None:
+                page = (data.get("items") or data.get("data")
+                        or data.get("output") or [])
+            if not isinstance(page, list):
+                page = [page] if page else []
+            if page and page[0] == first_of_prev_page:
+                raise ClassicCentralAPIError(
+                    f"GET {path}: server ignored offset={offset} (page repeated) "
+                    "— cannot enumerate completely")
+            first_of_prev_page = page[0] if page else None
+            items.extend(page)
+            if len(page) < page_size:
+                return items
+            offset += page_size
+        raise ClassicCentralAPIError(
+            f"GET {path}: more than {max_pages * page_size} items — pagination cap hit")
+
     # ─────────────────── Groups ───────────────────
 
     def list_group_names(self, refresh: bool = False) -> list[str]:
         if self._group_names_cache is not None and not refresh:
             return self._group_names_cache
-        names, offset = [], 0
-        while True:
-            data = self._get("/configuration/v2/groups",
-                             params={"offset": offset, "limit": 20})
-            # response "data"/"output": a list of single-element name lists
-            raw = data.get("data") or data.get("output") or data.get("items") or []
-            page = [g for sub in raw for g in (sub if isinstance(sub, list) else [sub])]
-            names.extend(n for n in page if n and n != "unprovisioned")
-            total = data.get("total", 0)
-            offset += 20
-            if len(page) < 20 or (total and offset >= total):
-                self._group_names_cache = names
-                return names
+        # response "data"/"output": a list of single-element name lists
+        raw = self._paginate("/configuration/v2/groups", page_size=20,
+                             max_pages=100)
+        flat = [g for sub in raw for g in (sub if isinstance(sub, list) else [sub])]
+        self._group_names_cache = [n for n in flat if n and n != "unprovisioned"]
+        return self._group_names_cache
 
     def _read_back_architecture(self, name: str) -> str:
         """Best-effort group-properties readback. Returns the architecture
@@ -335,14 +367,20 @@ class ClassicCentralClient:
         try:
             self._post("/platform/device_inventory/v1/devices", json_body=devices)
         except ClassicCentralAPIError as e:
-            if not _is_duplicate(e) and "exist" not in str(e).lower():
+            # "exist" also matches "does not exist" — only _is_duplicate may
+            # swallow, and it inspects the response detail, not the URL
+            if not _is_duplicate(e):
                 raise
 
+    # HPE documents a hard cap on this route: more than 50 serials in one
+    # request comes back 400 "More than 50 devices cannot be moved to a group".
+    MOVE_BATCH = 50
+
     def move_devices(self, group: str, serials: list[str]) -> None:
-        if not serials:
-            return
-        self._post("/configuration/v1/devices/move",
-                   json_body={"group": group, "serials": serials})
+        for i in range(0, len(serials), self.MOVE_BATCH):
+            self._post("/configuration/v1/devices/move",
+                       json_body={"group": group,
+                                  "serials": serials[i:i + self.MOVE_BATCH]})
 
     def delete_group(self, name: str) -> None:
         self._request("DELETE", f"/configuration/v1/groups/{quote(name, safe='')}")
@@ -354,17 +392,11 @@ class ClassicCentralClient:
     def list_sites(self, refresh: bool = False) -> list[dict]:
         if self._sites_cache is not None and not refresh:
             return self._sites_cache
-        sites, offset = [], 0
-        while True:
-            data = self._get("/central/v2/sites",
-                             params={"offset": offset, "limit": 100,
-                                     "calculate_total": True})
-            page = data.get("sites", [])
-            sites.extend(page)
-            if len(page) < 100:
-                self._sites_cache = sites
-                return sites
-            offset += 100
+        # only ever cache a list that came from a complete enumeration
+        self._sites_cache = self._paginate("/central/v2/sites", items_key="sites",
+                                           params={"calculate_total": True},
+                                           page_size=100)
+        return self._sites_cache
 
     def create_site(self, name: str, address: str = "", city: str = "",
                     state: str = "", country: str = "", zipcode: str = "") -> int:
@@ -406,6 +438,17 @@ class ClassicCentralClient:
     def create_wlan(self, group: str, ssid: SSID, index: int,
                     cluster_name: str = "") -> None:
         name = ssid.display_name
+        if ssid.captive_portal_url:
+            # full_wlan has no external-captive-portal field this tool can
+            # populate, so creating it here would provision a fully OPEN guest
+            # network. Preflight (_check_captive_portal) blocks this earlier;
+            # this is the last line of defence.
+            raise ClassicCentralAPIError(
+                f"SSID '{name}' uses an external captive portal "
+                f"({ssid.captive_portal_url}), which Classic Central's full_wlan "
+                "API cannot express — creating it would publish an OPEN guest "
+                "network. Migrate this SSID to New Central, or build the portal "
+                "by hand in Classic first.")
         wlan = copy.deepcopy(_BASE_WLAN)
         wlan.update({
             "name": name,
@@ -470,23 +513,19 @@ class ClassicCentralClient:
     # ─────────────────── Monitoring ───────────────────
 
     def list_all_aps(self, group: Optional[str] = None) -> Optional[list[dict]]:
+        params: dict = {"calculate_total": True}
+        if group:
+            params["group"] = group
         try:
-            aps, offset = [], 0
-            params: dict = {"limit": 100, "calculate_total": True}
-            if group:
-                params["group"] = group
-            while True:
-                params["offset"] = offset
-                data = self._get("/monitoring/v2/aps", params=params)
-                page = data.get("aps", [])
-                aps.extend(page)
-                if len(page) < 100:
-                    return aps
-                offset += 100
+            return self._paginate("/monitoring/v2/aps", items_key="aps",
+                                  params=params, page_size=100)
         except ClassicCentralAPIError as e:
-            # an expired token must surface as its own (actionable) message,
-            # not be flattened into "check monitoring permissions"
-            if "401" in str(e) or "expired" in str(e).lower():
+            # an expired token, or a listing this client knows is incomplete,
+            # must surface as its own (actionable) message rather than being
+            # flattened into the generic "check monitoring permissions" None
+            msg = str(e)
+            if ("401" in msg or "expired" in msg.lower()
+                    or "ignored offset" in msg or "pagination cap" in msg):
                 raise
             return None
 

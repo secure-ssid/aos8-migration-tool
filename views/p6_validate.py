@@ -4,7 +4,7 @@ Step 6: Post-migration validation — confirm converted APs are online in Centra
 import streamlit as st
 
 from lib.session_clients import (
-    build_central_client, build_classic_client, persist_rotated_refresh_token,
+    build_central_client, build_classic_client, persist_classic_tokens,
 )
 from lib.styles import (
     OK, WARN, FAINT, MUTED, TEXT,
@@ -74,10 +74,10 @@ def render():
                 try:
                     all_aps = client.list_all_aps()
                 except Exception as e:
-                    persist_rotated_refresh_token(client)
+                    persist_classic_tokens(client)
                     st.error(f"Could not fetch AP status: {e}")
                     return
-            persist_rotated_refresh_token(client)
+            persist_classic_tokens(client)
         else:
             client = build_central_client()
             with st.spinner("Authenticating..."):

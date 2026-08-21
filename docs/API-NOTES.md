@@ -32,8 +32,30 @@ it uses the UI access token, refreshed via a single-use, rotating refresh token.
 | GET | `/v1/configuration/object/<name>` | Read a config object instance list. |
 | GET | `/v1/configuration/showcommand?command=<cmd>` | Run a show command; JSON document (or `_data` text). |
 
-Every request after login carries `UIDARUBA` and a `config_path` query param
-(`/md` on a Conductor, `/mm/mynode` on a standalone controller).
+Every request after login carries `UIDARUBA`. A `config_path` is REQUIRED on
+`/v1/configuration/object/<name>` (`/md` on a Conductor, `/mm/mynode` on a
+standalone controller). HPE documents only `command` + `UIDARUBA` for
+`showcommand`, so the client makes `config_path` caller-controlled there: the
+show-command fallback pull retries across every candidate node **and** with no
+`config_path` at all, because re-running it at the same dead node returns the
+same empty parse.
+
+AOS 8 caps concurrent sessions at **64** across CLI + WebUI + API (default idle
+timeout 900 s), which is why the client releases its session before every
+re-login and on every exit path — a leaked session per 401 eventually locks the
+account out of the API.
+
+A bad `config_path`, an unknown object and an expired session all come back as
+**HTTP 200** with a `_global_result.status != 0` payload. The client raises on
+that instead of returning an empty list: an empty list is indistinguishable
+from "this controller has no WLANs", which is exactly how a wrong node used to
+read as a clean-but-empty pull.
+
+`node_hierarchy` (used to enumerate config nodes) appears in **no** HPE
+published AOS 8 reference — HPE enumerates the hierarchy with
+`showcommand?command=show switches`. The client therefore records why the node
+scan failed (`node_scan_error`) rather than treating an unreadable hierarchy as
+an empty one; `debug_pull.py` dumps both.
 
 | `config_path` | Use |
 |---|---|
@@ -78,7 +100,7 @@ Calls made during **Step 3 (config phase)**:
 |---|---|---|
 | GET | `/network-config/v1/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). Doubles as the config-access pre-check. |
 | POST | `/network-config/v1/scope-maps` | Map a resource to a scope/persona. Duplicate = idempotent success. |
-| GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Falls back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on 404. |
+| GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Both fall back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on a **404 only** — a 403/500 raises rather than caching an empty site list. |
 | GET | `/network-config/v1/device-groups` | List device groups. |
 | POST | `/network-config/v1/device-groups` | Create empty group (`scopeName`). |
 | POST | `/network-config/v1/device-groups-create-and-add-devices` | Create group + add serials in one call (implemented in the client but not used by the wizard — Step 3 creates groups empty; APs are moved in Step 4 via `device-groups-add-devices`). |
@@ -87,7 +109,7 @@ Calls made during **Step 3 (config phase)**:
 | POST | `/network-config/v1alpha1/server-groups/{name}` | RADIUS server-group — 802.1X SSIDs bind to it via `auth-server-group`. |
 | POST/PATCH | `/network-config/v1/wlan-ssids/{name}` | Upsert underlay SSID (PATCH on duplicate), then scope-map to the group. |
 | POST | `/network-config/v1alpha1/captive-portal/{name}` | Shared external captive-portal profile (referenced by the SSID). |
-| POST/PATCH | `/network-config/v1alpha1/firmware-compliance` | Set compliance. `scope-id`/`object-type`/`device-function` go in the **query string**; on 412/duplicate falls back to PATCH. |
+| POST/PATCH | `/network-config/v1alpha1/firmware-compliance` | Set compliance. `scope-id`/`object-type`/`device-function` go in the **query string**; on 412/duplicate falls back to PATCH. HPE's local-profile write convention is underscored (`object_type=LOCAL`, `scope_id`, `persona`) and its docs warn that a MISSING `object_type` silently stores the profile at Library level instead of erroring — verify against a live tenant that the profile lands at the target scope before assuming kebab-case is accepted here. |
 
 Calls made during **Step 4 (devices phase)**:
 
@@ -115,7 +137,30 @@ SSID forward modes: bridge (and everything when gateways are retired) →
 `FORWARD_MODE_BRIDGE` (underlay); tunnel/split → deferred overlay
 (`FORWARD_MODE_L2`) as above. `OPMODE` maps `AuthType` → Central opmode enum
 (e.g. `WPA2_PERSONAL`, `WPA3_SAE`, `WPA2_ENTERPRISE`,
-`WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`).
+`WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`). OWE / Enhanced Open maps to
+the first-class `ENHANCED_OPEN` opmode — it is **encrypted**, so it must never
+be folded into `OPEN`; Classic has no equivalent value, and preflight FAILs an
+OWE SSID with a classic destination rather than publishing it unencrypted.
+
+**Config API version fallback.** HPE's published v26.04 reference puts scope
+management (`sites`, `device-groups`, `global`, `site-collections`) on `/v1`
+and feature configuration (`wlan-ssids`, `layer2-vlan`, `overlay-wlan`,
+`scope-maps`, …) on `/v1alpha1`, while this repo's paths were runtime-verified
+against a live tenant serving `/v1`. Both can be true — the surface is Select
+Availability. So `scope-maps`, `layer2-vlan/{id}`, `wlan-ssids/{name}` and
+`overlay-wlan/{name}` go through `_config_request()`, which tries a version,
+falls through on a **404 only**, and caches whichever answered for the rest of
+the run. Keep the fallback even if a tenant answers `v1` for all four: it costs
+one 404 on the first call per run and removes the whole class of breakage when
+HPE promotes or retires a route.
+
+**Known divergence — `scope-map` body.** HPE's schema and
+`pycentral/scopes/scope_maps.py` send `{"scope-name": str(scope_id), "persona",
+"resource"}` with **no** `scope-id` member; this client also sends a numeric
+`scope-id`. It is accepted by the tenants this tool has run against. If a
+tenant 400s on the extra key, drop it. HPE now documents
+`POST /network-config/v1alpha1/config-assignments` as the successor — that is a
+separate migration with its own delete-path semantics, not a drop-in swap.
 
 ### Runtime-verify caveats (New Central)
 
@@ -135,10 +180,10 @@ SSID forward modes: bridge (and everything when gateways are retired) →
 |---|---|---|
 | POST | `/oauth2/token` (query string) | Refresh: `client_id`, `client_secret`, `grant_type=refresh_token`, `refresh_token` in the **query string**, empty body. Returns a **new** refresh token. |
 | GET | `/configuration/v2/groups` | List group names (response is a list of single-element name lists). |
-| POST | `/configuration/v3/groups` | Create AOS10 group (per-section `Architecture=AOS10`, `AllowedDevTypes`). |
+| POST | `/configuration/v3/groups` | Create AOS10 group. `Architecture` is a **single scalar** inside `group_properties` (alongside `AllowedDevTypes`), not a per-section value. |
 | GET | `/configuration/v1/groups/properties` | Read back `Architecture` to verify the create actually applied. |
 | POST | `/platform/device_inventory/v1/devices` | Pre-add serial+MAC pairs to inventory (duplicates fine). |
-| POST | `/configuration/v1/devices/move` | Move serials into a group. |
+| POST | `/configuration/v1/devices/move` | Move serials into a group. **Hard cap of 50 serials per request** (HPE returns 400 "More than 50 devices cannot be moved to a group"), so the client chunks. |
 | GET/POST | `/central/v2/sites` | List / create site (`site_address` **or** zeroed `geolocation` — mutually exclusive, one required). |
 | POST | `/central/v2/sites/associations` | Associate devices (`device_type="IAP"`, `device_ids`). |
 | POST | `/configuration/full_wlan/{group}/{name}` | Create WLAN (see wrapper quirk below). |
@@ -190,10 +235,21 @@ region.
 |---|---|---|
 | GET | `/devices/v1/devices` | List / filter devices (`filter=serialNumber eq '<s>'`). |
 | POST | `/devices/v1/devices` | Claim network devices → **202** + `Location: /devices/v1/async-operations/{id}`. |
-| GET | `/devices/v1/async-operations/{id}` | Poll claim status until `completed`/`failed` (10s interval, 5 min timeout). |
+| GET | `/devices/v1/async-operations/{id}` | Poll the operation (10s interval, 5 min timeout). HPE's `AsyncOperationResource.status` enum is `INITIALIZED, RUNNING, FAILED, SUCCEEDED, TIMEDOUT, PAUSED`, but HPE's own prose says `TIMEOUT` and the New Central guide says `TIMED_OUT` — the client normalises the value to letters only and matches on that, never on a literal spelling. `PAUSED` is non-terminal and is surfaced through the poll callback. A body with no recognisable status raises rather than polling to the deadline. |
 | GET | `/subscriptions/v1/subscriptions` | List subscriptions; resolve a key → UUID (`filter=key eq '<k>'`). |
-| GET | `/service-catalog/v1/service-manager-provisions` | Central application instances (id + region) in the workspace; `/v1beta1/` fallback. |
+| GET | `/service-catalog/v1/service-manager-provisions` | Central application instances (id + region) in the workspace. The `/v1beta1/` route was retired (EOL 2025-06-30) and is no longer tried; a 403 here raises instead of reporting "no Central instances". |
 | PATCH | `/devices/v2beta1/devices?id=<uuid>` | **Two sequential merge-patches** (GLP rejects combining them): 1) `{"application":{"id":…},"region":…}` — REQUIRED for Central to adopt the AP; 2) `{"subscription":[{"id": <uuid>}]}`. Each is polled to a terminal state when GLP answers 202 (the returned `Location` path is honored as-is). |
+
+A `SUCCEEDED` batch can still carry a per-device breakdown: there is no
+`PARTIAL_SUCCESS` status, so `poll_task` returns the result unchanged and the
+views record a failed step naming `failed_serials(result)`. Only a batch where
+**every** submitted device was rejected raises.
+
+GreenLake token lifetimes differ by scope and neither has a refresh token:
+**Central**-scoped clients get `expires_in: 7199` (2 h), **GLP**-scoped clients
+get `expires_in: 899` (15 min). Since one claim can block for 5 minutes and
+Step 4 loops per AP, both clients track `expires_in` and re-authenticate 60 s
+before expiry instead of waiting for a mid-run 401.
 
 ### Runtime-verify caveats (GLP)
 

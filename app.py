@@ -61,6 +61,17 @@ if not identity.auth_mode_valid():
         "without a working auth mode."
     )
     st.stop()
+_pw_weak = identity.app_password_weak() if _mode == "password" else None
+if _pw_weak:
+    # A guessable shared secret is the same fail-open as an unknown mode: the
+    # gate renders and lets anyone through. Compose's ${AOS8_APP_PASSWORD:?}
+    # only checks that the value is non-empty, so the placeholder boots clean.
+    st.error(
+        f"🔒 {_pw_weak}. Set a strong shared password in `.env` "
+        "(`AOS8_APP_PASSWORD`) and restart — refusing to serve "
+        "`AOS8_AUTH_MODE=password` on a guessable secret."
+    )
+    st.stop()
 if identity.requires_login():        # 'password' or 'accounts' — in-app login gate
     if not auth_ui.render_gate():
         st.stop()

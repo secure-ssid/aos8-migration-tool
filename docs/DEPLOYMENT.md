@@ -71,13 +71,19 @@ encrypted credential store and the audit log.
 ## HTTPS via Caddy (recommended for any multi-user mode)
 
 Passwords/codes traverse the connection — never serve plain `:8501` to
-users. The shipped compose file publishes `8501` on **all interfaces** so a
-Caddy on a separate host can front it; `deploy/Caddyfile` is a ready example
-(Caddy handles the websockets Streamlit needs automatically).
+users. The shipped compose file publishes `8501` on **loopback only**
+(`127.0.0.1:8501:8501`), which is what `deploy/Caddyfile` expects: Caddy on
+the same host terminates TLS and proxies to it (and handles the websockets
+Streamlit needs automatically).
 
-- If Caddy runs on the **same** host, change the compose binding to
-  `127.0.0.1:8501:8501`.
-- Either way, firewall plain `:8501` from users.
+- If Caddy runs on a **separate** host, override the compose binding to
+  `8501:8501` and firewall plain `:8501` so only Caddy's address reaches it.
+- If Caddy runs as a **container** in the same project, drop the published
+  port entirely and proxy to `http://app:8501`.
+- `deploy/Caddyfile` inbound-strips `X-Forwarded-Email` /
+  `X-Forwarded-User` / `X-Auth-Request-Email`; Caddy itself authenticates
+  nobody, so in `proxy` mode put a real authenticator (`forward_auth` to
+  oauth2-proxy) in front and let it re-add the header.
 
 ## Reverse-proxy header mode (`AOS8_AUTH_MODE=proxy`)
 
@@ -112,7 +118,7 @@ rather than fall back to an unauthenticated mode.
 | Var | Default | Purpose |
 |---|---|---|
 | `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person verified-email login (any domain unless restricted); `proxy` = reverse-proxy header; `local` = single user. Any other value fails closed (the app refuses to serve). |
-| `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode (required in that mode; fail-closed if unset) |
+| `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode. Required in that mode, and the app refuses to serve if it is unset, shorter than 16 characters, or still the `change-me-to-a-strong-shared-password` placeholder from `.env.example` |
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |

@@ -86,7 +86,8 @@ def render():
     user = st.session_state.get("_user")
     if not st.session_state.get("_creds_loaded"):
         st.session_state["_creds_loaded"] = True
-        saved = credstore.load(user)
+        saved, status = credstore.load_status(user)
+        st.session_state["_creds_status"] = status
         for k, v in saved.items():
             st.session_state.setdefault(k, v)
         # only treat it as "remembered" if a real credential was saved — a
@@ -94,6 +95,11 @@ def render():
         # then clears that stale partial file).
         if any(saved.get(k) for k in credstore.CREDENTIAL_FIELDS):
             st.session_state.setdefault("remember_creds", True)
+    if st.session_state.get("_creds_status") == "undecryptable":
+        # a saved file exists but this key can't read it; saving is refused
+        # rather than merging onto {} and destroying what's in there
+        st.warning("Saved credentials can't be decrypted — "
+                   "AOS8_CREDSTORE_KEY changed")
 
     # ── Customer ───────────────────────────────────────────────────────────
     section_label("Customer")
@@ -207,7 +213,7 @@ def render():
             from lib import cleanup as _cleanup
             from lib.session_clients import (build_central_client, build_classic_client,
                                              have_classic_creds,
-                                             persist_rotated_refresh_token)
+                                             persist_classic_tokens)
             # old results are from a different run — never let them imply this
             # click succeeded
             st.session_state.pop("cleanup_results", None)
@@ -226,7 +232,7 @@ def render():
                 st.session_state["cleanup_results"] = res
                 # cleanup may have refreshed the single-use classic token
                 if cl is not None:
-                    persist_rotated_refresh_token(cl)
+                    persist_classic_tokens(cl)
                 audit.record(
                     "cleanup",
                     user=st.session_state.get("_user"),
@@ -362,18 +368,40 @@ def render():
                                 "on this box (typical for a Managed Device) — pulled "
                                 "via CLI show-commands over the API instead, the same "
                                 "data paste mode parses.")
+                        if getattr(client, "object_read_error", ""):
+                            st.warning(
+                                "The configuration-object API refused every node "
+                                f"(`{client.object_read_error}`). The CLI parse above "
+                                "is what the migration will use — check the discovered "
+                                "SSIDs are complete before continuing.")
                     elif client.config_path != requested_path:
                         st.info(f"No config at node `{requested_path}` — found it at "
                                 f"`{client.config_path}` (auto-detected and saved to "
                                 "Advanced — API options).")
                     if not customer_cfg.ap_groups and not customer_cfg.ssids:
+                        detail = ""
+                        if getattr(client, "node_scan_error", ""):
+                            detail = ("\n\nThe node hierarchy could not be read "
+                                      f"(`{client.node_scan_error}`), so only the "
+                                      "standard fallback nodes were probed — this "
+                                      "is **not** proof that no config exists.")
                         st.warning(
-                            "Connected, but no AP groups or SSIDs exist on any config "
-                            "node this box exposes. If this is a **Managed Device**, "
-                            "pull from the **Mobility Conductor** instead — or set the "
-                            "exact node in *Advanced — API options* (conductor: "
-                            "`/md/<node>`; standalone controller: `/mm/mynode`). "
-                            "Paste mode works on any box.")
+                            "Connected, but no AP groups or SSIDs were found on any "
+                            "config node this box exposes. If this is a **Managed "
+                            "Device**, pull from the **Mobility Conductor** instead "
+                            "— or set the exact node in *Advanced — API options* "
+                            "(conductor: `/md/<node>`; standalone controller: "
+                            "`/mm/mynode`). Paste mode works on any box." + detail)
+                    if getattr(client, "ap_scan_error", ""):
+                        st.warning("The AP inventory read failed "
+                                   f"(`{client.ap_scan_error}`) — the AP list is "
+                                   "incomplete, not empty. Re-run before cutover.")
+                    if getattr(client, "running_config_error", ""):
+                        st.warning(
+                            "`show running-config` could not be read "
+                            f"(`{client.running_config_error}`), so EAP-termination, "
+                            "internal-auth and captive-portal detection were skipped "
+                            "for this pull — preflight cannot block on them.")
                 except AOS8APIError as e:
                     st.error(f"AOS 8 API error: {e}")
                     st.info("If port 4343 is firewalled or the API is disabled, "
@@ -534,6 +562,14 @@ def render():
         )
     else:
         st.session_state["remember_creds"] = False
+        if credstore.key_invalid():
+            # available() is False, so the toggle above is hidden — say why
+            # instead of leaving an unexplained gap.
+            st.warning(
+                "AOS8_CREDSTORE_KEY isn't a valid Fernet key, so credentials "
+                "can't be remembered. Generate one with: `python -c \"from "
+                "cryptography.fernet import Fernet; "
+                "print(Fernet.generate_key().decode())\"`")
     if remember:
         st.markdown(
             f'<div style="font-size:11.5px;color:{FAINT};margin:-0.4rem 0 0.6rem;">'
@@ -658,7 +694,8 @@ def render():
                 # so clear first)
                 credstore.clear(user)
                 if st.session_state.get("remember_creds"):
-                    credstore.save_from_session(st.session_state, user)
+                    st.session_state["_cred_save_failed"] = \
+                        not credstore.save_from_session(st.session_state, user)
                 st.rerun()
     else:
         c1, c2 = st.columns([3, 1])
@@ -708,9 +745,15 @@ def render():
     # after every cred field above is captured into session_state, so the file
     # tracks the latest values as you go.
     if st.session_state.get("remember_creds"):
-        credstore.save_from_session(st.session_state, user)
+        st.session_state["_cred_save_failed"] = \
+            not credstore.save_from_session(st.session_state, user)
     elif credstore.exists(user):
         credstore.clear(user)
+        st.session_state["_cred_save_failed"] = False
+    if st.session_state.get("_cred_save_failed"):
+        # a full or read-only state volume, or an existing file this key can't
+        # read back — either way the credentials are NOT persisted
+        st.warning("Couldn't save credentials — check the state volume")
 
     fw_valid = bool(_FW_RE.match(aos10_fw.strip()))
     if aos10_fw and not fw_valid:
@@ -737,7 +780,7 @@ def render():
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
                 from lib.session_clients import (have_classic_creds,
-                                                 persist_rotated_refresh_token)
+                                                 persist_classic_tokens)
                 # refresh-token + id/secret (the remembered-creds shape) is a
                 # probe-able config too — the client re-mints on the first 401
                 if have_classic_creds():
@@ -748,15 +791,15 @@ def render():
                         st.session_state.get("classic_refresh_token", ""))
                     rows += _cl_rows
                     # the probe may have consumed the single-use refresh token
-                    persist_rotated_refresh_token(_cl)
+                    persist_classic_tokens(_cl)
             else:
-                from lib.session_clients import persist_rotated_refresh_token
+                from lib.session_clients import persist_classic_tokens
                 _cl_rows, _cl = api_probe.probe_classic(
                     central_base, st.session_state.get("classic_access_token", ""),
                     central_client_id, st.session_state.get("central_secret", ""),
                     st.session_state.get("classic_refresh_token", ""))
                 rows += _cl_rows
-                persist_rotated_refresh_token(_cl)
+                persist_classic_tokens(_cl)
         st.session_state["probe_results"] = [(r.name, r.status, r.detail) for r in rows]
 
     for name, status, detail in st.session_state.get("probe_results", []):

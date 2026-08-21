@@ -76,20 +76,7 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
             grp.ssids = list(all_ssid_names)
             mapping_incomplete = True
 
-    # EAP termination on the controller ("EAP offload") lives inside the
-    # dot1x auth profile as `termination enable` — the old aaa-fastconnect
-    # token is not an AOS 8 running-config keyword, so keep it only as a
-    # belt-and-suspenders extra.
-    has_eap = "aaa-fastconnect" in running.lower()
-    for _dot1x_name, _dot1x_block in _iter_blocks(running, r"aaa authentication dot1x"):
-        if any(l.strip().lower().startswith("termination") for l in _dot1x_block):
-            has_eap = True
-            break
-    # The built-in "Internal" server appears in EVERY `show aaa
-    # authentication-server all` output — its mere presence proves nothing.
-    # Internal auth is in USE only when a server-group references it.
-    has_internal = bool(re.search(r'^\s*auth-server\s+"?Internal"?\s*$',
-                                  running, re.IGNORECASE | re.MULTILINE))
+    has_eap, has_internal = detect_auth_flags(running)
 
     return CustomerConfig(
         mc_ip=mc_ip_parsed or mc_ip,
@@ -329,7 +316,7 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     return profiles
 
 
-def _mc_captive_portals(running: str) -> dict[str, dict]:
+def mc_captive_portals(running: str) -> dict[str, dict]:
     """Resolve the MC external-captive-portal chain to aaa-profile → {url,
     redirect}: virtual-ap names an aaa-profile → its initial-role → that
     user-role's `captive-portal <cp>` → the `aaa authentication captive-portal`
@@ -366,6 +353,30 @@ def _mc_captive_portals(running: str) -> dict[str, dict]:
     return aaa_cp
 
 
+def detect_auth_flags(running: str) -> tuple[bool, bool]:
+    """(has_eap_offload, has_internal_auth) from a running-config.
+
+    Shared by paste mode and the API pull: both feed the two BLOCKING
+    preflight checks, and an API-mode pull that leaves them False lets a
+    controller doing EAP termination pass preflight clean.
+
+    EAP termination on the controller ("EAP offload") lives inside the dot1x
+    auth profile as `termination enable` — the old aaa-fastconnect token is
+    not an AOS 8 running-config keyword, so it is kept only as a
+    belt-and-suspenders extra. The built-in "Internal" server appears in EVERY
+    `show aaa authentication-server all` output, so its mere presence proves
+    nothing: internal auth is in USE only when a server-group references it.
+    """
+    has_eap = "aaa-fastconnect" in running.lower()
+    for _dot1x_name, _dot1x_block in _iter_blocks(running, r"aaa authentication dot1x"):
+        if any(l.strip().lower().startswith("termination") for l in _dot1x_block):
+            has_eap = True
+            break
+    has_internal = bool(re.search(r'^\s*auth-server\s+"?Internal"?\s*$',
+                                  running, re.IGNORECASE | re.MULTILINE))
+    return has_eap, has_internal
+
+
 def _aaa_server_groups(running: str) -> dict[str, str]:
     """aaa-profile → RADIUS server-group name. The virtual-ap references an
     aaa-profile, but the actual server group hangs off `dot1x-server-group`
@@ -389,7 +400,7 @@ def _aaa_server_groups(running: str) -> dict[str, str]:
 
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
-    mc_cps = _mc_captive_portals(running)
+    mc_cps = mc_captive_portals(running)
     aaa_sgs = _aaa_server_groups(running)
     for name, block in _iter_blocks(running, r"wlan virtual-ap"):
         vlan = 1
