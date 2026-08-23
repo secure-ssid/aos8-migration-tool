@@ -168,7 +168,7 @@ Enter into Step 1 → Destination:
 | Classic API gateway base URL | `https://apigw-uswest4.central.arubanetworks.com` | Your cluster's apigw host (apigw-uswest4 / apigw-eucentral3 / …). |
 | Access token | (from API Gateway) | Required. ~2h lifetime. |
 | Refresh token | (optional) | Enables auto-refresh. **Rotates on every use** — see below. |
-| API client ID / secret | (optional) | Needed only for refresh. |
+| API client ID / secret | (optional) | Needed only for refresh. On a **hybrid** tenant (New Central + Classic API for moves) these must come from the **Classic API Gateway** app (System Apps & Tokens) — NOT the GreenLake client. The two issuers differ; a Classic refresh attempted with GreenLake creds 401s ~2h into a cutover. Hybrid mode has its own Classic client id/secret fields for this. |
 | Target AOS 10 | `10.7.0.0` | |
 
 > **Classic refresh token rotation:** the classic refresh token is single-use.
@@ -419,9 +419,15 @@ provision → claim → convert.
 6. At cutover: **Move APs into groups + assign persona/site** — the
    `devices` phase of provisioning. This is the conversion trigger for
    pre-assigned APs; it also assigns the CAMPUS_AP persona and the site.
-   The button stays disabled until you tick both the review checkbox at the
-   top and the "I'm in my cutover window — convert these N AP(s) now"
-   confirmation — moving live APs is the conversion trigger.
+   The button stays disabled until three things are true: the review
+   checkbox at the top is ticked, every AP has a session-confirmed
+   subscription assignment (otherwise tick the confirmation that they
+   were subscribed outside this session — an AP converted **without an
+   active subscription comes up unmanaged in Central**), and the
+   "I'm in my cutover window — convert these N AP(s) now" confirmation
+   is ticked. A success banner from a previous run is replaced by a
+   staleness warning if the config or tenant changed since — re-run the
+   move before treating the migration as complete.
 
 What it does behind the scenes:
 1. Buckets APs into **claimable** (serial + MAC), **missing MAC**, **missing
@@ -564,6 +570,10 @@ Two more modes live in the sidebar's **Mode** switch:
 - **Add devices only** — onboard APs into groups that already exist in the
   tenant: claim → subscribe → move → persona, skipping discovery and config
   entirely. Feed it a pasted `show ap database long` or a serial+MAC list.
+  On a **hybrid** tenant the group move routes via the Classic API — enter a
+  Classic access token (or refresh token + the Classic client id/secret —
+  NOT the GreenLake client); the tool authenticates Classic **before**
+  claiming so a dead Classic credential can't strand a half-onboarded fleet.
 
   ![Add devices only mode](screenshots/11-add-devices.png)
 

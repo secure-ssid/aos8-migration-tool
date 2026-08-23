@@ -38,7 +38,11 @@ standalone controller). HPE documents only `command` + `UIDARUBA` for
 `showcommand`, so the client makes `config_path` caller-controlled there: the
 show-command fallback pull retries across every candidate node **and** with no
 `config_path` at all, because re-running it at the same dead node returns the
-same empty parse.
+same empty parse. When the config-node re-probe replaces the node mid-pull, the
+client **re-fetches `show running-config` at the detected node** — everything
+derived from it (external captive-portal chain, EAP-offload, internal-auth
+flags) belongs to the original node, so a stale copy would let blocking
+preflight checks pass on the wrong data.
 
 AOS 8 caps concurrent sessions at **64** across CLI + WebUI + API (default idle
 timeout 900 s), which is why the client releases its session before every
@@ -73,8 +77,11 @@ MAC, Group), `show controller-ip`, `show version`,
 `show lc-cluster group-membership`.
 
 Quirks handled in the client:
-- `opmode` arrives as a flag dict (`{"wpa2-psk-aes": true}`) — the client takes
-  the first true flag.
+- `opmode` arrives as a flag dict (`{"wpa2-psk-aes": true}`) — a transition-mode
+  profile carries TWO true flags, so the client reduces by security strength
+  (strongest wins: WPA3/SAE > OWE > PSK/802.1X > open) with the token itself
+  as alphabetical tie-break. Deterministic, and unknown/future tokens rank
+  below known ones so they never silently mask a known flag.
 - Some values are double-wrapped as `{key: {key: val}}` (`_field()` unwraps).
 - VLAN tokens may be `"100"`, a comma list (`"100,200"`), a range
   (`"100-105"`), or a **named** VLAN — `_safe_vlan()` takes the first valid
@@ -83,6 +90,10 @@ Quirks handled in the client:
 - `opensystem` + a `mac-server-group` on the bound aaa-profile is a
   **MAC-auth** network (legacy printer/IoT SSIDs are exactly this) —
   `auth_type` becomes `MAC`, never `OPEN`, so it cannot migrate wide open.
+  On the REST discovery path this detection depends on the best-effort
+  `aaa_prof` object read: if that fetch fails, opensystem SSIDs migrate as
+  plain OPEN with no preflight flag. The paste path parses
+  `mac-server-group` from the running-config directly and is unaffected.
 - AP models are normalised (`205` → `AP-205`); country suffixes (`-US`, `-RW`,
   `-JP`, `-IL`, `-EG`) are stripped for the compatibility lookup, and AP-/IAP-
   prefixes are treated as interchangeable hardware.

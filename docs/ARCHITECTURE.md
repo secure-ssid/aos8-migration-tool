@@ -23,7 +23,12 @@ lib/
   credstore.py             # opt-in encrypted per-user credential store
   audit.py                 # per-user audit log of write actions
   session_clients.py       # cached per-session Central/GLP client factories
-  cleanup.py               # "Clean up test objects" tool (zztest-* deletion)
+  cleanup.py               # "Clean up test objects" tool (zztest-* deletion) — tears
+                           # down every resource type provisioning creates: SSIDs,
+                           # captive portals, VLANs, roles/policies, firmware
+                           # compliance (cleared before the group scope disappears),
+                           # device groups, sites, gateway clusters; on hybrid
+                           # tenants Classic-owned groups defer to the Classic delete
   testdata.py              # built-in test customer for demos/labs
   api_probe.py             # Step 1 "Test API connectivity" endpoint probes
   api_catalog.py           # catalog of every REST endpoint the tool can call
@@ -168,10 +173,11 @@ session — nothing is written to disk).
 | `central_base` / `central_base_classic` | p1 | Regional New Central base / classic apigw base. |
 | `central_client_id`, `central_secret` | p1 | Central (and unified-GLP) credentials. |
 | `classic_access_token`, `classic_refresh_token` | p1, p3, p4, p6 | Classic token + rotating refresh token (updated after refresh). |
+| `classic_client_id`, `classic_client_secret` | p1, add_devices | Classic API Gateway OAuth client for token refresh — a distinct issuer from the GreenLake client; on hybrid tenants these are separate fields (Classic-mode destinations fall back to `central_client_id`/`central_secret`). |
 | `aos10_fw` | p1 | Target AOS 10 version string. |
 | `gw_strategy` | p1 | "keep" or "retire". |
 | `glp_use_central_creds`, `glp_client_id`, `glp_secret` | p4 | GLP credential source. |
-| `paste_*` / `ipaste_*` | p1 | Per-command text areas (MC / Instant paste). |
+| `paste_*` / `ipaste_*` | p1 | Per-command text areas (MC / Instant paste). Each box mirrors into a durable `paste_saved_*` / `ipaste_saved_*` key so pasted output survives step navigation (widget-keyed state is garbage-collected when the widget isn't rendered). |
 
 ### Derived / result state (cleared on rediscovery)
 
@@ -187,6 +193,7 @@ session — nothing is written to disk).
 | `glp_sub_results` | p4 | `[(serial, ok, err)]` for subscription assignment. |
 | `glp_service_managers` | p4 | Central application instances (id/region) loaded from GLP. |
 | `onboard_results` | p4 | `[(label, ok, detail)]` from the devices-phase cutover move. |
+| `onboard_results_fp` | p4 | SHA-1 fingerprint of tenant + config consumed by the cutover run; a mismatch flags the success banner as stale (config/tenant changed since). Cleared by re-provisioning and by the Step 2 VLAN remap. |
 | `probe_results` | p1 | API endpoint probe results. |
 | `macedit_result` | p4 | `{applied, bad}` from the wired-MAC editor. |
 | `validation_results` | p6 | Raw AP list fetched from Central. |
