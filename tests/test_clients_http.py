@@ -930,6 +930,32 @@ def test_classic_enterprise_requires_manual_radius_setup():
     assert not any("RADIUS" in r.name.upper() for r in new_fails)
 
 
+def test_classic_mac_auth_requires_manual_radius_setup():
+    """R1 (Forge review of PR #7): the B2 manual-RADIUS gate sat under
+    `elif enterprise` — a MAC-only SSID set on a Classic destination never
+    hit it, yet the Classic client emits the same dangling auth_server1
+    reference for MAC-auth WLANs. The gate must fire for MAC-only too."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, RadiusServer, SSID)
+    ssid = SSID(name="legacy-iot", essid="Legacy-IoT", vlan=100,
+                forward_mode=ForwardMode.TUNNEL,
+                auth_type=AuthType.MAC, auth_server_group="mac-sg")
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid],
+                              radius_servers=[RadiusServer("cp-1", "10.0.0.50")])
+    classic = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="classic")
+    fails = [r for r in compatibility.run_all(customer, classic)
+             if r.status == compatibility.Status.FAIL]
+    assert any("RADIUS" in r.name.upper() for r in fails)
+    new = CentralConfig(customer_name="acme", base_url="https://x",
+                        destination="new")
+    new_fails = [r for r in compatibility.run_all(customer, new)
+                 if r.status == compatibility.Status.FAIL]
+    assert not any("RADIUS" in r.name.upper() for r in new_fails)
+
+
 def test_persona_assignment_prefers_spec_path(mock_api):
     """B1: the spec only defines POST /persona-assignment/{device-function};
     the bare collection must be the fallback, not the first try."""
