@@ -118,6 +118,10 @@ def render():
         if col_mid.button("Reset & re-run provisioning"):
             st.session_state.pop("provision_done", None)
             st.session_state.pop("provision_results", None)
+            # re-provisioning invalidates any earlier cutover's "migration
+            # complete" banner — it described the pre-reset config
+            st.session_state.pop("onboard_results", None)
+            st.session_state.pop("onboard_results_fp", None)
             st.rerun()
         if col_next.button("GreenLake →", type="primary", use_container_width=True):
             st.session_state["step"] = 3

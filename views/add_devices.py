@@ -389,6 +389,23 @@ def render():
                 if htok.strip() != st.session_state.get("classic_access_token"):
                     st.session_state["hybrid_tenant"] = True
                 st.session_state["classic_access_token"] = htok.strip()
+            hc1, hc2 = st.columns(2)
+            hcid = hc1.text_input(
+                "Classic API client ID (needed for refresh)",
+                value=st.session_state.get("classic_client_id", ""),
+                help="From the CLASSIC API Gateway app — NOT the Central/GreenLake "
+                     "client above: different issuer, and a Classic token refresh "
+                     "with GreenLake creds 401s mid-run",
+            )
+            if hcid.strip():
+                st.session_state["classic_client_id"] = hcid.strip()
+            hcsec = hc2.text_input(
+                "Classic API client secret", type="password",
+                placeholder="•••••••• (saved)"
+                if st.session_state.get("classic_client_secret") else "",
+            )
+            if hcsec:
+                st.session_state["classic_client_secret"] = hcsec.strip()
             hybrid = st.checkbox(
                 "This tenant is hybrid — route the group move via the Classic API",
                 key="hybrid_tenant",
@@ -398,7 +415,7 @@ def render():
                      "when you enter a token.")
             if hybrid and not use_classic_for_moves():
                 mono_caption("WAITING FOR: A CLASSIC ACCESS TOKEN (OR REFRESH "
-                             "TOKEN + CLIENT ID/SECRET FROM STEP 1)", color=WARN)
+                             "TOKEN + CLASSIC CLIENT ID/SECRET)", color=WARN)
 
         central_ready = bool(st.session_state.get("central_base")
                              and st.session_state.get("central_client_id")
@@ -489,6 +506,22 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
                                 str(e)[:200] + " — aborted before claiming"))
                 return
         classic = build_classic_client() if use_classic_for_moves() else None
+        if classic is not None:
+            # the invariant above covers the Classic client too: a dead/expired
+            # classic credential discovered AFTER claiming leaves a partial run
+            # (claimed + subscribed, but never moved). One read proves the
+            # token (and re-mints it via the refresh token when needed).
+            with st.spinner("Authenticating with Classic API Gateway..."):
+                try:
+                    classic.list_group_names(refresh=True)
+                except Exception as e:
+                    results.append(("Authenticate Classic API Gateway", False,
+                                    str(e)[:200] + " — aborted before claiming"))
+                    # a failed 401-refresh may still have consumed the
+                    # single-use refresh token
+                    persist_classic_tokens(classic)
+                    return
+                persist_classic_tokens(classic)
 
     serials = [d["serial"] for d in devices]
     macs = {d["serial"]: d["mac"] for d in devices}
