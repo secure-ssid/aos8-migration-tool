@@ -405,9 +405,13 @@ class AOS8Client:
             opmode = ""
             raw_opmode = item.get("opmode", {})
             if isinstance(raw_opmode, dict):
-                # opmode arrives as a flag dict, e.g. {"wpa2-psk-aes": true}
+                # opmode arrives as a flag dict, e.g. {"wpa2-psk-aes": true}.
+                # A transition-mode profile carries TWO true flags — reducing
+                # to flags[0] picks by JSON key order (non-deterministic and
+                # invisible to preflight). Rank by security strength and take
+                # the strongest; alphabetical tie-break keeps it stable.
                 flags = [k for k, v in raw_opmode.items() if v is True]
-                opmode = flags[0] if flags else ""
+                opmode = max(flags, key=_opmode_rank) if flags else ""
             elif isinstance(raw_opmode, str):
                 opmode = raw_opmode
             profiles[name] = {
@@ -759,6 +763,25 @@ class AOS8Client:
             detected = self.find_config_node()
             if detected:
                 self.config_path = detected
+                # running-config was fetched at the ORIGINAL node — everything
+                # derived from it (external captive-portal chain, EAP offload,
+                # internal-auth flags) belongs to that node. Re-fetch at the
+                # detected node or the re-probed SSIDs inherit stale flags;
+                # worst case an external-captive-portal guest SSID migrates
+                # as a fully open network while both BLOCKING preflight
+                # checks silently pass. Same failure semantics as the initial
+                # fetch: empty parse, recorded error, never stale data.
+                try:
+                    running = self._show_text(
+                        "show running-config",
+                        timeout=max(self.timeout, 120))
+                    self.running_config_error = ""
+                except (AOS8APIError, requests.RequestException,
+                        ValueError) as e:
+                    running = ""
+                    self.running_config_error = str(e)
+                has_eap, has_internal = detect_auth_flags(running)
+                captive_portals = mc_captive_portals(running) if running else {}
                 ap_groups, vap_bindings, ssids, vlans, radius, sgroups = \
                     self._pull_objects(captive_portals)
                 node_error = None
@@ -900,6 +923,24 @@ def _normalize_model(model: Any) -> str:
     if re.fullmatch(r"\d+[A-Z]*", model):
         return f"AP-{model}"
     return model
+
+
+def _opmode_rank(token: str) -> tuple[int, str]:
+    """Security-strength rank for an AOS 8 opmode flag token — used to reduce
+    a transition-mode flag dict deterministically (strongest wins). The token
+    itself is the tie-break so equal-strength sets always resolve the same
+    way. Unknown/future tokens rank BELOW known ones so they are never
+    silently preferred, but also never silently mask a known flag."""
+    op = (token or "").lower()
+    if "sae" in op or "wpa3" in op:
+        return 40, op
+    if "owe" in op or "enhanced-open" in op:
+        return 30, op
+    if "psk" in op or "dot1x" in op or "8021x" in op or "enterprise" in op:
+        return 20, op
+    if "opensystem" in op or op == "open":
+        return 10, op
+    return 0, op
 
 
 def _opmode_to_auth(opmode: str) -> tuple[AuthType, bool]:
