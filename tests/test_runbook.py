@@ -43,7 +43,7 @@ def test_no_unrendered_placeholders():
 
 def test_convert_block_present_with_groups():
     text = _runbook()
-    assert "ap convert add ap-group campus" in text
+    assert 'ap convert add ap-group "campus"' in text
     assert "ap convert" in text
 
 
@@ -90,3 +90,26 @@ def test_runbook_contains_deferred_overlay_completion():
     central = translate(customer, "Acme", "https://x", gateway_mode="retire")
     text2 = generate(customer, central, "Acme")
     assert "COMPLETE THE OVERLAY" not in text2
+
+
+def test_convert_block_quotes_ap_group_with_spaces():
+    """L5: an AP-group name containing spaces breaks unquoted CLI — the
+    runbook must quote it."""
+    customer = _customer()
+    customer.ap_groups[0].name = "campus aps"
+    central = translate(customer, "Acme", "https://x")
+    text = generate(customer, central, "Acme")
+    assert 'ap convert add ap-group "campus aps"' in text
+
+
+def test_runbook_flags_placeholder_site_address():
+    """L6: a blank site address silently becomes the lab placeholder on a
+    production site object — the runbook must repeat that."""
+    customer = _customer()
+    central = translate(customer, "Acme", "https://x")
+    central.site_address = ""
+    text = generate(customer, central, "Acme")
+    assert "1 Lab Street" in text
+    assert "placeholder" in text.lower()
+    central.site_address = "400 TradeCenter"
+    assert "1 Lab Street" not in generate(customer, central, "Acme")

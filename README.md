@@ -125,7 +125,7 @@ the security notes that matter, in the
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
-python -m pytest tests/ -q        # 40 tests, no hardware or tenant needed
+python -m pytest tests/ -q        # no hardware or tenant needed
 python -m pyflakes app.py lib/*.py views/*.py
 ```
 

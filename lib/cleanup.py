@@ -142,6 +142,8 @@ def cleanup(prefix: str, central=None, classic=None,
                             central._delete("/network-config/v1/device-groups/bulk",
                                             json={"items": [{"id": i}]})
                         except Exception:
+                            # spec offers bulk deletes only; the single-id
+                            # form is a last-resort for older tenants
                             central._delete(f"/network-config/v1/device-groups/{i}")
                     if classic is not None:
                         # hybrid: let the Classic delete handle it — but only
@@ -188,6 +190,8 @@ def cleanup(prefix: str, central=None, classic=None,
                             except Exception:
                                 continue
                         central._delete(f"/network-config/v1alpha1/sites/{i}")
+                        # ^ spec offers bulk deletes only; the single-id form
+                        # is a last-resort for older tenants
                     step(f"Delete site: {sname}", _del_site)
         except Exception as e:
             results.append(("List sites", False, str(e)[:150]))

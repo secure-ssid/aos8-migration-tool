@@ -233,3 +233,55 @@ def test_api_group_cell_placeholder_normalized():
     assert _normalize_group_cell("-") == "default"
     assert _normalize_group_cell("") == "default"
     assert _normalize_group_cell("campus") == "campus"
+
+
+MAC_RUNNING = '''
+wlan ssid-profile "iot-ssid"
+   essid "IoT"
+   opmode opensystem
+!
+aaa profile "iot-aaa"
+   mac-server-group "cppm-sg"
+!
+wlan virtual-ap "iot-vap"
+   aaa-profile "iot-aaa"
+   ssid-profile "iot-ssid"
+   vlan 40
+   forward-mode bridge
+!
+ap-group "campus"
+   virtual-ap "iot-vap"
+!
+'''
+
+
+def test_mac_auth_ssid_detected_from_mac_server_group():
+    """H2 (paste path): opensystem + mac-server-group in the bound aaa-profile
+    is MAC auth — migrating it as OPEN publishes an open network."""
+    from lib.models import AuthType
+    cfg = parse_customer_config({"running_config": MAC_RUNNING},
+                                mc_ip="10.0.0.1")
+    iot = next(s for s in cfg.ssids if s.name == "iot-vap")
+    assert iot.auth_type is AuthType.MAC
+    assert iot.auth_known
+    assert iot.auth_server_group == "cppm-sg"
+
+
+def test_vlan_pool_tokens_set_vlan_raw():
+    """M3 (paste path): VLAN pools/ranges must be flagged for operator mapping,
+    not silently collapsed to the first id."""
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace("vlan guest2020",
+                                                  "vlan 100,200")},
+        mc_ip="10.0.0.1")
+    pool = next(s for s in cfg.ssids if s.name == "pool-vap")
+    assert pool.vlan == 100
+    assert pool.vlan_raw == "100,200"
+
+    cfg2 = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace("vlan guest2020",
+                                                  "vlan 100-105")},
+        mc_ip="10.0.0.1")
+    pool2 = next(s for s in cfg2.ssids if s.name == "pool-vap")
+    assert pool2.vlan == 100
+    assert pool2.vlan_raw == "100-105"

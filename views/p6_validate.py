@@ -23,6 +23,12 @@ CHECKLIST = [
 ]
 
 
+def _status_is_up(status) -> bool:
+    """Classic monitoring says 'Up', New Central says 'ONLINE' — both mean
+    the AP is online (L2: 'ONLINE' was getting a yellow badge)."""
+    return str(status).lower() in ("up", "online")
+
+
 def render():
     page_header(6, "Validate Migration",
                 "Confirm converted APs are online in Central and services are healthy")
@@ -148,7 +154,7 @@ def render():
                 rows = []
                 for ap in migrated:
                     status = str(ap.get("status", "unknown"))
-                    up = status.lower() == "up"
+                    up = _status_is_up(status)
                     b = badge("ONLINE", "green") if up else badge(status.upper(), "yellow")
                     rows.append(mono_row([
                         (serial_of(ap) or "?", MUTED),

@@ -449,6 +449,12 @@ class ClassicCentralClient:
                 "API cannot express — creating it would publish an OPEN guest "
                 "network. Migrate this SSID to New Central, or build the portal "
                 "by hand in Classic first.")
+        if ssid.auth_type == AuthType.WEP:
+            # preflight FAILs WEP before provisioning; last line of defence —
+            # there is no AOS 10 WEP opmode to map to.
+            raise ClassicCentralAPIError(
+                f"SSID '{name}' uses WEP, which AOS 10 does not support. "
+                "Re-key the source network to WPA2/WPA3 before migrating.")
         wlan = copy.deepcopy(_BASE_WLAN)
         wlan.update({
             "name": name,
@@ -460,6 +466,13 @@ class ClassicCentralClient:
             "hide_ssid": not ssid.broadcast,
             # a source WLAN that was administratively disabled stays disabled
             "disable_ssid": not getattr(ssid, "enabled", True),
+            # _BASE_WLAN is verbatim from HPE's workflow YAML and DISABLES
+            # 802.11n/ac/ax — shipping that caps every migrated client at
+            # legacy ~54 Mbps rates. Real deployments leave these enabled
+            # (the MCP's field-verified body omits the keys entirely).
+            "high_throughput_disable": False,
+            "very_high_throughput_disable": False,
+            "high_efficiency_disable": False,
         })
         if ssid.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE):
             # AOS 8 exports PSKs hashed/encrypted — pushing that verbatim
@@ -469,6 +482,11 @@ class ClassicCentralClient:
             wlan["wpa_passphrase"] = ssid.psk if usable else PSK_PLACEHOLDER
         if ssid.auth_type in ENTERPRISE:
             wlan["access_type"] = "network_based"
+            # full_wlan's auth_server1 references a single RADIUS server
+            # OBJECT by name, and this client cannot create those objects in
+            # Classic (no public endpoint) — preflight FAILs enterprise SSIDs
+            # on a Classic destination until the operator creates a server
+            # with this exact name in the group by hand.
             wlan["auth_server1"] = ssid.auth_server_group or ""
         if ssid.auth_type == AuthType.MAC:
             # never emit a silently-open network for a MAC-auth SSID
@@ -508,7 +526,20 @@ class ClassicCentralClient:
             # not any '404' that happens to appear in the error detail
             if not re.search(r"failed (404|405):", str(e)):
                 raise
-            self._post("/firmware/v1/upgrade/compliance_version", json_body=body)
+            try:
+                self._post("/firmware/v1/upgrade/compliance_version",
+                           json_body=body)
+            except ClassicCentralAPIError as e2:
+                if not re.search(r"failed (404|405):", str(e2)):
+                    raise
+                # some Classic tenants only serve the third form (verified in
+                # HPE's own AOS 10 migration pipeline: device_type +
+                # firmware_version + group, no scheduling fields)
+                self._post("/firmware/v1/set-firmware-compliance", json_body={
+                    "device_type": "IAP",
+                    "firmware_version": version,
+                    "group": group,
+                })
 
     # ─────────────────── Monitoring ───────────────────
 

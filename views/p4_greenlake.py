@@ -19,6 +19,12 @@ from lib.styles import (
 )
 
 
+def _esc_join(names) -> str:
+    """Controller-supplied names rendered into unsafe_allow_html — every
+    element must pass esc() (L1: stored HTML injection via group names)."""
+    return ", ".join(esc(n) for n in names) or "—"
+
+
 def _review_checklist(central_cfg, customer) -> bool:
     """Pre-onboarding gate — the operator reviews the staged config in New
     Central before any AP is claimed or moved. Returns True once confirmed."""
@@ -39,7 +45,7 @@ def _review_checklist(central_cfg, customer) -> bool:
             unsafe_allow_html=True)
         for item in (
             f"Device groups created: <b>{n_groups}</b> "
-            f"({', '.join(g.name for g in central_cfg.groups) or '—'})",
+            f"({_esc_join([g.name for g in central_cfg.groups])})",
             f"SSIDs present with correct VLANs: <b>{n_ssids}</b> SSID(s), "
             f"<b>{n_vlans}</b> VLAN(s)",
             ("RADIUS server-group bound to enterprise SSIDs "

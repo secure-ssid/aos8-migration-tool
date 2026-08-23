@@ -372,6 +372,9 @@ class CentralClient:
             errs = []
             for path in ("/network-config/v1alpha1/sites",
                          "/network-config/v1/sites",
+                         # not present in any published OpenAPI spec (checked
+                         # 2026-08 against 31 vendored specs) — kept as a
+                         # last-resort route for tenants that still serve it
                          "/network-monitoring/v1/sites"):
                 try:
                     # documented page limit is 100 — paginate; _paginate now
@@ -423,6 +426,8 @@ class CentralClient:
         resp = None
         errs = []
         for path in ("/network-config/v1alpha1/sites", "/network-config/v1/sites",
+                     # not in any published spec (checked 2026-08) — kept as a
+                     # last-resort route for tenants that still serve it
                      "/network-monitoring/v1/sites"):
             try:
                 resp = self._post(path, json=body)
@@ -537,15 +542,27 @@ class CentralClient:
         """Explicit persona assignment, mirroring HPE's onboarding workflow."""
         if not serials:
             return
+        # body key is "device-id" (a LIST of serials), NOT "serial" —
+        # verified against HPE's device-onboarding workflow + the
+        # persona-assignment OpenAPI spec
+        body = {
+            "persona-device-list": [
+                {"device-function": device_function, "device-id": list(serials)}
+            ],
+        }
         try:
-            # body key is "device-id" (a LIST of serials), NOT "serial" —
-            # verified against HPE's device-onboarding workflow + the
-            # persona-assignment OpenAPI spec
-            self._post("/network-config/v1alpha1/persona-assignment", json={
-                "persona-device-list": [
-                    {"device-function": device_function, "device-id": list(serials)}
-                ],
-            })
+            # the OpenAPI spec defines ONLY the path-parameter form
+            # (/persona-assignment/{device-function}); the bare collection is
+            # the form field-verified on earlier tenants. Spec shape first,
+            # bare form on a routing 404.
+            try:
+                self._post(f"/network-config/v1alpha1/persona-assignment/"
+                           f"{quote(device_function, safe='')}", json=body)
+                return
+            except CentralAPIError as e:
+                if not re.search(r"failed 404:", str(e)):
+                    raise
+            self._post("/network-config/v1alpha1/persona-assignment", json=body)
         except CentralAPIError as e:
             if _is_duplicate(e):
                 return
@@ -644,6 +661,13 @@ class CentralClient:
 
     def _ssid_body(self, ssid: SSID, forward_mode: str,
                    server_group: str = "") -> dict:
+        if ssid.auth_type == AuthType.WEP:
+            # preflight FAILs WEP before provisioning; this is the last line
+            # of defence — there is no AOS 10 WEP opmode to map to.
+            raise CentralAPIError(
+                f"SSID '{ssid.display_name}' uses WEP, which AOS 10 does not "
+                "support. Re-key the source network to WPA2/WPA3 before "
+                "migrating.")
         # Full WLAN attribute set so the migrated SSID is a complete, functional
         # WLAN — data rates, radio capabilities, DTIM, broadcast filters, WMM,
         # 802.11k. Defaults match the shape New Central uses on this tenant;
@@ -665,8 +689,10 @@ class CentralClient:
             "rf-band": rf_band,
             "essid": {"use-alias": False, "name": ssid.display_name},
             "hide-ssid": not ssid.broadcast,
-            "wpa3-transition-mode-enable": ssid.auth_type in
-                (AuthType.WPA2_PSK, AuthType.WPA3_SAE),
+            # transition mode lets WPA2 clients join a WPA3-capable network —
+            # a WPA2-PSK compatibility feature. Enabling it on a WPA3-only
+            # SSID would silently add a WPA2 fallback nobody asked for.
+            "wpa3-transition-mode-enable": ssid.auth_type == AuthType.WPA2_PSK,
             # radio data rates (2.4GHz + 5GHz legacy basic/tx sets)
             "g-legacy-rates": dict(legacy),
             "a-legacy-rates": dict(legacy),
@@ -702,6 +728,12 @@ class CentralClient:
                 body["auth-server-group"] = server_group
                 body["acct-server-group"] = server_group
                 body["radius-accounting"] = True
+        if ssid.auth_type == AuthType.MAC:
+            # mac-authentication is a first-class wlan-ssid field in the New
+            # Central spec — without it a MAC-auth SSID migrates wide open.
+            body["mac-authentication"] = True
+            if server_group:
+                body["auth-server-group"] = server_group
         # External captive portal — layered on top of an OPEN SSID (verified).
         # Force OPEN and drop any L2-auth fields: the portal does the auth, and
         # the API rejects the data-rate/vlan-id-range fields under a non-OPEN

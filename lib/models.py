@@ -19,6 +19,9 @@ class AuthType(str, Enum):
     WPA2_ENTERPRISE = "wpa2-enterprise"
     WPA3_ENTERPRISE = "wpa3-enterprise"
     MAC = "mac"
+    # WEP has no AOS 10 equivalent. It exists so detection can FAIL preflight
+    # instead of silently upgrading the SSID to WPA2-Enterprise.
+    WEP = "wep"
 
 
 @dataclass

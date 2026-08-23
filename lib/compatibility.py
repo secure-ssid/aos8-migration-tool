@@ -423,18 +423,23 @@ def _check_serials(customer: CustomerConfig) -> list[CheckResult]:
 
 
 def _check_named_vlans(customer: CustomerConfig) -> list[CheckResult]:
-    named = [(s.display_name, s.vlan_raw) for s in customer.ssids if s.vlan_raw]
-    if not named:
+    unresolved = [(s.display_name, s.vlan_raw, s.vlan)
+                  for s in customer.ssids if s.vlan_raw]
+    if not unresolved:
         return []
-    detail = "\n".join(f"{n}: VLAN token '{raw}' → defaulted to VLAN 1" for n, raw in named)
+    detail = "\n".join(
+        f"{n}: VLAN token '{raw}' → collapsed to VLAN {vid}"
+        for n, raw, vid in unresolved)
     return [CheckResult(
         name="Named VLANs Unresolved",
         status=Status.FAIL,
-        message=f"{len(named)} SSID(s) reference a named VLAN pool that couldn't be "
-                "resolved to a VLAN ID — they would provision onto VLAN 1.",
+        message=f"{len(unresolved)} SSID(s) reference a named VLAN or a VLAN "
+                "pool/range that couldn't be resolved to a single VLAN ID — "
+                "they would provision onto the wrong VLAN.",
         detail=detail + "\nLook up the named VLAN's ID on the MC "
                "(show vlan / show running-config | include vlan-name) and fix the "
-               "VLAN before provisioning.",
+               "VLAN before provisioning. For a pool/range, pick the VLAN the "
+               "migrated SSID should actually use.",
     )]
 
 
@@ -532,6 +537,44 @@ def _check_captive_portal(customer: CustomerConfig,
 def _check_ssid_auth(customer: CustomerConfig,
                      central: CentralConfig) -> list[CheckResult]:
     results = []
+    wep = [s.display_name for s in customer.ssids if s.auth_type == AuthType.WEP]
+    if wep:
+        results.append(CheckResult(
+            name="WEP SSIDs Unsupported",
+            status=Status.FAIL,
+            message=f"WEP SSIDs: {', '.join(wep)}. AOS 10 has no WEP opmode — "
+                    "migrating them would silently change the network's "
+                    "security (or fail at the API).",
+            detail="Re-key these networks to WPA2 or WPA3 on the source "
+                   "before migrating. WEP clients (legacy scanners, printers) "
+                   "need a hardware or firmware refresh — there is no safe "
+                   "mapping.",
+        ))
+    mac = [s for s in customer.ssids if s.auth_type == AuthType.MAC]
+    mac_no_group = [s.display_name for s in mac if not s.auth_server_group]
+    if mac_no_group:
+        results.append(CheckResult(
+            name="MAC-Auth SSIDs Without RADIUS",
+            status=Status.FAIL,
+            message=f"MAC-auth SSIDs with no discovered server group: "
+                    f"{', '.join(mac_no_group)}. They would migrate as OPEN "
+                    "networks with MAC authentication effectively disabled.",
+            detail="Confirm the aaa-profile's mac-server-group on the MC "
+                   "(show aaa profile) and that the group holds real RADIUS "
+                   "servers before provisioning.",
+        ))
+    mac_ok = [s.display_name for s in mac if s.auth_server_group]
+    if mac_ok:
+        results.append(CheckResult(
+            name="MAC-Auth SSIDs",
+            status=Status.WARN,
+            message=f"MAC-auth SSIDs: {', '.join(mac_ok)}. They migrate with "
+                    "MAC authentication enabled (opmode OPEN + RADIUS "
+                    "binding) — MAC auth is only as strong as the MAC address.",
+            detail="Verify the server group resolves on the destination and "
+                   "that every legitimate client's MAC is registered; "
+                   "MAC-only auth is trivially spoofable.",
+        ))
     owe = [s.display_name for s in customer.ssids if s.auth_type == AuthType.OWE]
     if owe and central.destination == "classic":
         results.append(CheckResult(
@@ -565,7 +608,35 @@ def _check_ssid_auth(customer: CustomerConfig,
         ))
     enterprise = [s.display_name for s in customer.ssids
                   if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE)]
-    if enterprise:
+    if enterprise and not customer.radius_servers:
+        results.append(CheckResult(
+            name="802.1X SSIDs Without RADIUS Servers",
+            status=Status.FAIL,
+            message=f"Enterprise SSIDs ({', '.join(enterprise)}) but ZERO "
+                    "RADIUS servers were discovered — they would provision as "
+                    "dot1x networks with nothing to authenticate against.",
+            detail="Confirm the RADIUS servers exist on the source "
+                   "(show aaa authentication-server radius) and that "
+                   "discovery can read them, before provisioning.",
+        ))
+    elif enterprise and central.destination == "classic":
+        mac_named = [s.display_name for s in mac if s.auth_server_group]
+        results.append(CheckResult(
+            name="Classic RADIUS Servers (manual step)",
+            status=Status.FAIL,
+            message=f"Enterprise SSIDs ({', '.join(enterprise)}) on a Classic "
+                    "destination: the Classic provisioning path cannot create "
+                    "RADIUS server objects (no public API) — full_wlan "
+                    "references the auth server BY NAME, so the reference "
+                    "dangles until the server exists.",
+            detail="In each Classic group, create a RADIUS auth server named "
+                   "EXACTLY like the source server group "
+                   f"({', '.join(sorted({s.auth_server_group for s in customer.ssids if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE) and s.auth_server_group})) or 'see source config'}) "
+                   "with the real host/secret, then proceed."
+                   + (f" Same for the MAC-auth SSIDs ({', '.join(mac_named)})."
+                      if mac_named else ""),
+        ))
+    elif enterprise:
         results.append(CheckResult(
             name="802.1X SSIDs",
             status=Status.WARN,

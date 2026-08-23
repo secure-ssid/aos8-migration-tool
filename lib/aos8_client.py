@@ -12,6 +12,7 @@ API mechanics (ArubaOS 8 REST API guide):
 
 Falls back to CLI paste mode (aos8_parser) if the API is unreachable.
 """
+import os
 import re
 import requests
 import urllib3
@@ -102,7 +103,10 @@ class AOS8Client:
         self.running_config_error = ""
         self.show_errors: dict[str, str] = {}
         self.session = requests.Session()
-        self.session.verify = False
+        # Controllers ship self-signed certs, so verification defaults off;
+        # an operator who deployed their own CA can opt back into MITM
+        # protection by pointing AOS8_CA_BUNDLE at the bundle path.
+        self.session.verify = os.environ.get("AOS8_CA_BUNDLE") or False
 
     # ─────────────────── Auth ───────────────────
 
@@ -125,7 +129,16 @@ class AOS8Client:
             raise AOS8APIError(f"POST {LOGIN_PATH}: connection failed — is TCP "
                                f"{self.port} reachable from here? "
                                f"({type(e).__name__})")
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except requests.exceptions.HTTPError:
+            if resp.status_code in (401, 403):
+                raise AOS8APIError(
+                    f"Login rejected (HTTP {resp.status_code}) — check the "
+                    "controller username/password and that the account has "
+                    "API access") from None
+            raise AOS8APIError(
+                f"POST {LOGIN_PATH}: HTTP {resp.status_code}") from None
         try:
             data = resp.json()
         except ValueError:
@@ -433,8 +446,10 @@ class AOS8Client:
         except Exception:
             pass  # opmode/essid enrichment is best-effort
         aaa_sgs: dict[str, str] = {}
+        aaa_mac_sgs: dict[str, str] = {}
         try:
             aaa_sgs = self.get_aaa_server_groups()
+            aaa_mac_sgs = self.get_aaa_mac_server_groups()
         except Exception:
             pass  # server-group resolution is best-effort
 
@@ -447,7 +462,9 @@ class AOS8Client:
 
             vlan_token = self._field(item, "vlan", default=1)
             vlan = _safe_vlan(vlan_token)
-            vlan_raw = str(vlan_token) if _vlan_is_named(vlan_token) else None
+            vlan_raw = (str(vlan_token)
+                        if _vlan_is_named(vlan_token) or _vlan_is_pool(vlan_token)
+                        else None)
             aaa_ref = self._profile_ref(item, "aaa_prof")
             fwd_raw = str(self._field(item, "forward-mode", "forward_mode", default="tunnel")).lower()
             if "bridge" in fwd_raw:
@@ -464,6 +481,12 @@ class AOS8Client:
                          or self._profile_ref(item, "ssid-prof"))
             prof = ssid_profiles.get(prof_name, {})
             auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
+            mac_sg = aaa_mac_sgs.get(aaa_ref, "")
+            if auth == AuthType.OPEN and mac_sg:
+                # opensystem + mac-server-group on the bound aaa-profile is a
+                # MAC-auth network (legacy printer/IoT SSIDs are exactly this)
+                # — migrating it as OPEN publishes a wide-open network.
+                auth = AuthType.MAC
 
             # per-VAP band selection ("all"/"a"/"g") → New Central rf-band enum,
             # mirroring paste mode's allowed-band mapping
@@ -482,8 +505,10 @@ class AOS8Client:
                 essid=prof.get("essid") or None,
                 psk=prof.get("passphrase"),
                 # prefer the real server group from inside the aaa-profile;
-                # the profile name is only a last-resort placeholder
-                auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
+                # the profile name is only a last-resort placeholder. A
+                # MAC-auth SSID's group is its mac-server-group.
+                auth_server_group=(mac_sg if auth == AuthType.MAC and mac_sg
+                                   else aaa_sgs.get(aaa_ref) or aaa_ref or None),
                 rf_band=rf_band,
                 dtim_period=int(prof.get("dtim_period", 0) or 0),
                 max_clients=int(prof.get("max_clients", 0) or 0),
@@ -538,6 +563,32 @@ class AOS8Client:
                 ref = item.get(key)
                 if isinstance(ref, dict):
                     # reference dicts vary by build: profile-name / srv-group
+                    sg = str(ref.get("profile-name") or ref.get("srv-group")
+                             or ref.get("srv_group") or "")
+                    if not sg:
+                        strs = [v for v in ref.values() if isinstance(v, str)]
+                        sg = strs[0] if len(strs) == 1 else ""
+                elif isinstance(ref, str):
+                    sg = ref
+                if sg:
+                    break
+            if sg:
+                out[str(name)] = sg
+        return out
+
+    def get_aaa_mac_server_groups(self) -> dict[str, str]:
+        """aaa-profile name → MAC-auth server-group name (mac-server-group).
+        Separate from get_aaa_server_groups: an opensystem SSID bound to a
+        profile with this set is a MAC-auth network, not an open one."""
+        out: dict[str, str] = {}
+        for item in self._get_object("aaa_prof"):
+            name = self._field(item, "profile-name")
+            if not name:
+                continue
+            sg = ""
+            for key in ("mac_server_group", "mac-server-group"):
+                ref = item.get(key)
+                if isinstance(ref, dict):
                     sg = str(ref.get("profile-name") or ref.get("srv-group")
                              or ref.get("srv_group") or "")
                     if not sg:
@@ -884,6 +935,22 @@ def _vlan_is_named(value: Any) -> bool:
     return True
 
 
+def _vlan_is_pool(value: Any) -> bool:
+    """True when the token carries more than one numeric id — a comma list
+    ('100,200') or a range ('100-105'). _safe_vlan collapses these to the
+    first id, so callers must record the raw token (SSID.vlan_raw) and let
+    preflight force an operator mapping, exactly like a named VLAN."""
+    ids = set()
+    for tok in _vlan_tokens(value):
+        m = re.match(r"^(\d+)(?:-(\d+))?$", tok)
+        if not m:
+            continue
+        ids.add(int(m.group(1)))
+        if m.group(2):
+            ids.add(int(m.group(2)))
+    return len(ids) > 1
+
+
 _GROUP_CELL_PLACEHOLDERS = {"", "-", "--", "\u2014", "n/a", "na", "none"}
 
 
@@ -914,6 +981,11 @@ def _opmode_to_auth(opmode: str) -> tuple[AuthType, bool]:
         # publishes the migrated network with no encryption at all, and
         # known=True keeps preflight quiet while it happens.
         return AuthType.OWE, True
+    if "wep" in op:
+        # static-wep / dynamic-wep — no AOS 10 equivalent. Marked known so the
+        # generic "auth unresolved" warning stays quiet; preflight FAILs WEP
+        # explicitly and both clients refuse to provision it.
+        return AuthType.WEP, True
     if "sae" in op or "wpa3-personal" in op:
         return AuthType.WPA3_SAE, True
     if "psk" in op:

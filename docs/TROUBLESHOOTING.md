@@ -77,7 +77,8 @@ the new token into the session and shows a banner:
 | Cause | Fix |
 |---|---|
 | Wrong `config_path` | Conductor (MM) uses `/md` (default); standalone controller uses `/mm/mynode`. Set it under Step 1 → Advanced — API options. |
-| Port 4343 firewalled or REST API disabled | The REST API is on TCP **4343** with a self-signed cert. Confirm reachability from the machine running the tool; otherwise switch to **Paste CLI output** mode. |
+| Port 4343 firewalled or REST API disabled | The REST API is on TCP **4343** with a self-signed cert (verification is skipped by default — set `AOS8_CA_BUNDLE` to your CA bundle if you deployed your own CA to the controllers). Confirm reachability from the machine running the tool; otherwise switch to **Paste CLI output** mode. |
+| `Login rejected (HTTP 401/403)` | Wrong username/password, or the account lacks API access — a login 401/403 is translated to this message instead of a generic connection error. |
 | Bad credentials / non-zero login status | The controller (MC — Mobility Conductor/Controller) returns `status != 0`; check username/password. The status can be int `0` or string `"0"` depending on build (the client handles both). |
 | Object/show read errors after login | Usually a `config_path` mismatch on a Conductor. Try the node path, or fall back to paste mode. |
 
@@ -157,7 +158,11 @@ them properly when you can — they represent things that will break the migrati
 | AP DHCP Requirement (when static IPs found) | AOS 10 requires DHCP for all APs. Re-provision static-IP APs for DHCP first. |
 | EAP-Offload / FastConnect | Not supported in AOS 10. Remove AAA FastConnect; use standard 802.1X. |
 | Internal Authentication Server | Not supported in AOS 10. Migrate to external RADIUS (ClearPass/NPS). |
-| Named VLANs Unresolved | An SSID references a named VLAN pool that didn't resolve to an ID; it would provision onto VLAN 1. Look up the real VLAN id on the MC and fix it before provisioning. |
+| Named VLANs Unresolved | An SSID references a named VLAN or a multi-id pool/range (`100,200`, `100-105`) that can't resolve to a single ID; the check detail shows the VLAN it would collapse to. Look up the real VLAN id on the MC (or pick the pool member) and fix it before provisioning. |
+| WEP SSIDs Unsupported | AOS 10 has no WEP opmode — no safe mapping exists. Re-key the network to WPA2/WPA3 on the source; WEP-only clients (legacy scanners, printers) need replacement. |
+| MAC-Auth SSIDs Without RADIUS | A MAC-auth SSID (opensystem + `mac-server-group`) has no discovered server group and would migrate effectively open. Confirm the aaa-profile's mac-server-group (`show aaa profile`) holds real RADIUS servers, then re-discover. |
+| 802.1X SSIDs Without RADIUS Servers | Enterprise SSIDs found but zero RADIUS servers discovered — they'd provision as dot1x with nothing to authenticate against. Confirm the servers exist (`show aaa authentication-server radius`) and that discovery can read them. |
+| Classic RADIUS Servers (manual step) | The Classic API cannot create RADIUS server objects and `full_wlan` references a server by name. Create a RADIUS auth server named exactly like the source server group in each Classic group, then re-run. |
 | Conflicting Duplicate ESSIDs | The same ESSID has different vlan/forward-mode/auth across virtual-aps. Central keys WLANs by ESSID; only the first would provision. Rename or consolidate. |
 | ESSID Length | ESSID > 32 characters — Central rejects it. Shorten it. |
 
