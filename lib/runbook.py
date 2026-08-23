@@ -99,6 +99,22 @@ def _overlay_completion_block(customer: CustomerConfig,
     return out
 
 
+def _placeholder_site_block(central: CentralConfig) -> list[str]:
+    """A blank site address silently becomes a lab placeholder on a real
+    site object (L6) — the runbook must repeat that so it survives the UI."""
+    if central.site_address.strip():
+        return []
+    return [
+        "",
+        "NOTE — PLACEHOLDER SITE ADDRESS",
+        "─" * 40,
+        "No site address was supplied, so the site was created with the lab",
+        "placeholder (1 Lab Street, San Jose, CA, United States, 95002).",
+        "Edit the site address in Central before go-live.",
+        "",
+    ]
+
+
 def generate(customer: CustomerConfig, central: CentralConfig, customer_name: str = "") -> str:
     name = customer_name or central.customer_name or "Customer"
     today = date.today().strftime("%Y-%m-%d")
@@ -170,6 +186,7 @@ def generate(customer: CustomerConfig, central: CentralConfig, customer_name: st
 
     lines += _manual_secrets_block(customer)
     lines += _overlay_completion_block(customer, central)
+    lines += _placeholder_site_block(central)
 
     lines += [
         "",
@@ -195,7 +212,10 @@ def _convert_block(customer: CustomerConfig, central: CentralConfig) -> list[str
     groups = [g.name for g in customer.ap_groups] or ["<ap-group-name>"]
     out = []
     for grp in groups:
-        out.append(f"  ap convert add ap-group {grp}")
+        # AOS 8 CLI needs quotes around names containing spaces; quoting
+        # unconditionally keeps the block uniform and paste-safe.
+        safe = grp.replace('"', "")
+        out.append(f'  ap convert add ap-group "{safe}"')
     out += [
         "",
         "  # Recommended: test with a single AP first:",
@@ -401,6 +421,7 @@ def _generate_instant(customer: CustomerConfig, central: CentralConfig,
         "",
     ]
     lines += _manual_secrets_block(customer)
+    lines += _placeholder_site_block(central)
     lines += [
         "POST-CONVERSION",
         "─" * 40,

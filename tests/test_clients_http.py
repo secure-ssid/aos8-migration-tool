@@ -731,3 +731,316 @@ def test_aos8_list_config_nodes_records_why_it_failed(aos8_api):
     c = _aos8(aos8_api)
     assert c.list_config_nodes() == []
     assert "no such object" in c.node_scan_error
+
+
+# ─────────────────── Review findings (H1-L4, B1/B4) ───────────────────
+
+def _full_wlan_body(api) -> dict:
+    """The most recent full_wlan POST body, unwrapped from {"value": json}."""
+    posts = [r for r in api.requests
+             if r["method"] == "POST" and "/configuration/full_wlan/" in r["path"]]
+    assert posts, "no full_wlan POST recorded"
+    return json.loads(posts[-1]["body"]["value"])["wlan"]
+
+
+def test_classic_wlan_enables_modern_phy(mock_api):
+    """H1: a migrated WLAN must not come up with 802.11n/ac/ax disabled —
+    that caps every client at legacy ~54 Mbps rates."""
+    from lib.models import AuthType, ForwardMode, SSID
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="corp", essid="Corp", vlan=100,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    c.create_wlan("g1", ssid, 1)
+    wlan = _full_wlan_body(mock_api)
+    assert wlan["high_throughput_disable"] is False
+    assert wlan["very_high_throughput_disable"] is False
+    assert wlan["high_efficiency_disable"] is False
+
+
+def test_nc_mac_auth_ssid_body(mock_api):
+    """H2 (New Central): a MAC-auth SSID must carry mac-authentication and its
+    server group — opmode OPEN alone publishes an open network."""
+    from lib.models import AuthType, ForwardMode, SSID
+    c = _central(mock_api)
+    ssid = SSID(name="iot", essid="IoT", vlan=40,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.MAC,
+                auth_server_group="cppm-sg")
+    body = c._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group="cppm-sg")
+    assert body["opmode"] == "OPEN"
+    assert body["mac-authentication"] is True
+    assert body["auth-server-group"] == "cppm-sg"
+
+
+def test_classic_mac_auth_wlan(mock_api):
+    """H2 (Classic): the never-open guard must actually fire for MAC auth."""
+    from lib.models import AuthType, ForwardMode, SSID
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="iot", essid="IoT", vlan=40,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.MAC,
+                auth_server_group="cppm-sg")
+    c.create_wlan("g1", ssid, 1)
+    wlan = _full_wlan_body(mock_api)
+    assert wlan["opmode"] == "opensystem"
+    assert wlan["mac_authentication"] is True
+    assert wlan["access_type"] == "network_based"
+    assert wlan["auth_server1"] == "cppm-sg"
+
+
+def test_mac_auth_preflight_flagged():
+    """H2 (preflight): MAC-auth SSIDs need an explicit check — FAIL when no
+    server group was discovered (would be open), WARN otherwise."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+    with_group = SSID(name="iot", essid="IoT", vlan=40,
+                      forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.MAC,
+                      auth_server_group="cppm-sg")
+    without = SSID(name="iot2", essid="IoT2", vlan=41,
+                   forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.MAC)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[with_group, without])
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    results = compatibility.run_all(customer, central)
+    fails = [r for r in results if r.status == compatibility.Status.FAIL]
+    warns = [r for r in results if r.status == compatibility.Status.WARN]
+    assert any("MAC" in r.name and "IoT2" in r.message for r in fails)
+    assert any("MAC" in r.name and "IoT" in r.message for r in warns)
+
+
+def test_wep_opmode_is_rejected_everywhere(mock_api):
+    """M1: WEP must fail preflight and be refused by both clients — never
+    silently become WPA2-Enterprise."""
+    from lib.aos8_client import _opmode_to_auth
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+    assert _opmode_to_auth("static-wep") == (AuthType.WEP, True)
+    assert _opmode_to_auth("dynamic-wep") == (AuthType.WEP, True)
+
+    ssid = SSID(name="legacy", essid="Legacy", vlan=10,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WEP)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid])
+    for dest in ("new", "classic"):
+        central = CentralConfig(customer_name="acme",
+                                base_url="https://example", destination=dest)
+        fails = [r for r in compatibility.run_all(customer, central)
+                 if r.status == compatibility.Status.FAIL]
+        assert any("WEP" in r.name for r in fails), dest
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    classic = ClassicCentralClient(mock_api.url, "tok")
+    with pytest.raises(ClassicCentralAPIError, match="WEP"):
+        classic.create_wlan("g1", ssid, 1)
+    assert not any("full_wlan" in p for _m, p in mock_api.calls)
+    nc = _central(mock_api)
+    with pytest.raises(CentralAPIError, match="WEP"):
+        nc._ssid_body(ssid, "FORWARD_MODE_BRIDGE")
+
+
+def test_wpa3_sae_does_not_gain_wpa2_transition_mode(mock_api):
+    """M2: transition mode is a WPA2-PSK compatibility feature; a WPA3-only
+    network must not silently gain a WPA2 fallback."""
+    from lib.models import AuthType, ForwardMode, SSID
+    c = _central(mock_api)
+    sae = SSID(name="sae", essid="SAE", vlan=10,
+               forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA3_SAE,
+               psk="SecretPass123")
+    assert c._ssid_body(sae, "FORWARD_MODE_BRIDGE")[
+        "wpa3-transition-mode-enable"] is False
+    psk = SSID(name="psk", essid="PSK", vlan=10,
+               forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+               psk="SecretPass123")
+    assert c._ssid_body(psk, "FORWARD_MODE_BRIDGE")[
+        "wpa3-transition-mode-enable"] is True
+
+
+def test_vlan_pool_tokens_are_flagged_for_mapping():
+    """M3: '100,200' and '100-105' must surface in preflight like named VLANs —
+    collapsing silently to the first id strands clients on the wrong VLAN."""
+    from lib.aos8_client import _safe_vlan, _vlan_is_named, _vlan_is_pool
+    assert _safe_vlan("100-105") == 100        # deterministic first id
+    assert _vlan_is_pool("100-105")
+    assert _vlan_is_pool("100,200")
+    assert _vlan_is_pool("100, 200")
+    assert not _vlan_is_pool("100")
+    assert not _vlan_is_pool("guest2020")      # named, not a pool
+    assert not _vlan_is_named("100-105")       # numeric, but ambiguous
+
+
+def test_named_vlan_preflight_reports_actual_collapse_target():
+    """M3: a pool collapses to its first id, not VLAN 1 — the preflight
+    detail must name the real target."""
+    from lib import compatibility
+    from lib.models import AuthType, CustomerConfig, ForwardMode, SSID
+    s = SSID(name="p", essid="P", vlan=100, vlan_raw="100-105",
+             forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.OPEN)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[s])
+    [check] = compatibility._check_named_vlans(customer)
+    assert check.status == compatibility.Status.FAIL
+    assert "100-105" in (check.detail or "")
+    assert "VLAN 100" in (check.detail or "")
+
+
+def test_enterprise_ssid_without_radius_servers_fails():
+    """M4: dot1x SSIDs with zero discovered RADIUS servers would come up with
+    nothing to authenticate against."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+    ssid = SSID(name="corp", essid="Corp", vlan=100,
+                forward_mode=ForwardMode.TUNNEL,
+                auth_type=AuthType.WPA2_ENTERPRISE)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid],
+                              radius_servers=[])
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    fails = [r for r in compatibility.run_all(customer, central)
+             if r.status == compatibility.Status.FAIL]
+    assert any("RADIUS" in r.name for r in fails)
+
+
+def test_classic_enterprise_requires_manual_radius_setup():
+    """B2: the Classic path cannot create RADIUS server objects — full_wlan
+    references auth_server1 by name, so preflight must force the operator to
+    create the server by hand before cutover. New Central has no such gate."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, RadiusServer, SSID)
+    ssid = SSID(name="corp", essid="Corp", vlan=100,
+                forward_mode=ForwardMode.TUNNEL,
+                auth_type=AuthType.WPA2_ENTERPRISE, auth_server_group="cp-sg")
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid],
+                              radius_servers=[RadiusServer("cp-1", "10.0.0.50")])
+    classic = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="classic")
+    fails = [r for r in compatibility.run_all(customer, classic)
+             if r.status == compatibility.Status.FAIL]
+    assert any("RADIUS" in r.name.upper() for r in fails)
+    new = CentralConfig(customer_name="acme", base_url="https://x",
+                        destination="new")
+    new_fails = [r for r in compatibility.run_all(customer, new)
+                 if r.status == compatibility.Status.FAIL]
+    assert not any("RADIUS" in r.name.upper() for r in new_fails)
+
+
+def test_persona_assignment_prefers_spec_path(mock_api):
+    """B1: the spec only defines POST /persona-assignment/{device-function};
+    the bare collection must be the fallback, not the first try."""
+    def app(method, path, query, body):
+        if path.endswith("/persona-assignment/CAMPUS_AP"):
+            return (200, {}, {})
+        if path.endswith("/persona-assignment"):
+            return (404, {}, {"error": "not found"})
+        return (200, {}, {})
+    mock_api.app = app
+    c = _central(mock_api)
+    c.assign_persona(["CN1", "CN2"])
+    paths = [p for _m, p in mock_api.calls]
+    assert any(p.endswith("/persona-assignment/CAMPUS_AP") for p in paths)
+    assert not any(p.endswith("/persona-assignment") for p in paths)
+
+
+def test_persona_assignment_falls_back_to_bare_collection(mock_api):
+    """B1: tenants 404ing the spec path still get the legacy bare form."""
+    def app(method, path, query, body):
+        if path.endswith("/persona-assignment/CAMPUS_AP"):
+            return (404, {}, {"error": "not found"})
+        if path.endswith("/persona-assignment"):
+            return (200, {}, {})
+        return (200, {}, {})
+    mock_api.app = app
+    c = _central(mock_api)
+    c.assign_persona(["CN1"])
+    assert any(p.endswith("/persona-assignment") for _m, p in mock_api.calls)
+
+
+def test_classic_firmware_falls_back_to_set_compliance(mock_api):
+    """B4: some Classic tenants only serve the MCP-verified
+    /firmware/v1/set-firmware-compliance form."""
+    def app(method, path, query, body):
+        if "upgrade/compliance_version" in path:
+            return (404, {}, {"error": "not found"})
+        if path == "/firmware/v1/set-firmware-compliance":
+            return (200, {}, {})
+        return (200, {}, {})
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    c.set_firmware_compliance("g1", "10.7.0.0")
+    reqs = [r for r in mock_api.requests
+            if "set-firmware-compliance" in r["path"]]
+    assert reqs
+    assert reqs[-1]["body"]["group"] == "g1"
+    assert reqs[-1]["body"]["firmware_version"] == "10.7.0.0"
+
+
+def test_aos8_login_401_reports_auth_failure(aos8_api):
+    """L3: a bad MC password must read as an auth failure, not a generic
+    'verify port 4343' connection error."""
+    aos8_api.app = lambda m, p, q, b: (401, {}, {"error": "unauthorized"})
+    c = AOS8Client("127.0.0.1", "admin", "wrong", port=aos8_api.port)
+    with pytest.raises(AOS8APIError, match="(?i)credential|auth|password"):
+        c.connect()
+
+
+def test_aos8_ca_bundle_env_enables_verification(monkeypatch):
+    """L4: controllers default to verify=False (self-signed certs); an
+    operator-deployed CA bundle must be honored for MITM protection."""
+    monkeypatch.setenv("AOS8_CA_BUNDLE", "/path/to/ca.pem")
+    c = AOS8Client("10.0.0.1", "admin", "pw")
+    assert c.session.verify == "/path/to/ca.pem"
+    monkeypatch.delenv("AOS8_CA_BUNDLE")
+    assert AOS8Client("10.0.0.1", "admin", "pw").session.verify is False
+
+
+def test_aos8_api_mac_auth_ssid_detected(aos8_api):
+    """H2 (API path): opensystem + mac-server-group inside the bound
+    aaa-profile is MAC auth, not an open network."""
+    from lib.models import AuthType
+
+    def app(method, path, query, body):
+        if path.endswith("/object/ssid_prof"):
+            return (200, {}, {"ssid_prof": [
+                {"profile-name": "iot-ssid", "essid": "IoT",
+                 "opmode": {"opensystem": True}}]})
+        if path.endswith("/object/aaa_prof"):
+            return (200, {}, {"aaa_prof": [
+                {"profile-name": "iot-aaa",
+                 "mac-server-group": {"profile-name": "cppm-sg"}}]})
+        if path.endswith("/object/virtual_ap"):
+            return (200, {}, {"virtual_ap": [
+                {"profile-name": "iot-vap", "vlan": "40",
+                 "aaa_prof": {"profile-name": "iot-aaa"},
+                 "ssid_prof": {"profile-name": "iot-ssid"},
+                 "forward-mode": "bridge"}]})
+        return (200, {}, {})
+    aos8_api.app = app
+    c = _aos8(aos8_api)
+    [iot] = c.get_ssids()
+    assert iot.auth_type is AuthType.MAC
+    assert iot.auth_known
+    assert iot.auth_server_group == "cppm-sg"
+
+
+def test_p4_group_names_are_html_escaped():
+    """L1: device-group names come from the controller — raw interpolation
+    into unsafe_allow_html is stored HTML injection."""
+    from views.p4_greenlake import _esc_join
+    assert _esc_join(["<script>x</script>", "b"]) == \
+        "&lt;script&gt;x&lt;/script&gt;, b"
+    assert _esc_join([]) == "—"
+
+
+def test_validate_status_badge_treats_online_as_up():
+    """L2: New Central reports 'ONLINE', Classic 'Up' — both are online."""
+    from views.p6_validate import _status_is_up
+    assert _status_is_up("Up")
+    assert _status_is_up("ONLINE")
+    assert _status_is_up("online")
+    assert not _status_is_up("Down")

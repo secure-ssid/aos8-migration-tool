@@ -10,11 +10,12 @@ import re
 from typing import Optional
 
 from .models import (
-    AP, APGroup, ClusterInfo, CustomerConfig, ForwardMode,
+    AP, APGroup, AuthType, ClusterInfo, CustomerConfig, ForwardMode,
     RadiusServer, SSID, VLAN,
 )
 from .aos8_client import (
     AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
+    _vlan_is_pool,
 )
 
 
@@ -398,10 +399,24 @@ def _aaa_server_groups(running: str) -> dict[str, str]:
     return groups
 
 
+def _aaa_mac_server_groups(running: str) -> dict[str, str]:
+    """aaa-profile → MAC-auth server-group name (mac-server-group). Separate
+    from _aaa_server_groups: an opensystem SSID bound to a profile with this
+    set is a MAC-auth network, not an open one."""
+    groups: dict[str, str] = {}
+    for name, block in _iter_blocks(running, r"aaa profile"):
+        for line in block:
+            m = re.match(r'mac-server-group\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                groups[name] = m.group(1)
+    return groups
+
+
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
     mc_cps = mc_captive_portals(running)
     aaa_sgs = _aaa_server_groups(running)
+    aaa_mac_sgs = _aaa_mac_server_groups(running)
     for name, block in _iter_blocks(running, r"wlan virtual-ap"):
         vlan = 1
         vlan_raw = None
@@ -414,7 +429,9 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
             if m:
                 vlan = _safe_vlan(m.group(1))
-                vlan_raw = m.group(1) if _vlan_is_named(m.group(1)) else None
+                vlan_raw = (m.group(1)
+                            if _vlan_is_named(m.group(1)) or _vlan_is_pool(m.group(1))
+                            else None)
             elif "forward-mode" in low:
                 if "bridge" in low:
                     fwd = ForwardMode.BRIDGE
@@ -435,6 +452,12 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
 
         prof = ssid_profiles.get(prof_ref, {})
         auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
+        mac_sg = aaa_mac_sgs.get(aaa_ref, "")
+        if auth == AuthType.OPEN and mac_sg:
+            # opensystem + mac-server-group on the bound aaa-profile is a
+            # MAC-auth network — migrating it as OPEN publishes a wide-open
+            # network.
+            auth = AuthType.MAC
         cp = mc_cps.get(aaa_ref, {})
         ssids.append(SSID(
             name=name,
@@ -446,8 +469,10 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             essid=prof.get("essid") or None,
             psk=prof.get("passphrase"),
             # prefer the real server group from inside the aaa-profile; the
-            # profile name is only a last-resort placeholder
-            auth_server_group=aaa_sgs.get(aaa_ref) or aaa_ref or None,
+            # profile name is only a last-resort placeholder. A MAC-auth
+            # SSID's group is its mac-server-group.
+            auth_server_group=(mac_sg if auth == AuthType.MAC and mac_sg
+                               else aaa_sgs.get(aaa_ref) or aaa_ref or None),
             rf_band=(_BAND_MAP.get(tuple(sorted(vap_bands)), "BAND_ALL")
                      if vap_bands else prof.get("rf_band", "")),
             dtim_period=prof.get("dtim_period", 0),
@@ -756,7 +781,9 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
             if m:
                 vlan = _safe_vlan(m.group(1))
-                vlan_raw = m.group(1) if _vlan_is_named(m.group(1)) else None
+                vlan_raw = (m.group(1)
+                            if _vlan_is_named(m.group(1)) or _vlan_is_pool(m.group(1))
+                            else None)
             m = re.match(r"auth-server\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
             if m:
                 auth_server = m.group(1)
