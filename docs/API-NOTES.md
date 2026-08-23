@@ -76,9 +76,13 @@ Quirks handled in the client:
 - `opmode` arrives as a flag dict (`{"wpa2-psk-aes": true}`) — the client takes
   the first true flag.
 - Some values are double-wrapped as `{key: {key: val}}` (`_field()` unwraps).
-- VLAN tokens may be `"100"`, `"100,200"`, or a **named** VLAN — `_safe_vlan()`
-  takes the first valid id; named pools set `SSID.vlan_raw` and are flagged by
-  preflight as a FAIL.
+- VLAN tokens may be `"100"`, a comma list (`"100,200"`), a range
+  (`"100-105"`), or a **named** VLAN — `_safe_vlan()` takes the first valid
+  id; named VLANs **and** multi-id pools/ranges set `SSID.vlan_raw` and are
+  flagged by preflight as a FAIL showing the actual collapse target.
+- `opensystem` + a `mac-server-group` on the bound aaa-profile is a
+  **MAC-auth** network (legacy printer/IoT SSIDs are exactly this) —
+  `auth_type` becomes `MAC`, never `OPEN`, so it cannot migrate wide open.
 - AP models are normalised (`205` → `AP-205`); country suffixes (`-US`, `-RW`,
   `-JP`, `-IL`, `-EG`) are stripped for the compatibility lookup, and AP-/IAP-
   prefixes are treated as interchangeable hardware.
@@ -100,7 +104,7 @@ Calls made during **Step 3 (config phase)**:
 |---|---|---|
 | GET | `/network-config/v1/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). Doubles as the config-access pre-check. |
 | POST | `/network-config/v1/scope-maps` | Map a resource to a scope/persona. Duplicate = idempotent success. |
-| GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Both fall back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on a **404 only** — a 403/500 raises rather than caching an empty site list. |
+| GET/POST | `/network-config/v1alpha1/sites` | List / create site (idempotent by name). Both fall back to `/network-config/v1/sites`, then `/network-monitoring/v1/sites`, on a **404 only** — a 403/500 raises rather than caching an empty site list. (The monitoring-sites route appears in no published OpenAPI spec — checked 2026-08 against 31 vendored specs — and is kept only as a last resort for tenants that still serve it.) |
 | GET | `/network-config/v1/device-groups` | List device groups. |
 | POST | `/network-config/v1/device-groups` | Create empty group (`scopeName`). |
 | POST | `/network-config/v1/device-groups-create-and-add-devices` | Create group + add serials in one call (implemented in the client but not used by the wizard — Step 3 creates groups empty; APs are moved in Step 4 via `device-groups-add-devices`). |
@@ -116,7 +120,7 @@ Calls made during **Step 4 (devices phase)**:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/network-config/v1/device-groups-add-devices` | Move serials into their group (`desScopeId`, `devices`) — the conversion trigger for pre-assigned APs. |
-| POST | `/network-config/v1alpha1/persona-assignment` | Assign device function (`CAMPUS_AP`). |
+| POST | `/network-config/v1alpha1/persona-assignment/{device-function}` | Assign device function (`CAMPUS_AP`). The OpenAPI spec defines only this path-parameter form, so it is tried first; on a routing 404 the client falls back to the bare `/persona-assignment` collection (the form field-verified on earlier tenants). Body key is `device-id` (a LIST of serials). |
 | POST | `/network-config/v1/site-add-devices` | Assign devices to the site (`desScopeId`, `devices`); falls back to `/network-monitoring/v1/sites/{id}/devices`, then `/central/v2/sites/associate`. |
 
 Validation (Step 6):
@@ -137,7 +141,14 @@ SSID forward modes: bridge (and everything when gateways are retired) →
 `FORWARD_MODE_BRIDGE` (underlay); tunnel/split → deferred overlay
 (`FORWARD_MODE_L2`) as above. `OPMODE` maps `AuthType` → Central opmode enum
 (e.g. `WPA2_PERSONAL`, `WPA3_SAE`, `WPA2_ENTERPRISE`,
-`WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`). OWE / Enhanced Open maps to
+`WPA3_ENTERPRISE_CCM_128`; OPEN → `OPEN`). MAC-auth SSIDs (detected from the
+aaa-profile's `mac-server-group`) map to `OPEN` opmode plus first-class
+`mac-authentication: true` and an `auth-server-group` binding on the SSID
+body — without those they would migrate wide open. WEP has no AOS 10
+equivalent: preflight FAILs it and `_ssid_body` raises as a last line of
+defence. WPA3-SAE bodies do NOT set `wpa3-transition-mode-enable` (that flag
+is a WPA2-PSK compatibility feature — enabling it on a WPA3-only SSID would
+silently add a WPA2 fallback). OWE / Enhanced Open maps to
 the first-class `ENHANCED_OPEN` opmode — it is **encrypted**, so it must never
 be folded into `OPEN`; Classic has no equivalent value, and preflight FAILs an
 OWE SSID with a classic destination rather than publishing it unencrypted.
@@ -187,7 +198,7 @@ separate migration with its own delete-path semantics, not a drop-in swap.
 | GET/POST | `/central/v2/sites` | List / create site (`site_address` **or** zeroed `geolocation` — mutually exclusive, one required). |
 | POST | `/central/v2/sites/associations` | Associate devices (`device_type="IAP"`, `device_ids`). |
 | POST | `/configuration/full_wlan/{group}/{name}` | Create WLAN (see wrapper quirk below). |
-| POST | `/firmware/v2/upgrade/compliance_version` | Firmware compliance (v1 fallback on 404/405). `device_type="IAP"` for APs (incl. AOS 10). |
+| POST | `/firmware/v2/upgrade/compliance_version` | Firmware compliance. Fallback chain on 404/405: `/firmware/v1/upgrade/compliance_version`, then `/firmware/v1/set-firmware-compliance` (`device_type` + `firmware_version` + `group`, no scheduling fields — the form verified in HPE's own AOS 10 migration pipeline; some tenants serve only this one). `device_type="IAP"` for APs (incl. AOS 10). |
 | GET | `/monitoring/v2/aps` | Validation: `{"aps":[...]}` with status `Up`/`Down`. |
 
 `OPMODE_CLASSIC` maps `AuthType` → classic opmode (`opensystem`, `wpa2-psk-aes`,
@@ -209,7 +220,17 @@ from HPE's central-python-workflows examples); only per-SSID fields are
 overridden (`name`, `essid`, `index`, `opmode`, `type`, `vlan`, `hide_ssid`,
 `wpa_passphrase`, enterprise `access_type`/`auth_server1`,
 `mac_authentication` + `access_type`/`auth_server1` for MAC-auth SSIDs, and
-`cluster_name` for tunnel SSIDs). `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
+`cluster_name` for tunnel SSIDs). Three `_BASE_WLAN` defaults are deliberately
+NOT shipped verbatim: `high_throughput_disable`,
+`very_high_throughput_disable` and `high_efficiency_disable` are forced to
+`False` — the YAML disables 802.11n/ac/ax, which would cap every migrated
+client at legacy ~54 Mbps rates (HPE's own migration pipeline omits the keys
+entirely). Two hard rules: a WEP SSID raises instead of provisioning (no AOS
+10 opmode exists — preflight FAILs it first), and enterprise `auth_server1`
+references a single RADIUS server OBJECT by name — the Classic API cannot
+create server objects, so preflight FAILs enterprise/MAC-auth SSIDs on a
+Classic destination until the operator creates a server with that exact name
+in the group by hand. `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
 SSID name filled in.
 
 ### Runtime-verify caveats (Classic)
@@ -221,7 +242,7 @@ SSID name filled in.
 | Firmware v2 → v1 fallback | On 404/405 the client retries the v1 compliance endpoint. |
 | 401 → refresh → retry | On 401 the client attempts a token refresh and retries once. |
 | Refresh token rotation | Each refresh returns a new refresh token; `self.refresh_token` holds the newest. Views read it back and persist it to the session. |
-| RADIUS auth-servers / GW clusters | **Cannot** be created via the classic API. `provision()` appends them as MANUAL FOLLOW-UP results (create RADIUS per group; gateways auto-cluster on join — verify tunnel SSID binding). |
+| RADIUS auth-servers / GW clusters | **Cannot** be created via the classic API. Preflight **FAILs** enterprise/MAC-auth SSIDs on a Classic destination until the operator hand-creates a RADIUS server named exactly like the source server group in each group (`full_wlan` references it by name), and `provision()` still appends the MANUAL FOLLOW-UP (gateways auto-cluster on join — verify tunnel SSID binding). |
 | Tunnel WLAN `cluster_name` | Set on the WLAN but unverified by any reference example — confirm in the Central UI. |
 
 ---

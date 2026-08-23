@@ -284,12 +284,16 @@ acknowledging the risk) before you can advance to provisioning.
 | SSID → AP-Group Mapping | WARN if `ssid_mapping_incomplete`; else PASS | Bindings couldn't be read; all SSIDs were assigned to those groups. Re-paste full running-config with ap-group blocks. |
 | SSID → Zone Mapping (Instant) | WARN when SSIDs are zoned to a zone with no checked-in AP | Orphaned SSIDs are parked in the `instant-default` group so they aren't lost — verify zone names (typos/case) and intended placement. |
 | AP Serial Numbers | WARN if any AP lacks a serial | Serial-less APs can't be pre-assigned or validated in Step 6. Use `show ap database long` or API mode. |
-| Named VLANs Unresolved | FAIL if any SSID uses a named VLAN pool | Named VLAN couldn't resolve to an ID; it would land on VLAN 1. Look up the real ID and fix before provisioning. |
+| Named VLANs Unresolved | FAIL if any SSID uses a named VLAN **or a multi-id pool/range** | A named VLAN, a comma list (`100,200`), or a range (`100-105`) can't resolve to a single ID — the SSID would provision onto the collapsed VLAN shown in the check detail. Look up the real ID on the MC (or pick the pool member the SSID should use) and fix before provisioning. |
 | Split-Tunnel SSIDs | WARN when split SSIDs exist | Keep → provisioned as full L2 overlay; Retire → full bridge. AOS 10 per-SSID forwarding differs from AOS 8 split — review traffic paths. |
 | Conflicting Duplicate ESSIDs | FAIL if same ESSID has differing vlan/mode/auth/psk | Central keys WLANs by ESSID; only the first definition would provision. Rename or consolidate. |
 | Duplicate ESSIDs (same settings) | PASS, informational | Identical duplicate VAPs are consolidated into one Central WLAN. |
 | ESSID Length | FAIL if any ESSID > 32 chars | Central rejects them. Shorten first. |
-| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown auth → provisioned as WPA2-Enterprise; missing PSK → set in Central; enterprise → server-group is bound automatically (New Central) but the shared secrets are placeholders — set the real secrets in Central (Classic: create the auth-servers manually per group). |
+| WEP SSIDs Unsupported | FAIL if any static/dynamic WEP SSID | AOS 10 has no WEP opmode — there is no safe mapping, and both clients refuse to provision WEP. Re-key to WPA2/WPA3 on the source first; WEP-only clients (legacy scanners, printers) need replacement. |
+| MAC-Auth SSIDs | FAIL if a MAC-auth SSID has no discovered server group; WARN otherwise | opensystem + a `mac-server-group` on the bound aaa-profile is detected as MAC auth (not OPEN) and migrates with MAC authentication enabled on both destinations. With no server group it would migrate effectively open — confirm the profile (`show aaa profile`) holds real RADIUS servers first. MAC-only auth is trivially spoofable; every client MAC must be registered. |
+| 802.1X SSIDs Without RADIUS Servers | FAIL if enterprise SSIDs exist but zero RADIUS servers were discovered | They would provision as dot1x networks with nothing to authenticate against. Confirm the servers exist (`show aaa authentication-server radius`) and that discovery can read them. |
+| Classic RADIUS Servers (manual step) | FAIL for enterprise/MAC-auth SSIDs on a Classic destination | The Classic API cannot create RADIUS server objects, and `full_wlan` references a server **by name** — the reference dangles until the server exists. In each Classic group, create a RADIUS auth server named **exactly** like the source server group (with the real host/secret), then proceed. |
+| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown auth → provisioned as WPA2-Enterprise (verify before cutover); missing PSK → set in Central; enterprise → server-group is bound automatically (New Central) but the shared secrets are placeholders — set the real secrets in Central. |
 
 Navigation: Re-run re-evaluates checks; Back returns to Step 1; Provision
 advances (gated by the override checkbox when blockers exist).
@@ -373,8 +377,8 @@ Classic caveats you will see surfaced:
 |---|---|
 | WLAN APIs allowlisted | A **403** on a `full_wlan` call means the tenant isn't allowlisted — ask your Aruba SE to enable the WLAN config APIs. |
 | Group-create flaw | The group create can return success without applying. The tool reads the group back and **fails the step** only if `Architecture` confirms it is not `AOS10`. |
-| Firmware compliance | Tries `/firmware/v2/...`; on 404/405 falls back to `/firmware/v1/...`. Device type for APs is `IAP` even on AOS 10. |
-| RADIUS auth-servers | Cannot be created via classic API → listed as a manual follow-up (create per group in Group → Devices → Config → Security). |
+| Firmware compliance | Tries `/firmware/v2/upgrade/compliance_version`; on 404/405 falls back to the v1 same-path, then to `/firmware/v1/set-firmware-compliance` (some tenants serve only that form). Device type for APs is `IAP` even on AOS 10. |
+| RADIUS auth-servers | Cannot be created via the classic API, and `full_wlan` references a server object **by name** — so preflight **FAILs** enterprise/MAC-auth SSIDs on a Classic destination until you create a RADIUS auth server named exactly like the source server group in each group (Group → Devices → Config → Security). |
 | Gateway clusters | Cannot be created via classic API → gateways auto-cluster when moved into the AOS10 group; verify tunnel SSIDs bind to the cluster in the group WLAN config. Listed as a manual follow-up. |
 | Tunnel WLAN binding | `cluster_name` on the WLAN is set but unverified by reference example — confirm in the Central UI after provisioning. |
 
@@ -482,7 +486,7 @@ The runbook content depends on source and cluster topology:
 The `ap convert` block (verified against the AOS-W 8.x CLI reference):
 
 ```
-ap convert add ap-group <each discovered group>
+ap convert add ap-group "<each discovered group>"   # quoted — paste-safe for names with spaces
 ap convert pre-validate specific-aps
 show ap convert-status            # wait for 'Pre Validate Success'
 ap convert cancel
@@ -503,6 +507,9 @@ Pre-req warnings adapt to the path:
   mgmt IP when keeping gateways) before converting.
 - Gateways retired → trunk former tunnel client VLANs to every AP switchport
   before converting.
+- Site address left blank in Step 1 → the runbook repeats the lab-placeholder
+  warning (the site object was created with "1 Lab Street, San Jose, CA") so
+  the reminder survives outside the UI — edit it in Central before go-live.
 
 Gateway migration guidance (shown below the runbook):
 - **Keep gateways:** ZTP (preferred) or Static Activate tabs to bring the MC up

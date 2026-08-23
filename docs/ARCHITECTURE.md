@@ -47,7 +47,7 @@ views/
 
 | Module | Class | Responsibility |
 |---|---|---|
-| `aos8_client.py` | `AOS8Client` | Login (`/v1/api/login`, UIDARUBA), read `/v1/configuration/object/*` and `showcommand`, assemble a `CustomerConfig`. Also hosts `is_model_compatible` + the `INCOMPATIBLE_MODELS` set and shared helpers (`_opmode_to_auth`, `_normalize_model`, `_safe_vlan`, `_vlan_is_named`). |
+| `aos8_client.py` | `AOS8Client` | Login (`/v1/api/login`, UIDARUBA), read `/v1/configuration/object/*` and `showcommand`, assemble a `CustomerConfig`. Also hosts `is_model_compatible` + the `INCOMPATIBLE_MODELS` set and shared helpers (`_opmode_to_auth`, `_normalize_model`, `_safe_vlan`, `_vlan_is_named`, `_vlan_is_pool`). |
 | `central_client.py` | `CentralClient` | New Central: SSO token, scope-maps, sites, device groups, VLANs, roles/policies, overlay/underlay SSIDs, GW cluster, auth servers, firmware compliance, validation. Per-run caches for groups/sites/roles/policies. |
 | `classic_central_client.py` | `ClassicCentralClient` | Classic Central: access-token auth + rotating refresh, v3 AOS10 groups (with Architecture readback), device inventory/move, sites, `full_wlan` WLANs, firmware v2→v1, monitoring. |
 | `glp_client.py` | `GLPClient` | GreenLake Platform: client-credentials token, async device claim + poll, workspace reconciliation, subscription resolve + assign. |
