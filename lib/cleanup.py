@@ -5,9 +5,16 @@ the Central UI. Prefix-scoped and best-effort: each delete is reported per item,
 404/'not found' counts as already-gone, and ONLY objects whose name starts with
 the prefix are touched.
 
-Deletion order matters — scope-mapped resources (WLANs/overlays) before the
-device groups/sites they bind to, then auth-servers, then classic groups.
-"""
+Deletion order matters — SSIDs before the captive-portal profiles / server
+groups / VLANs they reference, firmware-compliance before the device group
+scope it hangs off, policy-group entries before the policies they list, and
+all of it before the device groups/sites everything binds to.
+
+Endpoint coverage note: every list/delete below uses an operation present in
+HPE's published New Central OpenAPI specs (cross-checked against the
+hpe-networking-mcp manifest). Scope-map entries have NO spec-published delete
+(POST-only resource) — they are orphaned when their scope dies and are
+deliberately not touched here rather than removed by an invented call."""
 from urllib.parse import quote
 from typing import Callable, Optional
 
@@ -97,6 +104,53 @@ def cleanup(prefix: str, central=None, classic=None,
                 step(f"Delete SSID: {name}",
                      lambda e=enc: central._delete(f"/network-config/v1/wlan-ssids/{e}"))
 
+        # 1b. External captive-portal profiles (SHARED/global; SSIDs above
+        #     referenced them by name, so they go after the SSIDs)
+        try:
+            portals = _list(central._get("/network-config/v1alpha1/captive-portal"),
+                            "captive-portal", "captive-portals")
+        except Exception as e:
+            portals = []
+            results.append(("List captive portals", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for cp in portals:
+            nm = cp.get("name", "")
+            if _matches(nm, prefix):
+                step(f"Delete captive portal: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         f"/network-config/v1alpha1/captive-portal/{n}"))
+
+        # 1c. VLANs — layer2-vlan objects scope-mapped to the groups. VLAN 1
+        #     is the built-in default ("aruba-vlan/1") and is never touched.
+        try:
+            try:
+                vlans = _list(central._get("/network-config/v1/layer2-vlan"),
+                              "l2-vlan", "layer2-vlan")
+            except Exception:
+                vlans = _list(central._get("/network-config/v1alpha1/layer2-vlan"),
+                              "l2-vlan", "layer2-vlan")
+        except Exception as e:
+            vlans = []
+            results.append(("List VLANs", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for v in vlans:
+            vname = v.get("name", "")
+            vid = v.get("vlan") if v.get("vlan") is not None else v.get("id")
+            try:
+                vid = int(vid)
+            except (TypeError, ValueError):
+                continue
+            if vid <= 1 or not _matches(vname, prefix):
+                continue
+            def _del_vlan(i=vid):
+                try:
+                    central._delete(f"/network-config/v1/layer2-vlan/{i}")
+                except Exception:
+                    central._delete(f"/network-config/v1alpha1/layer2-vlan/{i}")
+            step(f"Delete VLAN {vid} ({vname})", _del_vlan)
+
         # 2. Server-groups (must go BEFORE auth-servers they reference)
         try:
             groups = _list(central._get("/network-config/v1alpha1/server-groups"),
@@ -129,49 +183,132 @@ def cleanup(prefix: str, central=None, classic=None,
                      lambda n=quote(nm, safe=""): central._delete(
                          f"/network-config/v1alpha1/auth-servers/{n}"))
 
+        # 3b. Roles + security policies (created by the overlay/tunnel SSID
+        #     path, named after the SSID). Policy-group ENTRIES reference the
+        #     policy, so the entry goes first — a referenced policy delete
+        #     would 400. Roles/policies list under v1alpha1 even when created
+        #     via the v1 path.
+        try:
+            pgroup = central._get("/network-config/v1alpha1/policy-groups")
+            pg_entries = (pgroup.get("policy-group", {}) or {}
+                          ).get("policy-group-list", []) \
+                if isinstance(pgroup, dict) else []
+        except Exception as e:
+            pg_entries = []
+            results.append(("List policy-groups", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for entry in pg_entries:
+            nm = entry.get("name", "") if isinstance(entry, dict) else ""
+            if _matches(nm, prefix):
+                step(f"Remove policy-group entry: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         "/network-config/v1alpha1/policy-groups"
+                         f"/policy-group/policy-group-list/{n}"))
+        try:
+            policies = _list(central._get("/network-config/v1alpha1/policies"),
+                             "policies", "policy")
+        except Exception as e:
+            policies = []
+            results.append(("List policies", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for pol in policies:
+            nm = pol.get("name", "")
+            if _matches(nm, prefix):
+                step(f"Delete policy: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         f"/network-config/v1alpha1/policies/{n}"))
+        try:
+            roles = _list(central._get("/network-config/v1alpha1/roles"),
+                          "roles", "role")
+        except Exception as e:
+            roles = []
+            results.append(("List roles", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for role in roles:
+            nm = role.get("name", "")
+            if _matches(nm, prefix):
+                step(f"Delete role: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         f"/network-config/v1alpha1/roles/{n}"))
+
         # 4. Device groups — on a HYBRID tenant these are Classic-owned, so the
         #    New Central delete 400s and the Classic delete (below) is what
         #    actually removes them. Treat a NC 400 as deferred-to-Classic.
+        #    Firmware-compliance is a per-scope setting with its own
+        #    spec-published DELETE — clear it BEFORE the group scope goes away.
         try:
-            for grp in central.list_device_groups(refresh=True):
-                gname = grp.get("scopeName", "")
-                gid = grp.get("scopeId")
-                if _matches(gname, prefix) and gid is not None:
-                    def _del_group(i=gid):
-                        try:
-                            central._delete("/network-config/v1/device-groups/bulk",
-                                            json={"items": [{"id": i}]})
-                        except Exception:
-                            # spec offers bulk deletes only; the single-id
-                            # form is a last-resort for older tenants
-                            central._delete(f"/network-config/v1/device-groups/{i}")
-                    if classic is not None:
-                        # hybrid: let the Classic delete handle it — but only
-                        # when the failure IS the hybrid restriction (or Classic
-                        # really owns the group). Anything else (auth/5xx/
-                        # timeout) is a real failure and must stay red-flagged.
-                        try:
-                            _del_group()
-                            results.append((f"Delete device group: {gname}", True, ""))
-                        except Exception as e:
-                            msg = str(e)
-                            if "404" in msg or "not found" in msg.lower() \
-                                    or "does not exist" in msg.lower():
-                                results.append((f"Delete device group: {gname}",
-                                                True, "already gone"))
-                            elif ("HYBRID_CLUSTER" in msg or "API_ACCESS_RESTRICTED" in msg
-                                    or gname in _classic_group_names()):
-                                results.append((f"Delete device group: {gname}", True,
-                                                "deferred to Classic (hybrid)"))
-                            else:
-                                results.append((f"Delete device group: {gname}", False,
-                                                msg[:200]))
-                        if on_step:
-                            on_step(*results[-1])
-                    else:
-                        step(f"Delete device group: {gname}", _del_group)
+            nc_groups = central.list_device_groups(refresh=True)
         except Exception as e:
+            nc_groups = []
             results.append(("List device groups", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for grp in nc_groups:
+            gname = grp.get("scopeName", "")
+            gid = grp.get("scopeId")
+            if _matches(gname, prefix) and gid is not None:
+                step(f"Delete firmware compliance → {gname}",
+                     lambda i=gid: central._delete(
+                         "/network-config/v1alpha1/firmware-compliance",
+                         params={"scope-id": str(i), "object-type": "LOCAL",
+                                 "device-function": "CAMPUS_AP"}))
+        for grp in nc_groups:
+            gname = grp.get("scopeName", "")
+            gid = grp.get("scopeId")
+            if _matches(gname, prefix) and gid is not None:
+                def _del_group(i=gid):
+                    try:
+                        central._delete("/network-config/v1/device-groups/bulk",
+                                        json={"items": [{"id": i}]})
+                    except Exception:
+                        # spec offers bulk deletes only; the single-id
+                        # form is a last-resort for older tenants
+                        central._delete(f"/network-config/v1/device-groups/{i}")
+                if classic is not None:
+                    # hybrid: let the Classic delete handle it — but only
+                    # when the failure IS the hybrid restriction (or Classic
+                    # really owns the group). Anything else (auth/5xx/
+                    # timeout) is a real failure and must stay red-flagged.
+                    try:
+                        _del_group()
+                        results.append((f"Delete device group: {gname}", True, ""))
+                    except Exception as e:
+                        msg = str(e)
+                        if "404" in msg or "not found" in msg.lower() \
+                                or "does not exist" in msg.lower():
+                            results.append((f"Delete device group: {gname}",
+                                            True, "already gone"))
+                        elif ("HYBRID_CLUSTER" in msg or "API_ACCESS_RESTRICTED" in msg
+                                or gname in _classic_group_names()):
+                            results.append((f"Delete device group: {gname}", True,
+                                            "deferred to Classic (hybrid)"))
+                        else:
+                            results.append((f"Delete device group: {gname}", False,
+                                            msg[:200]))
+                    if on_step:
+                        on_step(*results[-1])
+                else:
+                    step(f"Delete device group: {gname}", _del_group)
+
+        # 4b. Gateway clusters — formed manually at cutover per the runbook;
+        #     prefix-named lab clusters still need teardown
+        try:
+            clusters = _list(central._get("/network-config/v1alpha1/gateway-clusters"),
+                             "gateway-clusters", "gateway-cluster")
+        except Exception as e:
+            clusters = []
+            results.append(("List gateway clusters", False, str(e)[:150]))
+            if on_step:
+                on_step(*results[-1])
+        for cl in clusters:
+            nm = cl.get("name", "") or cl.get("cluster-name", "")
+            if _matches(nm, prefix):
+                step(f"Delete gateway cluster: {nm}",
+                     lambda n=quote(nm, safe=""): central._delete(
+                         f"/network-config/v1alpha1/gateway-clusters/{n}"))
 
         # 5. Sites (bulk-by-id, then single)
         try:

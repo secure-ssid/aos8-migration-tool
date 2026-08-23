@@ -9,7 +9,7 @@ from lib import audit
 from lib.glp_client import GLPClient
 from lib.session_clients import (
     build_central_client, build_classic_client, use_classic_for_moves,
-    persist_classic_tokens,
+    persist_classic_tokens, tenant_fingerprint,
 )
 from lib.testdata import TEST_PREFIX
 from lib.styles import (
@@ -530,12 +530,37 @@ def render():
         ap_serials = {grp.name: [s for s in grp.ap_serials if s]
                       for grp in customer.ap_groups}
         _n_aps = sum(len(v) for v in ap_serials.values())
+        # Subscription gate: an AP moved into an AOS 10 group WITHOUT an active
+        # subscription comes up unmanaged in Central — the stranded-fleet
+        # outcome this tool exists to prevent. Serials with a successful
+        # assignment in this session pass; anything else needs an explicit
+        # operator confirmation that it was subscribed outside this session
+        # (an earlier run, or directly in the GreenLake UI).
+        _sub_ok = {str(s).upper()
+                   for s, ok, _ in (st.session_state.get("glp_sub_results") or [])
+                   if ok}
+        _unsub = sorted({s for v in ap_serials.values() for s in v
+                         if s.upper() not in _sub_ok})
+        sub_ok = True
+        if _unsub:
+            info_banner(
+                f"<b>{len(_unsub)} of {_n_aps} AP(s) have no confirmed "
+                "subscription assignment in this session.</b> An AP converted "
+                "without an active subscription comes up <b>unmanaged</b> in "
+                "Central. Assign the subscription above, or confirm the APs "
+                "were already subscribed outside this session.",
+                color=WARN)
+            sub_ok = st.checkbox(
+                f"The {len(_unsub)} AP(s) without a session-confirmed assignment "
+                "already hold an active subscription (verified in GreenLake)",
+                key="cutover_sub_confirm")
         cutover_ok = st.checkbox(
             f"I'm in my cutover window — convert these {_n_aps} AP(s) now "
             "(they will reboot into AOS 10 and drop offline)",
             key="cutover_confirm")
         if st.button("Move APs into groups + assign persona/site",
-                     type="primary", disabled=not (reviewed and cutover_ok)):
+                     type="primary",
+                     disabled=not (reviewed and cutover_ok and sub_ok)):
             box = st.empty()
             lines: list[tuple[str, bool]] = []
 
@@ -570,12 +595,24 @@ def render():
                     failed=sum(1 for r in results if not r[1]),
                 )
                 st.session_state["onboard_results"] = results
+                # fingerprint what the run consumed so a config/tenant change
+                # can't leave a "migration complete" banner pointing at a
+                # stale run (add_devices does the same for its results)
+                import hashlib as _hl
+                st.session_state["onboard_results_fp"] = _hl.sha1(
+                    (tenant_fingerprint() + "|" + repr(central_cfg)).encode()
+                ).hexdigest()
                 st.rerun()
             except Exception as e:
                 st.error(f"Device onboarding failed: {e}")
 
         onb = st.session_state.get("onboard_results")
         if onb:
+            import hashlib as _hl
+            _cur_fp = _hl.sha1(
+                (tenant_fingerprint() + "|" + repr(central_cfg)).encode()
+            ).hexdigest()
+            _stale = st.session_state.get("onboard_results_fp") not in (None, _cur_fp)
             fail = [r for r in onb if not r[1]]
             if fail:
                 st.warning(f"{len(fail)} step(s) failed — APs must be in the GreenLake "
@@ -584,6 +621,10 @@ def render():
                     provision_step_line(label, False)
                     if err:
                         st.code(err, language="text")
+            elif _stale:
+                st.warning("These onboarding results are from a PREVIOUS run — the "
+                           "config or tenant has changed since. Re-run the move "
+                           "above before treating the migration as complete.")
             else:
                 st.success("APs moved into their groups and assigned — migration complete.")
             with st.expander("Onboarding step log", expanded=False):

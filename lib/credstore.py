@@ -49,6 +49,8 @@ FIELDS = (
     "central_client_id",
     "central_secret",
     "classic_refresh_token",  # rotates; access token is intentionally NOT saved
+    "classic_client_id",      # Classic-gateway OAuth client (hybrid refresh) —
+    "classic_client_secret",  # distinct issuer from the GreenLake client above
     "hybrid_tenant",          # hybrid-ness is a tenant property — a remembered
                               # hybrid setup must stay armed across launches
 )
@@ -56,7 +58,8 @@ FIELDS = (
 # The actual credentials — at least one must be present before we write a file.
 # Base URLs auto-populate from defaults, so saving on those alone would create a
 # file that looks "saved" but holds no credential ("didn't save the APIs").
-CREDENTIAL_FIELDS = ("central_client_id", "central_secret", "classic_refresh_token")
+CREDENTIAL_FIELDS = ("central_client_id", "central_secret", "classic_refresh_token",
+                     "classic_client_id", "classic_client_secret")
 
 
 # One-time diagnostic latch: a malformed key otherwise disables persistence

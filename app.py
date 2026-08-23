@@ -119,6 +119,7 @@ for _k in ("remember_creds", "hybrid_tenant", "glp_use_central_creds",
 # text still sitting in the boxes from re-installing the token next render.
 if st.session_state.pop("_forget_classic", False):
     for _k in ("classic_access_token", "classic_refresh_token",
+               "classic_client_id", "classic_client_secret",
                "p1_classic_token_input", "p1_classic_refresh_input"):
         st.session_state.pop(_k, None)
     st.session_state["hybrid_tenant"] = False

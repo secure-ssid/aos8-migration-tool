@@ -29,6 +29,24 @@ def tenant_fingerprint() -> str:
 _DEFAULT_CLASSIC_BASE = "https://apigw-uswest4.central.arubanetworks.com"
 
 
+def classic_client_creds() -> tuple[str, str]:
+    """The OAuth client id/secret for the CLASSIC API gateway token refresh.
+
+    Classic and GreenLake/New Central are different issuers — in hybrid mode
+    `central_client_id`/`central_secret` hold the GreenLake client and a
+    Classic refresh attempted with them 401s ~2h into a cutover. Classic-mode
+    destinations are the exception: there the Step 1 fields ARE labelled and
+    used as the Classic client, so they remain the fallback."""
+    cid = st.session_state.get("classic_client_id", "")
+    csec = st.session_state.get("classic_client_secret", "")
+    if cid and csec:
+        return cid, csec
+    if st.session_state.get("dest_type", "new") == "classic":
+        return (st.session_state.get("central_client_id", ""),
+                st.session_state.get("central_secret", ""))
+    return "", ""
+
+
 def have_classic_creds() -> bool:
     """True when enough is present to build a usable Classic client: an access
     token, or a refresh token + client id/secret (the client re-mints the
@@ -36,9 +54,8 @@ def have_classic_creds() -> bool:
     the base URL falls back to the default API-GW host."""
     if st.session_state.get("classic_access_token"):
         return True
-    return bool(st.session_state.get("classic_refresh_token")
-                and st.session_state.get("central_client_id")
-                and st.session_state.get("central_secret"))
+    cid, csec = classic_client_creds()
+    return bool(st.session_state.get("classic_refresh_token") and cid and csec)
 
 
 def use_classic_for_moves() -> bool:
@@ -60,11 +77,12 @@ def build_central_client() -> CentralClient:
 def build_classic_client() -> ClassicCentralClient:
     # .get() everywhere — never KeyError; the base URL falls back to the
     # default API-GW host if the operator only supplied a token
+    cid, csec = classic_client_creds()
     return ClassicCentralClient(
         base_url=st.session_state.get("central_base_classic") or _DEFAULT_CLASSIC_BASE,
         access_token=st.session_state.get("classic_access_token", ""),
-        client_id=st.session_state.get("central_client_id", ""),
-        client_secret=st.session_state.get("central_secret", ""),
+        client_id=cid,
+        client_secret=csec,
         refresh_token=st.session_state.get("classic_refresh_token", ""),
     )
 

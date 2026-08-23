@@ -619,22 +619,28 @@ def _check_ssid_auth(customer: CustomerConfig,
                    "(show aaa authentication-server radius) and that "
                    "discovery can read them, before provisioning.",
         ))
-    elif enterprise and central.destination == "classic":
+    elif (enterprise or [s for s in mac if s.auth_server_group]) \
+            and central.destination == "classic":
         mac_named = [s.display_name for s in mac if s.auth_server_group]
+        # the gate covers MAC-only SSID sets too: the Classic client emits
+        # the same dangling auth_server1 reference for MAC-auth WLANs
+        kinds = []
+        if enterprise:
+            kinds.append(f"Enterprise SSIDs ({', '.join(enterprise)})")
+        if mac_named:
+            kinds.append(f"MAC-auth SSIDs ({', '.join(mac_named)})")
         results.append(CheckResult(
             name="Classic RADIUS Servers (manual step)",
             status=Status.FAIL,
-            message=f"Enterprise SSIDs ({', '.join(enterprise)}) on a Classic "
+            message=f"{' and '.join(kinds)} on a Classic "
                     "destination: the Classic provisioning path cannot create "
                     "RADIUS server objects (no public API) — full_wlan "
                     "references the auth server BY NAME, so the reference "
                     "dangles until the server exists.",
             detail="In each Classic group, create a RADIUS auth server named "
                    "EXACTLY like the source server group "
-                   f"({', '.join(sorted({s.auth_server_group for s in customer.ssids if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE) and s.auth_server_group})) or 'see source config'}) "
-                   "with the real host/secret, then proceed."
-                   + (f" Same for the MAC-auth SSIDs ({', '.join(mac_named)})."
-                      if mac_named else ""),
+                   f"({', '.join(sorted({s.auth_server_group for s in customer.ssids if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE, AuthType.MAC) and s.auth_server_group})) or 'see source config'}) "
+                   "with the real host/secret, then proceed.",
         ))
     elif enterprise:
         results.append(CheckResult(
