@@ -45,6 +45,25 @@ PASTE_COMMANDS_INSTANT = [
 
 _FW_RE = re.compile(r"^\d+\.\d+(\.\d+){1,2}$")
 
+
+def _paste_mirror(wkey: str, dkey: str) -> None:
+    """on_change mirror: widget-keyed state is garbage-collected when its
+    widget isn't rendered (another step / another source mode), which used to
+    silently wipe pasted CLI output on navigation. The durable copy lets a
+    later run restore the box instead of re-parsing a partial subset."""
+    st.session_state[dkey] = st.session_state.get(wkey, "")
+
+
+def _paste_area(key: str, cmd: str, hint: str, prefix: str) -> None:
+    """Paste box whose content survives step navigation: restore from the
+    durable mirror BEFORE the widget is instantiated (setting a widget key
+    pre-instantiation seeds its value), then mirror every edit back."""
+    wkey, dkey = f"{prefix}_{key}", f"{prefix}_saved_{key}"
+    if wkey not in st.session_state and dkey in st.session_state:
+        st.session_state[wkey] = st.session_state[dkey]
+    st.text_area(f"`{cmd}` — {hint}", height=110, key=wkey,
+                 on_change=_paste_mirror, args=(wkey, dkey))
+
 # Source-platform radio is bound to a session-state key (see render()), so any
 # programmatic change — e.g. "Load test customer" picking a controller vs an
 # instant scenario — actually moves the control. A no-key radio keeps its
@@ -299,7 +318,7 @@ def render():
             unsafe_allow_html=True,
         )
         for key, cmd, hint in PASTE_COMMANDS_INSTANT:
-            st.text_area(f"`{cmd}` — {hint}", height=110, key=f"ipaste_{key}")
+            _paste_area(key, cmd, hint, "ipaste")
 
         if st.button("Parse Instant Output", type="primary"):
             pasted = {key: st.session_state.get(f"ipaste_{key}", "")
@@ -427,7 +446,7 @@ def render():
             unsafe_allow_html=True,
         )
         for key, cmd, hint in PASTE_COMMANDS:
-            st.text_area(f"`{cmd}` — {hint}", height=110, key=f"paste_{key}")
+            _paste_area(key, cmd, hint, "paste")
 
         if st.button("Parse Pasted Output", type="primary"):
             pasted = {key: st.session_state.get(f"paste_{key}", "") for key, _, _ in PASTE_COMMANDS}
@@ -657,6 +676,24 @@ def render():
             )
             if href:
                 st.session_state["classic_refresh_token"] = href.strip()
+            hc1, hc2 = st.columns(2)
+            hcid = hc1.text_input(
+                "Classic API client ID (needed for refresh)",
+                value=st.session_state.get("classic_client_id", ""),
+                help="From the CLASSIC API Gateway app (System Apps & Tokens) — "
+                     "NOT the GreenLake client above: the two issuers differ, and "
+                     "refreshing a Classic token with GreenLake creds 401s ~2h "
+                     "into a cutover",
+            )
+            if hcid.strip():
+                st.session_state["classic_client_id"] = hcid.strip()
+            hcsec = hc2.text_input(
+                "Classic API client secret", type="password",
+                placeholder="•••••••• (saved)"
+                if st.session_state.get("classic_client_secret") else "",
+            )
+            if hcsec:
+                st.session_state["classic_client_secret"] = hcsec.strip()
 
             # Classic routing is an explicit choice, not a side effect of a
             # token lingering in the session from a previous engagement.
@@ -684,7 +721,8 @@ def render():
                     "Forget token", use_container_width=True,
                     help="Clears the Classic access/refresh token from this "
                          "session and from the saved-credentials file."):
-                for _k in ("classic_access_token", "classic_refresh_token"):
+                for _k in ("classic_access_token", "classic_refresh_token",
+                           "classic_client_id", "classic_client_secret"):
                     st.session_state.pop(_k, None)
                 # the hybrid checkbox + token inputs were already instantiated
                 # this run, so their keys can't be assigned here — app.py
@@ -779,15 +817,17 @@ def render():
                     st.session_state.get("central_secret", ""))
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
-                from lib.session_clients import (have_classic_creds,
+                from lib.session_clients import (classic_client_creds,
+                                                 have_classic_creds,
                                                  persist_classic_tokens)
                 # refresh-token + id/secret (the remembered-creds shape) is a
                 # probe-able config too — the client re-mints on the first 401
                 if have_classic_creds():
+                    _cid, _csec = classic_client_creds()
                     _cl_rows, _cl = api_probe.probe_classic(
                         st.session_state.get("central_base_classic", ""),
                         st.session_state.get("classic_access_token", ""),
-                        central_client_id, st.session_state.get("central_secret", ""),
+                        _cid, _csec,
                         st.session_state.get("classic_refresh_token", ""))
                     rows += _cl_rows
                     # the probe may have consumed the single-use refresh token

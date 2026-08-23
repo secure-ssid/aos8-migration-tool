@@ -80,6 +80,9 @@ def _named_vlan_editor(customer, central) -> None:
         # so the corrected VLANs actually reach Central
         st.session_state.pop("provision_done", None)
         st.session_state.pop("provision_results", None)
+        # a cutover banner from the pre-remap config must not survive either
+        st.session_state.pop("onboard_results", None)
+        st.session_state.pop("onboard_results_fp", None)
         st.success("VLAN mapping applied — re-running preflight.")
         st.rerun()
 
