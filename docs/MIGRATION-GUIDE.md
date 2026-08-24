@@ -189,8 +189,9 @@ chooses the path.
 
 1. Enter the **Customer name** (drives every generated object name) and,
    optionally, a site name. Open *Site address & timezone* and fill it in —
-   New Central validates the address, and blank fields fall back to lab
-   placeholders.
+   New Central validates the address. Blank fields only become placeholder
+   sites when the **Lab/test mode** checkbox (same expander) is ticked; in a
+   production run Step 3 refuses to provision a site from incomplete data.
 2. Pick the **Source platform** (Mobility Controller vs Instant cluster).
 3. Pull the config: **API mode** (MC IP + credentials → *Connect & Pull
    Config*) or **Paste CLI output** (one text box per show command → *Parse
@@ -305,8 +306,14 @@ advances (gated by the override checkbox when blockers exist).
 Writes to the customer tenant. Shows a **manifest** of everything that will be
 created, then runs the provisioning sequence with a live per-step pass/fail log.
 **Every API failure is reported per step; nothing is silently skipped.** Steps
-are idempotent — existing objects with matching names are reused — so you can
-fix a failure and use "Reset & re-run provisioning."
+are idempotent so you can fix a failure and use "Reset & re-run provisioning" —
+but reuse is **ownership-gated for SSIDs (and Classic device groups)**: an
+ownership manifest (`~/.aos8-migration/manifests/`, per customer+tenant)
+records what this tool created, and a same-named SSID/group it doesn't own
+fails with a **collision refusal** instead of being silently reused or patched.
+Step 3 then offers an explicit, audited **Adopt** action per object — adopted
+objects may be reused but are never deleted by cleanup. Other resource kinds
+(sites, VLANs, RADIUS profiles, …) are still reused by name this wave.
 
 ![Step 3 — manifest before provisioning](screenshots/05-provision-manifest.png)
 
@@ -428,6 +435,13 @@ provision → claim → convert.
    is ticked. A success banner from a previous run is replaced by a
    staleness warning if the config or tenant changed since — re-run the
    move before treating the migration as complete.
+7. Clear the **cutover gate** if it appears. Any Step 3 step that failed
+   must be individually acknowledged with a written reason (each
+   acknowledgement is an audit record with your identity), and every
+   deferred manual follow-up — gateway-cluster formation, overlay WLAN
+   binding, placeholder PSK/RADIUS-secret replacement, captive-portal
+   checks — must be confirmed done. The move stays locked until every
+   item is resolved; there is no global override.
 
 What it does behind the scenes:
 1. Buckets APs into **claimable** (serial + MAC), **missing MAC**, **missing
@@ -449,9 +463,11 @@ What it does behind the scenes:
 
 Path notes:
 - **Classic destination:** Step 3 already pre-added serial+MAC to the classic
-  inventory. This GreenLake step applies to GLP-onboarded classic accounts
-  (most current ones). If the account predates GreenLake onboarding, skip to the
-  runbook.
+  inventory (the `config` phase). This GreenLake step applies to GLP-onboarded
+  classic accounts (most current ones). If the account predates GreenLake
+  onboarding, the **claim** can be skipped — but the classic cutover (the
+  `devices` phase that moves APs into their groups) still runs here, behind
+  the same cutover gate.
 - **GLP credentials:** for New Central destinations the tool defaults to
   reusing the Central client (works if it's a unified GreenLake client); for
   Classic destinations the checkbox defaults to off — enter a separate GLP
@@ -513,9 +529,12 @@ Pre-req warnings adapt to the path:
   mgmt IP when keeping gateways) before converting.
 - Gateways retired → trunk former tunnel client VLANs to every AP switchport
   before converting.
-- Site address left blank in Step 1 → the runbook repeats the lab-placeholder
-  warning (the site object was created with "1 Lab Street, San Jose, CA") so
-  the reminder survives outside the UI — edit it in Central before go-live.
+- Site address left blank in Step 1 **with Lab/test mode on** → the runbook
+  repeats the lab-placeholder warning (the site object was created with "1 Lab
+  Street, San Jose, CA") so the reminder survives outside the UI — edit it in
+  Central before go-live. Without lab mode, Step 3 refuses to create a site
+  from incomplete address data, so this warning can't appear in a production
+  run.
 
 Gateway migration guidance (shown below the runbook):
 - **Keep gateways:** ZTP (preferred) or Static Activate tabs to bring the MC up

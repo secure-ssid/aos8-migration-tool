@@ -19,7 +19,9 @@ CLI operation (`ap convert`) on the MC. Code: `lib/aos8_client.py` (REST),
   - `GET /v1/configuration/showcommand?command=...` — show commands.
 - **`config_path`** — on a **Mobility Conductor** use `/md` (default); on a
   **standalone controller** use `/mm/mynode` (set under Advanced in Step 1).
-- TLS is self-signed → `verify=False`.
+- TLS: controllers ship self-signed certs and verification is **ON by
+  default** — point `AOS8_CA_BUNDLE` at a bundle with the controller's CA;
+  `AOS8_DEV_MODE` (local lab/test) is the only opt-out.
 
 ### What's pulled (`pull_config`)
 firmware (`show version`), controller IP + VLAN (`show controller-ip`), AP

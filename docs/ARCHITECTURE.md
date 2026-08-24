@@ -21,14 +21,23 @@ lib/
   auth_ui.py               # login gate UI for password/accounts modes
   accounts.py              # self-service account store (verified email)
   credstore.py             # opt-in encrypted per-user credential store
-  audit.py                 # per-user audit log of write actions
+  audit.py                 # per-user audit log of write actions; a write failure
+                           # raises AuditWriteError — auditing is not best-effort
+  manifest.py              # ownership registry (per customer+tenant) for objects
+                           # provisioning creates; gates SSID/classic-group reuse
+  http_base.py             # base-URL allowlist + scheme gate shared by the cloud
+                           # clients (HPE/Aruba hosts only; http:// loopback/dev-only)
   session_clients.py       # cached per-session Central/GLP client factories
-  cleanup.py               # "Clean up test objects" tool (zztest-* deletion) — tears
-                           # down every resource type provisioning creates: SSIDs,
-                           # captive portals, VLANs, roles/policies, firmware
-                           # compliance (cleared before the group scope disappears),
-                           # device groups, sites, gateway clusters; on hybrid
-                           # tenants Classic-owned groups defer to the Classic delete
+  cleanup.py               # "Clean up test objects" tool (zztest-* deletion) — with a
+                           # manifest attached, deletes ONLY manifest-owned objects
+                           # (anything else, including kinds the manifest doesn't
+                           # register yet, is kept and listed); without one, legacy
+                           # prefix teardown of every resource type provisioning
+                           # creates: SSIDs, captive portals, VLANs, roles/policies,
+                           # firmware compliance (cleared before the group scope
+                           # disappears), device groups, sites, gateway clusters; on
+                           # hybrid tenants Classic-owned groups defer to the Classic
+                           # delete
   testdata.py              # built-in test customer for demos/labs
   api_probe.py             # Step 1 "Test API connectivity" endpoint probes
   api_catalog.py           # catalog of every REST endpoint the tool can call
@@ -175,6 +184,7 @@ session — nothing is written to disk).
 | `classic_access_token`, `classic_refresh_token` | p1, p3, p4, p6 | Classic token + rotating refresh token (updated after refresh). |
 | `classic_client_id`, `classic_client_secret` | p1, add_devices | Classic API Gateway OAuth client for token refresh — a distinct issuer from the GreenLake client; on hybrid tenants these are separate fields (Classic-mode destinations fall back to `central_client_id`/`central_secret`). |
 | `aos10_fw` | p1 | Target AOS 10 version string. |
+| `lab_mode` | p1 | Lab/test-mode switch — when on, blank site address data may become placeholder sites ("1 Lab Street…"); when off (default), Step 3 refuses to provision a site from incomplete data. |
 | `gw_strategy` | p1 | "keep" or "retire". |
 | `glp_use_central_creds`, `glp_client_id`, `glp_secret` | p4 | GLP credential source. |
 | `paste_*` / `ipaste_*` | p1 | Per-command text areas (MC / Instant paste). Each box mirrors into a durable `paste_saved_*` / `ipaste_saved_*` key so pasted output survives step navigation (widget-keyed state is garbage-collected when the widget isn't rendered). |
@@ -193,6 +203,8 @@ session — nothing is written to disk).
 | `glp_sub_results` | p4 | `[(serial, ok, err)]` for subscription assignment. |
 | `glp_service_managers` | p4 | Central application instances (id/region) loaded from GLP. |
 | `onboard_results` | p4 | `[(label, ok, detail)]` from the devices-phase cutover move. |
+| `cutover_failure_acks` | p4 | `{failed step label: written reason}` — each acknowledgement is an audit record; the cutover stays locked while any failed Step 3 step is unacknowledged. |
+| `cutover_manual_confirmations` | p4 | `{manual follow-up label: True}` — confirmations that deferred work (gateway cluster, overlay binding, placeholder secrets, captive-portal checks) is done; also gate the cutover. |
 | `onboard_results_fp` | p4 | SHA-1 fingerprint of tenant + config consumed by the cutover run; a mismatch flags the success banner as stale (config/tenant changed since). Cleared by re-provisioning and by the Step 2 VLAN remap. |
 | `probe_results` | p1 | API endpoint probe results. |
 | `macedit_result` | p4 | `{applied, bad}` from the wired-MAC editor. |
@@ -215,6 +227,7 @@ def reset_downstream_state():
                 "provision_results", "validation_results",
                 "glp_existing", "glp_subscriptions", "glp_claim_result",
                 "glp_sub_results", "glp_service_managers", "onboard_results",
+                "cutover_failure_acks", "cutover_manual_confirmations",
                 "probe_results", "validation_celebrated", "macedit_result"):
         st.session_state.pop(key, None)
     # the Step 6 closeout checklist is mirrored into durable chk_* keys —
@@ -242,12 +255,34 @@ that runs `fn`, appends `(label, ok, detail)` to a results list, calls the
 `on_step` callback (which streams a live line into the Streamlit UI via
 `provision_step_line`), and **continues on failure**. Failures are recorded, not
 raised, so the operator gets a complete picture. The only hard stop is when the
-global scope can't be resolved (New Central) — nothing else can proceed.
+global scope can't be resolved (New Central) — nothing else can proceed. Both
+clients take `phase="config|devices|all"`: Step 3 runs the `config` phase
+(sites/groups/VLANs/SSIDs/firmware — no AP is claimed, moved or rebooted); the
+Step 4 cutover runs the `devices` phase (move APs into groups, assign
+persona/site). `phase="all"` keeps the legacy single pass.
 
-Idempotency is by name: sites, groups, VLANs, SSIDs, auth servers and clusters
-all check-or-reuse, and "already exists"/"duplicate" errors are swallowed as
-success. Both Central clients cache the group/site lists per run (New Central: `_groups_cache`/`_sites_cache`; classic: `_group_names_cache`/`_sites_cache`). The New Central client additionally
-de-dups role/policy ensure-sequences via `_ensured_roles` / `_ensured_policies`.
+Recorded failures are not free: the Step 4 **cutover gate** locks the AP move
+until every failed step is acknowledged with a written reason and every
+deferred manual follow-up (labels containing `DEFERRED` or starting with
+`MANUAL FOLLOW-UP` — gateway cluster, overlay binding, placeholder PSK/RADIUS
+secrets, captive-portal checks) is confirmed done. Acknowledgements and
+confirmations are audit records with the operator's identity; the gate state
+lives in `cutover_failure_acks` / `cutover_manual_confirmations` and is wiped
+by re-provisioning and rediscovery like everything derived.
+
+Idempotency is by name, **ownership-gated for SSIDs and Classic groups**: with
+a manifest attached (`lib/manifest.py`, per customer+tenant under
+`~/.aos8-migration/manifests/`), those two kinds are reused/PATCHed only when
+the manifest owns the object (or it was explicitly adopted in Step 3 — an
+audited, per-object decision); a foreign same-named object raises a collision
+refusal. An unreadable manifest fails closed. Sites, VLANs, auth servers,
+New Central device groups, server groups, policies, roles, captive portals and
+gateway clusters are **not yet registered** — for them, name-based reuse (and
+"already exists"/"duplicate" swallowed as success) still applies. Both Central
+clients cache the group/site lists per run (New Central:
+`_groups_cache`/`_sites_cache`; classic: `_group_names_cache`/`_sites_cache`).
+The New Central client additionally de-dups role/policy ensure-sequences via
+`_ensured_roles` / `_ensured_policies`.
 
 ## Styling
 

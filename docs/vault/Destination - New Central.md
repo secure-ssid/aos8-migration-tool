@@ -67,7 +67,9 @@ personal.
 > **Deferred:** Step 3 does **not** run this sequence. The gateway cluster
 > only exists after the MCs convert at cutover, so tunnel/split SSIDs are
 > logged as *DEFERRED* follow-ups and bound afterwards (the runbook drives
-> it). `create_overlay_ssid` is the reference implementation for that
+> it). Deferred ≠ done: each outstanding follow-up **gates the Step 4
+> cutover** until the operator explicitly confirms it complete (audited).
+> `create_overlay_ssid` is the reference implementation for that
 > post-cutover bind.
 
 For a tunnel/split SSID, `create_overlay_ssid` builds, in order:
@@ -116,7 +118,10 @@ into their groups and assigns the CAMPUS_AP persona + site. Duplicate ESSIDs
 within a group are **skipped** (first definition wins) — see
 [[Preflight Checks|duplicate ESSID]]. Every step's success/failure is
 recorded; the flow continues so the operator gets a complete picture. Re-runs
-reuse existing objects.
+reuse existing objects — with a [[Tool Internals|manifest]] attached, SSID
+reuse/PATCH is ownership-gated (a same-named SSID the manifest doesn't own is
+a collision refusal, adoptable in Step 3); other kinds are still reused by
+name.
 
 ## Validation
 
