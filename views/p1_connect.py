@@ -842,7 +842,8 @@ def render():
             if dest_type == "new":
                 rows += api_probe.probe_new_central(
                     central_base, central_client_id,
-                    st.session_state.get("central_secret", ""))
+                    st.session_state.get("central_secret", ""),
+                    target_fw=aos10_fw.strip())
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
                 from lib.session_clients import (classic_client_creds,
