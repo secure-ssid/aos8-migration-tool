@@ -99,7 +99,7 @@ Set these up before Step 1 so the Continue button isn't blocked.
 
 | Mode | What you need | Notes |
 |---|---|---|
-| API (MC, recommended) | MC IP, username, password, `config_path` | REST API on TCP **4343**; self-signed cert accepted. UIDARUBA session token obtained automatically. |
+| API (MC, recommended) | MC IP, username, password, `config_path` | REST API on TCP **4343**. The certificate is verified; a factory self-signed cert prompts you to confirm and pin its fingerprint. UIDARUBA session token obtained automatically. |
 | Paste CLI (MC) | Pasted output of the show commands below | Use when 4343 is firewalled or the REST API is disabled. |
 | Paste CLI (Instant) | VC `show running-config`, `show aps`, `show version` | Instant has no REST pull in this tool — paste only. |
 
