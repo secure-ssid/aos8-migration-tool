@@ -55,6 +55,14 @@ def secret_looks_unusable(s: Optional[str]) -> bool:
 # need their auth server attached in Central — surfaced in preflight.
 OPMODE = {
     AuthType.OPEN: "OPEN",
+    # OWE / Enhanced Open is natively supported — HPE's own Open SSID (OWE)
+    # reference workflow uses opmode ENHANCED_OPEN, and the docs note it
+    # "replaces open system as the default opmode". Do NOT collapse it to OPEN:
+    # that would silently strip encryption.
+    AuthType.OWE: "ENHANCED_OPEN",
+    # SECURITY DOWNGRADE — MAC authentication gates association today and has
+    # no direct opmode equivalent, so it lands as OPEN. Preflight raises a
+    # BLOCKER so it can only reach here after an explicit, recorded override.
     AuthType.MAC: "OPEN",
     AuthType.WPA2_PSK: "WPA2_PERSONAL",
     AuthType.WPA3_SAE: "WPA3_SAE",
@@ -200,6 +208,76 @@ class CentralClient:
     def _patch(self, path, json=None, params=None):
         return self._request("PATCH", path, json=json, params=params)
 
+    # ───────────── Config-API shape negotiation ─────────────
+    # HPE's published reference (the "Open SSID (OWE)" Postman collection in
+    # aruba/central-python-workflows@v2) creates profiles by POSTing to the
+    # COLLECTION endpoint under v1alpha1 with a wrapper array:
+    #     POST /network-config/v1alpha1/wlan-ssids   {"wlan-ssid": [ {...} ]}
+    # Earlier builds of this tool used the singular form instead:
+    #     POST /network-config/v1/wlan-ssids/{name}  {...flat...}
+    # HPE explicitly banners the configuration APIs as ALPHA and "subject to
+    # change at any moment", and we cannot prove which form a given tenant
+    # exposes without calling it. So try the documented shape first, fall back
+    # to the legacy one, and remember whichever answered for the rest of the
+    # run instead of paying the failed round-trip on every profile.
+
+    _DOC_STYLE, _LEGACY_STYLE = "v1alpha1-collection", "v1-named"
+
+    def _profile_styles(self) -> tuple[str, ...]:
+        pinned = getattr(self, "_profile_style", None)
+        if pinned:
+            return (pinned,)
+        return (self._DOC_STYLE, self._LEGACY_STYLE)
+
+    def detect_profile_style(self) -> tuple[str, dict]:
+        """Read-only: GET both collection routes and pin whichever answers.
+
+        Settles which config-API shape a tenant actually exposes without
+        writing anything, so provisioning does not have to discover it one
+        failed POST at a time. Returns (winning style or "", per-style
+        reachability)."""
+        seen: dict = {}
+        for style, path in ((self._DOC_STYLE, "/network-config/v1alpha1/wlan-ssids"),
+                            (self._LEGACY_STYLE, "/network-config/v1/wlan-ssids")):
+            try:
+                self._get(path)
+                seen[style] = True
+            except CentralAPIError as e:
+                seen[style] = False
+                seen[f"{style}:error"] = str(e)[:120]
+        for style in (self._DOC_STYLE, self._LEGACY_STYLE):
+            if seen.get(style):
+                self._profile_style = style
+                return style, seen
+        return "", seen
+
+    def _profile_write(self, resource: str, key: str, name: str, body: dict,
+                       method: str = "POST") -> None:
+        """Create/update a named config profile, negotiating the payload shape.
+
+        `resource` is the collection ("wlan-ssids"), `key` the wrapper key the
+        documented API expects ("wlan-ssid"), `name` the profile name used by
+        the legacy singular route."""
+        last: Optional[Exception] = None
+        for style in self._profile_styles():
+            if style == self._DOC_STYLE:
+                path, payload = (f"/network-config/v1alpha1/{resource}",
+                                 {key: [dict(body)]})
+            else:
+                path, payload = (
+                    f"/network-config/v1/{resource}/{quote(name, safe='')}", body)
+            try:
+                self._request(method, path, json=payload)
+                self._profile_style = style
+                return
+            except CentralAPIError as e:
+                if _is_duplicate(e):
+                    self._profile_style = style
+                    raise
+                last = e
+        raise last if last else CentralAPIError(
+            f"{method} {resource}/{name}: no supported config-API shape")
+
     def _paginate(self, path: str, items_key: Optional[str] = None,
                   params: Optional[dict] = None, page_size: int = 200,
                   max_pages: int = 50) -> list:
@@ -228,7 +306,14 @@ class CentralClient:
     # ─────────────────── Scopes ───────────────────
 
     def get_global_scope_id(self) -> str:
-        data = self._get("/network-config/v1/scope-maps")
+        data = {}
+        for path in ("/network-config/v1alpha1/scope-maps",
+                     "/network-config/v1/scope-maps"):
+            try:
+                data = self._get(path)
+                break
+            except CentralAPIError:
+                continue
         entries = data.get("scope-map", [])
         for entry in entries:
             if entry.get("persona") == "SERVICE_PERSONA":
@@ -244,19 +329,47 @@ class CentralClient:
         raise CentralAPIError("Could not determine global scope id from scope-maps")
 
     def map_to_scope(self, resource: str, scope_id: str, persona: str) -> None:
-        try:
-            self._post("/network-config/v1/scope-maps", json={
-                "scope-map": [{
-                    "scope-name": str(scope_id),
-                    "scope-id": int(scope_id),
-                    "persona": persona,
-                    "resource": resource,
-                }],
-            })
-        except CentralAPIError as e:
-            # duplicate scope-maps come back as errors — that's idempotent success
-            if "already exists" not in str(e).lower() and "duplicate" not in str(e).lower():
-                raise
+        # HPE's reference collection sends the resource as an absolute path
+        # ("/wlan-ssids/<name>") and omits scope-id. The legacy form this tool
+        # shipped used a bare relative resource plus an int scope-id; keep it
+        # as a fallback since the alpha API has changed shape before.
+        rel = resource.lstrip("/")
+
+        def documented() -> dict:
+            return {"scope-map": [{
+                "scope-name": str(scope_id),
+                "persona": persona,
+                "resource": f"/{rel}",
+            }]}
+
+        def legacy() -> dict:
+            # int() can raise on a malformed scope id — keep it inside the
+            # attempt so it surfaces as a CentralAPIError, not a bare ValueError
+            return {"scope-map": [{
+                "scope-name": str(scope_id),
+                "scope-id": int(scope_id),
+                "persona": persona,
+                "resource": rel,
+            }]}
+
+        attempts = (
+            ("/network-config/v1alpha1/scope-maps", documented),
+            ("/network-config/v1/scope-maps", legacy),
+        )
+        last: Optional[Exception] = None
+        for path, build in attempts:
+            try:
+                self._post(path, json=build())
+                return
+            except CentralAPIError as e:
+                # duplicate scope-maps come back as errors — idempotent success
+                if _is_duplicate(e):
+                    return
+                last = e
+            except (TypeError, ValueError) as e:
+                last = CentralAPIError(f"scope-map {resource}: {e}")
+        if last:
+            raise last
 
     # ─────────────────── Sites ───────────────────
 
@@ -476,10 +589,9 @@ class CentralClient:
         cache_key = f"{name}|{group_scope}"
         if cache_key in self._ensured_roles:
             return  # already created + mapped during this run
-        encoded = quote(name, safe="")
         try:
-            self._post(f"/network-config/v1/roles/{encoded}",
-                       json={"name": name, "utf8": True})
+            self._profile_write("roles", "role", name,
+                                {"name": name, "utf8": True})
         except CentralAPIError as e:
             if not _is_duplicate(e):
                 raise
@@ -493,9 +605,8 @@ class CentralClient:
     def _ensure_allow_all_policy(self, name: str, role: str, global_scope: str) -> None:
         if name in self._ensured_policies:
             return
-        encoded = quote(name, safe="")
         try:
-            self._post(f"/network-config/v1alpha1/policies/{encoded}", json={
+            self._profile_write("policies", "policy", name, {
                 "name": name,
                 "type": "POLICY_TYPE_SECURITY",
                 "security-policy": {
@@ -516,13 +627,25 @@ class CentralClient:
         except CentralAPIError as e:
             if not _is_duplicate(e):
                 raise
-        try:
-            self._patch("/network-config/v1alpha1/policy-groups", json={
-                "policy-group": {"policy-group-list": [{"name": name, "position": 3}]},
-            })
-        except CentralAPIError as e:
-            if not _is_duplicate(e):
-                raise
+        # HPE's reference collection POSTs the policy-group; older builds of
+        # this tool PATCHed it. Try the documented verb first.
+        pg_body = {
+            "policy-group": {"policy-group-list": [{"name": name, "position": 3}]},
+        }
+        pg_err: Optional[Exception] = None
+        for verb in ("POST", "PATCH"):
+            try:
+                self._request(verb, "/network-config/v1alpha1/policy-groups",
+                              json=pg_body)
+                pg_err = None
+                break
+            except CentralAPIError as e:
+                if _is_duplicate(e):
+                    pg_err = None
+                    break
+                pg_err = e
+        if pg_err:
+            raise pg_err
         for persona in ("CAMPUS_AP", "MOBILITY_GW"):
             self.map_to_scope(f"policies/{name}", global_scope, persona)
         self._ensured_policies.add(name)
@@ -614,25 +737,25 @@ class CentralClient:
             f"/network-config/v1alpha1/captive-portal/{quote(name, safe='')}",
             json=body))
 
-    def _upsert_ssid(self, encoded: str, body: dict) -> None:
+    def _upsert_ssid(self, name: str, body: dict) -> None:
         """Create the wlan-ssid, or if it already exists PATCH it with the same
         body so bindings (auth-server-group, VLAN, data rates) reflect the
         CURRENT config on re-runs — a plain duplicate-swallow would leave a
         stale binding (e.g. an SSID still pointing at a previous server-group)."""
         try:
-            self._post(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+            self._profile_write("wlan-ssids", "wlan-ssid", name, body)
         except CentralAPIError as e:
             if not _is_duplicate(e):
                 raise
-            self._patch(f"/network-config/v1/wlan-ssids/{encoded}", json=body)
+            self._profile_write("wlan-ssids", "wlan-ssid", name, body,
+                                method="PATCH")
 
     def create_underlay_ssid(self, ssid: SSID, scope_id: str,
                              server_group: str = "") -> None:
         name = ssid.display_name
-        encoded = quote(name, safe="")
         # Upsert so a re-run updates the binding/attrs; then scope-map so this
         # group gets the WLAN (also covers the same-ESSID-in-two-groups case).
-        self._upsert_ssid(encoded, self._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group))
+        self._upsert_ssid(name, self._ssid_body(ssid, "FORWARD_MODE_BRIDGE", server_group))
         self.map_to_scope(f"wlan-ssids/{name}", scope_id, "CAMPUS_AP")
 
     def create_overlay_ssid(self, ssid: SSID, group_scope: str, global_scope: str,
@@ -653,10 +776,10 @@ class CentralClient:
         })
         # Upsert so re-runs refresh the binding/attrs (and same-ESSID-in-multiple
         # -groups reuses the object); scope-maps below still bind this group.
-        self._upsert_ssid(encoded, body)
+        self._upsert_ssid(name, body)
         # the API silently drops default-role on POST — re-apply
-        self._patch(f"/network-config/v1/wlan-ssids/{encoded}",
-                    json={"default-role": name})
+        self._profile_write("wlan-ssids", "wlan-ssid", name,
+                            {"name": name, "default-role": name}, method="PATCH")
 
         # bind to the gateway cluster (GRE tunnel)
         self._swallow_duplicate(lambda: self._post(
@@ -1023,9 +1146,11 @@ class CentralClient:
                 elif ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT) \
                         and cc.gw_cluster_name:
                     results.append((
-                        f"Overlay SSID {ssid.display_name} → {group_cfg.name} — "
-                        f"DEFERRED: bind after gateway cluster "
-                        f"'{cc.gw_cluster_name}' is formed at cutover (see runbook)",
+                        f"MANUAL FOLLOW-UP: overlay SSID '{ssid.display_name}' → "
+                        f"{group_cfg.name} was NOT created — an overlay WLAN must "
+                        f"bind to gateway cluster '{cc.gw_cluster_name}', which "
+                        f"only exists once the gateways join at cutover. See "
+                        f"\"COMPLETE THE OVERLAY (TUNNEL) SSIDs\" in the runbook.",
                         True, ""))
                     if on_step:
                         on_step(results[-1][0], True)

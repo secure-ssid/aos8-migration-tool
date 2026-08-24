@@ -36,6 +36,13 @@ from .models import AuthType, CentralConfig, ForwardMode, SSID
 
 OPMODE_CLASSIC = {
     AuthType.OPEN: "opensystem",
+    # OWE / Enhanced Open is natively supported by the Instant/Classic WLAN
+    # schema (`opmode enhanced-open`, with the companion
+    # opmode_transition_disable knob). Mapping it to opensystem would strip
+    # encryption — see OPMODE in central_client.py.
+    AuthType.OWE: "enhanced-open",
+    # SECURITY DOWNGRADE — MAC auth has no opmode equivalent; preflight blocks
+    # it, so reaching here means the operator explicitly overrode the blocker.
     AuthType.MAC: "opensystem",
     AuthType.WPA2_PSK: "wpa2-psk-aes",
     AuthType.WPA3_SAE: "wpa3-sae-aes",

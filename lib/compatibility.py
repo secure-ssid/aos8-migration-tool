@@ -51,6 +51,9 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
     results += _check_ssid_mapping(customer)
     results += _check_serials(customer)
     results += _check_ssid_auth(customer)
+    results += _check_auth_downgrades(customer)
+    results += _check_captive_portal(customer, central)
+    results += _check_config_api_maturity(central)
     results += _check_named_vlans(customer)
     results += _check_split_tunnel(customer, central)
     results += _check_duplicate_essids(customer)
@@ -490,6 +493,89 @@ def _check_essid_limits(customer: CustomerConfig) -> list[CheckResult]:
                     "Central will reject these. Shorten before provisioning.",
         )]
     return []
+
+
+def _check_auth_downgrades(customer: CustomerConfig) -> list[CheckResult]:
+    """Block SSIDs whose destination mapping would LOSE a security property.
+
+    OWE / Enhanced Open is NOT in this list: it maps natively to opmode
+    ENHANCED_OPEN (New Central) / enhanced-open (Classic), so encryption is
+    preserved. MAC authentication has no opmode equivalent and does land as a
+    plain OPEN WLAN, so it stays a blocker the operator must consciously
+    override rather than a warning buried in a list."""
+    mac = [s.display_name for s in customer.ssids if s.auth_type == AuthType.MAC]
+    if not mac:
+        return [CheckResult(
+            name="Auth Downgrade Check",
+            status=Status.PASS,
+            message="No SSID loses a security property in translation.",
+        )]
+
+    return [CheckResult(
+        name="Auth Downgrade Check",
+        status=Status.FAIL,
+        message=f"{len(mac)} SSID(s) would be provisioned as OPEN, "
+                "losing access control.",
+        detail=("MAC authentication (association is gated today, would become "
+                f"plain OPEN): {', '.join(mac)}"
+                "\n\nResolve by configuring the equivalent protection in Central "
+                "manually (MAC-auth via a MAC allowlist or RADIUS), or drop the "
+                "SSID from this migration. Overriding this blocker provisions "
+                "them as OPEN WLANs."),
+    )]
+
+
+def _check_config_api_maturity(central: CentralConfig) -> list[CheckResult]:
+    """New Central's configuration APIs are published as ALPHA.
+
+    HPE banners them "subject to change at any moment" on the developer
+    portal. This tool provisions through them, so a tenant-side schema change
+    can break a migration between rehearsal and cutover. Surface that instead
+    of letting it look like a stable, supported integration."""
+    if getattr(central, "destination", "new") != "new":
+        return []
+    return [CheckResult(
+        name="Config API Maturity",
+        status=Status.WARN,
+        message="New Central configuration APIs are an ALPHA interface.",
+        detail=("HPE publishes /network-config as alpha and states it is "
+                "subject to change at any moment. Re-run this preflight "
+                "immediately before cutover — a schema change on the tenant "
+                "side can turn a rehearsed migration into a failed one. "
+                "Provisioning here negotiates both the documented "
+                "(v1alpha1 collection) and legacy (v1 named) request shapes, "
+                "but a genuinely new schema will still need a tool update."),
+    )]
+
+
+def _check_captive_portal(customer: CustomerConfig,
+                          central: CentralConfig) -> list[CheckResult]:
+    """External captive-portal SSIDs must not land as unprotected OPEN WLANs.
+
+    The Classic WLAN payload does not enable the portal, so a guest SSID that
+    redirected to an external portal would come up wide open."""
+    cp = [s.display_name for s in customer.ssids if s.captive_portal_url]
+    if not cp:
+        return []
+    if getattr(central, "destination", "new") == "classic":
+        return [CheckResult(
+            name="Captive Portal (Classic)",
+            status=Status.FAIL,
+            message=f"{len(cp)} external captive-portal SSID(s) cannot be "
+                    "provisioned with their portal on the Classic destination: "
+                    f"{', '.join(cp)}.",
+            detail="These would be created as OPEN WLANs with no portal "
+                   "redirect — an unauthenticated guest network. Configure the "
+                   "external captive portal profile in Classic Central before "
+                   "letting clients on.",
+        )]
+    return [CheckResult(
+        name="Captive Portal",
+        status=Status.WARN,
+        message=f"External captive-portal SSID(s): {', '.join(cp)}. Verify the "
+                "portal URL, redirect and walled-garden in Central after "
+                "provisioning.",
+    )]
 
 
 def _check_ssid_auth(customer: CustomerConfig) -> list[CheckResult]:

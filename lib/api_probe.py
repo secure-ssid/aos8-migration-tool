@@ -9,11 +9,10 @@ Every check is a GET (or a write with dry-run semantics where the API offers
 it) — nothing is created. Each returns a ProbeResult the UI renders as a row.
 """
 from dataclasses import dataclass
-from typing import Optional
 
 from .central_client import CentralClient, CentralAPIError
-from .glp_client import GLPClient, GLPAPIError
-from .classic_central_client import ClassicCentralClient, ClassicCentralAPIError
+from .glp_client import GLPClient
+from .classic_central_client import ClassicCentralClient
 
 
 @dataclass
@@ -51,7 +50,23 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
     def scope():
         sid = client.get_global_scope_id()
         return f"global scope-id resolved: {sid}"
-    results.append(_probe("Read — global scope (/network-config/v1/scope-maps)", scope))
+    results.append(_probe("Read — global scope (/network-config/scope-maps)", scope))
+
+    # Which config-API request shape does this tenant expose? HPE's reference
+    # collection uses the v1alpha1 collection route; earlier builds of this
+    # tool used the v1 singular route. Read-only — GETs only.
+    def shape():
+        style, seen = client.detect_profile_style()
+        doc = seen.get(CentralClient._DOC_STYLE)
+        legacy = seen.get(CentralClient._LEGACY_STYLE)
+        if not style:
+            raise CentralAPIError(
+                "neither /network-config/v1alpha1/wlan-ssids nor "
+                "/network-config/v1/wlan-ssids answered — "
+                f"alpha: {seen.get('v1alpha1-collection:error', 'n/a')}")
+        both = " (both routes answer)" if doc and legacy else ""
+        return f"provisioning will use the {style} shape{both}"
+    results.append(_probe("Config API shape — v1alpha1 vs v1", shape))
 
     def sites():
         s = client.list_sites()

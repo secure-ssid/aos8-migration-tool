@@ -16,6 +16,42 @@ from .models import CustomerConfig, CentralConfig, ForwardMode, AuthType
 from .compatibility import _fw_ok
 
 
+def _overlay_completion_block(customer: CustomerConfig,
+                              central: CentralConfig) -> list[str]:
+    """Steps to finish the tunnel/split SSIDs that provisioning DEFERRED.
+
+    Overlay SSIDs bind to a gateway cluster, and that cluster only exists once
+    the MCs have actually become AOS 10 gateways at cutover — so Step 3 cannot
+    create them. Without this block the deferred work is invisible and those
+    SSIDs simply never exist in Central."""
+    cluster_name = getattr(central, "gw_cluster_name", "")
+    if not cluster_name:
+        return []
+    overlay = sorted({(s.essid or s.name) for s in customer.ssids
+                      if s.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT)})
+    if not overlay:
+        return []
+    out = ["", "MANUAL — COMPLETE THE OVERLAY (TUNNEL) SSIDs", "─" * 40,
+           "These SSIDs were NOT created during provisioning: an overlay WLAN",
+           f"must bind to gateway cluster '{cluster_name}', which does not exist",
+           "until the gateways below have joined at cutover.",
+           "",
+           "  1. [ ] Confirm the MCs came up as AOS 10 gateways in New Central",
+           f"  2. [ ] Confirm gateway cluster '{cluster_name}' has formed and is",
+           "         showing its members as Up",
+           "  3. [ ] Create each overlay SSID and bind it to that cluster:"]
+    for name in overlay:
+        out.append(f"         [ ] {name}")
+    out += [
+        "  4. [ ] Re-attach the RADIUS server-group to any 802.1X overlay SSID",
+        "  5. [ ] Verify a client associates and gets an IP on the tunnelled VLAN",
+        "",
+        "Until this is done the tunnel SSIDs are NOT broadcasting.",
+        "",
+    ]
+    return out
+
+
 def _manual_secrets_block(customer: CustomerConfig) -> list[str]:
     """Checklist of secrets that AOS 8 stores encrypted (RADIUS keys, hashed
     PSKs) — created with placeholders and MUST be set by hand in Central."""
@@ -117,6 +153,7 @@ def generate(customer: CustomerConfig, central: CentralConfig, customer_name: st
     else:
         _write_single_mc_steps(lines, customer, central)
 
+    lines += _overlay_completion_block(customer, central)
     lines += _manual_secrets_block(customer)
 
     lines += [
@@ -249,7 +286,7 @@ def _write_l2_cluster_steps(lines: list, customer: CustomerConfig,
         ]
         lines += _convert_block(customer, central)
         lines += [
-            f"STEP 4 — After all APs are online in Central and validated (Step 6):",
+            "STEP 4 — After all APs are online in Central and validated (Step 6):",
             f"  decommission MC1 ({mc1}) and the other member(s) ({others_label}).",
             "",
         ]
