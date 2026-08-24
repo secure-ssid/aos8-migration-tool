@@ -1106,3 +1106,87 @@ def test_validate_status_badge_treats_online_as_up():
     assert _status_is_up("ONLINE")
     assert _status_is_up("online")
     assert not _status_is_up("Down")
+
+
+def _unprovable_app(method, path, query, body):
+    """ssid_prof + virtual_ap read fine; the aaa_prof object read fails."""
+    if path.endswith("/object/ssid_prof"):
+        return (200, {}, {"ssid_prof": [
+            {"profile-name": "iot-ssid", "essid": "IoT",
+             "opmode": {"opensystem": True}},
+            {"profile-name": "corp-ssid", "essid": "Corp",
+             "opmode": {"wpa2-aes": True}}]})
+    if path.endswith("/object/aaa_prof"):
+        return (500, {}, {"error": "internal"})
+    if path.endswith("/object/virtual_ap"):
+        return (200, {}, {"virtual_ap": [
+            {"profile-name": "iot-vap", "vlan": "40",
+             "aaa_prof": {"profile-name": "iot-aaa"},
+             "ssid_prof": {"profile-name": "iot-ssid"},
+             "forward-mode": "bridge"},
+            {"profile-name": "corp-vap", "vlan": "100",
+             "aaa_prof": {"profile-name": "corp-aaa"},
+             "ssid_prof": {"profile-name": "corp-ssid"},
+             "forward-mode": "tunnel"}]})
+    return (200, {}, {})
+
+
+def test_aos8_api_aaa_read_failure_marks_auth_unprovable(aos8_api):
+    """#4 (API path): with the aaa_prof read failed, an opensystem SSID's
+    MAC-auth binding is UNPROVABLE — it must never migrate as silent OPEN."""
+    from lib.models import AuthType
+    aos8_api.app = _unprovable_app
+    c = _aos8(aos8_api)
+    ssids = {s.name: s for s in c.get_ssids()}
+    iot, corp = ssids["iot-vap"], ssids["corp-vap"]
+    # discovered opmodes are preserved as discovered…
+    assert iot.auth_type is AuthType.OPEN
+    assert corp.auth_type is AuthType.WPA2_ENTERPRISE
+    assert iot.auth_known and corp.auth_known
+    # …but both are marked unprovable: opensystem could be masked MAC-auth,
+    # enterprise's RADIUS binding is a guess without the aaa-profile read
+    assert iot.auth_unprovable
+    assert corp.auth_unprovable
+
+
+def test_unprovable_auth_is_critical_preflight_fail():
+    """#4 (preflight): unprovable auth hard-blocks provisioning — FAIL,
+    non-overridable, never WARN and never silent."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+    ssid = SSID(name="iot", essid="IoT", vlan=40,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.OPEN,
+                auth_unprovable=True)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid])
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    results = compatibility.run_all(customer, central)
+    hit = [r for r in results if r.name == "SSID Auth Unverifiable"]
+    assert len(hit) == 1
+    assert hit[0].status == compatibility.Status.FAIL
+    assert hit[0].critical
+    # and the gate treats it as non-overridable
+    assert compatibility.provision_blockers(results, {}) == [
+        "Non-overridable blocker: SSID Auth Unverifiable"]
+
+
+def test_unknown_auth_is_critical_preflight_fail():
+    """#4 (promotion): an SSID whose opmode could not be determined was a
+    WARN ('provisioned as WPA2-Enterprise — verify'). Unknown auth is now a
+    non-overridable FAIL: no SSID is provisioned on a guessed opmode."""
+    from lib import compatibility
+    from lib.models import (AuthType, CentralConfig, CustomerConfig,
+                            ForwardMode, SSID)
+    ssid = SSID(name="mystery", vlan=10, forward_mode=ForwardMode.TUNNEL,
+                auth_type=AuthType.WPA2_ENTERPRISE, auth_known=False)
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=[ssid])
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    results = compatibility.run_all(customer, central)
+    hit = [r for r in results if r.name == "SSID Auth Detection"]
+    assert len(hit) == 1
+    assert hit[0].status == compatibility.Status.FAIL
+    assert hit[0].critical

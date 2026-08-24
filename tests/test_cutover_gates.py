@@ -110,3 +110,82 @@ def test_deferred_steps_are_not_counted_as_successes():
     blockers = cutover_blockers(results, acks={"Create WLAN: corp → g1": "fixed by hand"},
                                 confirmations={})
     assert len(blockers) == 1  # only the deferred row still blocks
+
+
+# ─────────────────── #5: per-risk preflight override ───────────────────
+# The gate logic is pure (lib/compatibility.py) so it is tested directly,
+# like the cutover gate above.
+
+from lib.compatibility import CheckResult, Status, provision_blockers
+
+
+def _fail(name, critical=False):
+    return CheckResult(name=name, status=Status.FAIL, message=f"{name} msg",
+                       critical=critical)
+
+
+def test_critical_blocker_has_no_override():
+    blockers = provision_blockers([_fail("WEP SSIDs Unsupported", critical=True)],
+                                  acks={})
+    assert blockers == ["Non-overridable blocker: WEP SSIDs Unsupported"]
+
+
+def test_critical_blocker_stays_locked_even_with_ack():
+    # an ack against a critical check means nothing — there is no override UI
+    blockers = provision_blockers([_fail("WEP SSIDs Unsupported", critical=True)],
+                                  acks={"WEP SSIDs Unsupported": "i accept"})
+    assert blockers
+
+
+def test_noncritical_blocker_is_per_row_acknowledgeable():
+    results = [_fail("ESSID Length"), _fail("MC Firmware Version")]
+    assert len(provision_blockers(results, acks={})) == 2
+    rest = provision_blockers(results, acks={"ESSID Length": "renaming first"})
+    assert rest == ["Unacknowledged blocker: MC Firmware Version"]
+    assert provision_blockers(
+        results, acks={"ESSID Length": "ok", "MC Firmware Version": "ok"}) == []
+
+
+def test_blank_reason_does_not_unblock():
+    assert provision_blockers([_fail("ESSID Length")],
+                              acks={"ESSID Length": "   "})
+
+
+def test_warns_and_passes_never_block():
+    results = [CheckResult(name="w", status=Status.WARN, message="m"),
+               CheckResult(name="p", status=Status.PASS, message="m")]
+    assert provision_blockers(results, acks={}) == []
+
+
+def test_preflight_ack_writes_audit_record(monkeypatch):
+    """Every acknowledgement lands an audit record with operator, check,
+    reason, and the source data behind the check."""
+    from lib import audit as audit_mod
+    import views.p2_preflight as p2
+    seen = []
+    monkeypatch.setattr(audit_mod, "record",
+                        lambda action, **fields: seen.append((action, fields)))
+    r = _fail("MC Firmware Version")
+    p2._record_ack(r, "upgrading to 8.12 first", user="op", customer="acme")
+    assert len(seen) == 1
+    action, fields = seen[0]
+    assert action == "preflight-override"
+    assert fields["user"] == "op"
+    assert fields["customer"] == "acme"
+    assert fields["check"] == "MC Firmware Version"
+    assert fields["reason"] == "upgrading to 8.12 first"
+
+
+def test_preflight_ack_audit_failure_propagates(monkeypatch):
+    """Fail closed: when the audit write fails the acknowledgement must NOT
+    count — _record_ack raises and the gate stays shut."""
+    from lib import audit as audit_mod
+    import views.p2_preflight as p2
+
+    def boom(action, **fields):
+        raise audit_mod.AuditWriteError("disk full")
+    monkeypatch.setattr(audit_mod, "record", boom)
+    import pytest
+    with pytest.raises(audit_mod.AuditWriteError):
+        p2._record_ack(_fail("ESSID Length"), "renaming", user="op",
+                       customer="acme")

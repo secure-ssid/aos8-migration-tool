@@ -101,6 +101,7 @@ def reset_downstream_state() -> None:
                 "glp_existing", "glp_subscriptions", "glp_claim_result",
                 "glp_sub_results", "glp_service_managers", "onboard_results",
                 "cutover_failure_acks", "cutover_manual_confirmations",
+                "preflight_risk_acks",
                 "probe_results", "validation_celebrated", "macedit_result"):
         st.session_state.pop(key, None)
     # the Step 6 closeout checklist is mirrored into durable chk_* keys —

@@ -37,6 +37,13 @@ class SSID:
     broadcast: bool = True          # False = hidden SSID (still enabled)
     enabled: bool = True            # False = WLAN administratively disabled at the source
     auth_known: bool = True         # False = auth type could not be determined
+    # True = the aaa-profile read needed to PROVE this SSID's auth/RADIUS
+    # binding failed, so opensystem may be masked MAC-auth and enterprise may
+    # have no resolvable server group. Preflight FAILs these (never OPEN).
+    auth_unprovable: bool = False
+    # source directives the migration cannot represent (802.11r/k/v, MFP,
+    # Passpoint, …) — preflight FAILs instead of silently dropping them
+    unsupported_fields: list[str] = field(default_factory=list)
     vlan_raw: Optional[str] = None  # original VLAN token when non-numeric (named VLAN)
     # additional WLAN attributes migrated to New Central (0/"" = use default)
     rf_band: str = ""               # New Central rf-band enum (BAND_ALL, 5GHZ_6GHZ, …)

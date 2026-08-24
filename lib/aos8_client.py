@@ -443,6 +443,10 @@ class AOS8Client:
                 "dtim_period": _safe_int(self._field(item, "dtim-period", default=0), 0),
                 "max_clients": _safe_int(self._field(item, "max-clients", "max-clients-threshold", default=0), 0),
                 "passphrase": str(self._field(item, "wpa-passphrase", "wpa-hexkey", default="")) or None,
+                # hidden SSID (no beaconed ESSID). AOS builds expose this as a
+                # bare flag dict ({"hide": {...}}) or a boolean-ish scalar
+                # under hide/hide_ssid spellings; absence means broadcast.
+                "hidden": _flag_or_bool(item, "hide", "hide_ssid", "hide-ssid"),
             }
         return profiles
 
@@ -461,11 +465,16 @@ class AOS8Client:
             pass  # opmode/essid enrichment is best-effort
         aaa_sgs: dict[str, str] = {}
         aaa_mac_sgs: dict[str, str] = {}
+        aaa_resolved = True
         try:
             aaa_sgs = self.get_aaa_server_groups()
             aaa_mac_sgs = self.get_aaa_mac_server_groups()
         except Exception:
-            pass  # server-group resolution is best-effort
+            # NOT best-effort anymore: with this read failed, an opensystem
+            # SSID's MAC-auth binding is unprovable and an enterprise SSID's
+            # server group is a guess. get_ssids marks those SSIDs
+            # auth_unprovable and preflight hard-blocks them (#4).
+            aaa_resolved = False
 
         ssids, seen = [], set()
         for item in self._get_virtual_aps():
@@ -501,6 +510,14 @@ class AOS8Client:
                 # MAC-auth network (legacy printer/IoT SSIDs are exactly this)
                 # — migrating it as OPEN publishes a wide-open network.
                 auth = AuthType.MAC
+            # #4: with the aaa-profile read failed, opensystem may be masked
+            # MAC-auth and enterprise RADIUS binding is a guess — NEVER hand
+            # such an SSID to provision. PSK/OWE carry no RADIUS binding, so
+            # their (known) opmode stands on its own.
+            auth_unprovable = (
+                not aaa_resolved and bool(aaa_ref)
+                and auth in (AuthType.OPEN, AuthType.WPA2_ENTERPRISE,
+                             AuthType.WPA3_ENTERPRISE))
 
             # per-VAP band selection ("all"/"a"/"g") → New Central rf-band enum,
             # mirroring paste mode's allowed-band mapping
@@ -516,7 +533,9 @@ class AOS8Client:
                 forward_mode=fwd,
                 auth_type=auth,
                 auth_known=auth_known,
+                auth_unprovable=auth_unprovable,
                 essid=prof.get("essid") or None,
+                broadcast=not prof.get("hidden", False),
                 psk=prof.get("passphrase"),
                 # prefer the real server group from inside the aaa-profile;
                 # the profile name is only a last-resort placeholder. A
@@ -1000,6 +1019,23 @@ def _normalize_model(model: Any) -> str:
     if re.fullmatch(r"\d+[A-Z]*", model):
         return f"AP-{model}"
     return model
+
+
+def _flag_or_bool(item: dict, *names: str) -> bool:
+    """AOS flag-or-scalar: a directive present as a sub-dict (flag style,
+    e.g. {"hide": {...}}) counts as set; scalars accept the usual truthy
+    spellings. Absent = False."""
+    for n in names:
+        for k in (n, n.replace("-", "_"), n.replace("_", "-")):
+            if k not in item:
+                continue
+            v = item[k]
+            if isinstance(v, dict):
+                return True
+            if isinstance(v, str):
+                return v.strip().lower() in ("true", "enable", "enabled", "yes", "1")
+            return bool(v)
+    return False
 
 
 def _opmode_rank(token: str) -> tuple[int, str]:

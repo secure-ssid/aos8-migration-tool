@@ -30,6 +30,10 @@ class CheckResult:
     status: Status
     message: str
     detail: Optional[str] = None
+    # critical FAILs are NON-overridable in the preflight UI: proceeding would
+    # write a network whose security/auth state is wrong or unprovable, or the
+    # hardware/feature simply cannot convert (override is meaningless).
+    critical: bool = False
 
     @property
     def icon(self) -> str:
@@ -59,6 +63,23 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
     return results
 
 
+def provision_blockers(results, acks) -> list[str]:
+    """Why provisioning must stay locked (#5): every critical FAIL is
+    NON-overridable, and every overridable FAIL needs a recorded per-risk
+    acknowledgement. `acks` maps check name → the operator's written reason.
+    Replaces the single global override checkbox, which left no trail of
+    WHICH risk was accepted."""
+    out = []
+    for r in results:
+        if r.status != Status.FAIL:
+            continue
+        if r.critical:
+            out.append(f"Non-overridable blocker: {r.name}")
+        elif not (acks.get(r.name) or "").strip():
+            out.append(f"Unacknowledged blocker: {r.name}")
+    return out
+
+
 def _check_ap_models(customer: CustomerConfig) -> list[CheckResult]:
     incompatible, unknown = [], []
     for ap in customer.aps:
@@ -74,6 +95,7 @@ def _check_ap_models(customer: CustomerConfig) -> list[CheckResult]:
             status=Status.FAIL,
             message=f"{len(incompatible)} AP(s) do not support AOS 10 — hardware refresh required before migration.",
             detail="Incompatible APs:\n" + "\n".join(incompatible),
+            critical=True,
         ))
     else:
         known = len(customer.aps) - len(unknown)
@@ -312,6 +334,7 @@ def _check_eap_offload(customer: CustomerConfig) -> list[CheckResult]:
             status=Status.FAIL,
             message="EAP-Offload (AAA FastConnect) is configured but NOT supported in AOS 10. Must be redesigned before migration.",
             detail="Remove AAA FastConnect config from all VAP/AAA profiles. Use standard 802.1X instead.",
+            critical=True,
         )]
     return [CheckResult(
         name="EAP-Offload / FastConnect",
@@ -326,6 +349,7 @@ def _check_internal_auth(customer: CustomerConfig) -> list[CheckResult]:
             name="Internal Authentication Server",
             status=Status.FAIL,
             message="MC internal auth server is in use but NOT supported in AOS 10. Must migrate to external RADIUS (ClearPass/NPS) before migration.",
+            critical=True,
         )]
     return [CheckResult(
         name="Internal Authentication Server",
@@ -526,6 +550,7 @@ def _check_captive_portal(customer: CustomerConfig,
     return [CheckResult(
         name="Captive-Portal SSIDs (classic destination)",
         status=Status.FAIL,
+        critical=True,
         message=f"External captive-portal SSIDs: {', '.join(cp_ssids)}. Classic "
                 "Central's WLAN API cannot express an external portal — these "
                 "would be created as fully OPEN guest networks.",
@@ -542,6 +567,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="WEP SSIDs Unsupported",
             status=Status.FAIL,
+            critical=True,
             message=f"WEP SSIDs: {', '.join(wep)}. AOS 10 has no WEP opmode — "
                     "migrating them would silently change the network's "
                     "security (or fail at the API).",
@@ -556,6 +582,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="MAC-Auth SSIDs Without RADIUS",
             status=Status.FAIL,
+            critical=True,
             message=f"MAC-auth SSIDs with no discovered server group: "
                     f"{', '.join(mac_no_group)}. They would migrate as OPEN "
                     "networks with MAC authentication effectively disabled.",
@@ -580,6 +607,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="Enhanced Open (OWE) SSIDs",
             status=Status.FAIL,
+            critical=True,
             message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Classic AOS10 "
                     "has no Enhanced-Open opmode — these SSIDs would migrate "
                     "unencrypted.",
@@ -587,15 +615,52 @@ def _check_ssid_auth(customer: CustomerConfig,
                    "Target New Central for them, or accept and document the "
                    "downgrade explicitly before provisioning.",
         ))
+    # #4 fail-closed: the aaa-profile read that proves an opensystem SSID is
+    # (or isn't) MAC-auth failed — auth mode / RADIUS binding is UNPROVABLE.
+    # Never handed to provision as OPEN: hard blocker, non-overridable.
+    unprovable = [s.display_name for s in customer.ssids if s.auth_unprovable]
+    if unprovable:
+        results.append(CheckResult(
+            name="SSID Auth Unverifiable",
+            status=Status.FAIL,
+            critical=True,
+            message=f"Cannot verify the authentication of: {', '.join(unprovable)}. "
+                    "The controller's aaa-profile read failed, so an opensystem "
+                    "SSID could be masked MAC-auth and an enterprise SSID's "
+                    "RADIUS binding is unproven — provisioning would write a "
+                    "network whose auth state is UNKNOWN.",
+            detail="Re-run discovery when the controller's REST API is healthy "
+                   "(the aaa_prof object read must succeed), or use paste mode "
+                   "with the full running-config — paste parses server-groups "
+                   "directly and is unaffected by this failure.",
+        ))
     unknown = [s.display_name for s in customer.ssids if not s.auth_known]
     if unknown:
         results.append(CheckResult(
             name="SSID Auth Detection",
-            status=Status.WARN,
+            status=Status.FAIL,
+            critical=True,
             message=f"Auth type could not be determined for: {', '.join(unknown)}. "
-                    "They will be provisioned as WPA2-Enterprise — verify before cutover.",
+                    "An SSID with unknown auth is NEVER provisioned with a "
+                    "guessed opmode.",
             detail="In paste mode, ensure the wlan ssid-profile blocks (with opmode) are "
-                   "included in the running-config paste.",
+                   "included in the running-config paste. On the API path, the "
+                   "ssid-profile read must succeed — re-run discovery.",
+        ))
+    # #9: source directives the migration cannot represent must not be
+    # silently dropped onto defaults.
+    unsupported = [(s.display_name, s.unsupported_fields)
+                   for s in customer.ssids if s.unsupported_fields]
+    if unsupported:
+        results.append(CheckResult(
+            name="Unsupported Source Fields",
+            status=Status.FAIL,
+            critical=True,
+            message=f"{len(unsupported)} SSID(s) carry source configuration the "
+                    "migration cannot represent: "
+                    f"{', '.join(n for n, _ in unsupported)}. Proceeding would "
+                    "silently drop it.",
+            detail="\n".join(f"{n}: {', '.join(flds)}" for n, flds in unsupported),
         ))
     psk_missing = [s.display_name for s in customer.ssids
                    if s.auth_type in (AuthType.WPA2_PSK, AuthType.WPA3_SAE) and not s.psk]
@@ -612,6 +677,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="802.1X SSIDs Without RADIUS Servers",
             status=Status.FAIL,
+            critical=True,
             message=f"Enterprise SSIDs ({', '.join(enterprise)}) but ZERO "
                     "RADIUS servers were discovered — they would provision as "
                     "dot1x networks with nothing to authenticate against.",
@@ -632,6 +698,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="Classic RADIUS Servers (manual step)",
             status=Status.FAIL,
+            critical=True,
             message=f"{' and '.join(kinds)} on a Classic "
                     "destination: the Classic provisioning path cannot create "
                     "RADIUS server objects (no public API) — full_wlan "

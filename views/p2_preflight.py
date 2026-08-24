@@ -3,11 +3,11 @@ Step 2: Preflight compatibility checks.
 """
 import streamlit as st
 
-from lib import compatibility
+from lib import audit, compatibility
 from lib.models import VLAN
 from lib.translator import translate
 from lib.styles import (page_header, section_label, check_card, mono_caption,
-                        FAINT, TEXT, esc)
+                        FAINT, MUTED, TEXT, esc)
 
 
 def _named_vlan_editor(customer, central) -> None:
@@ -76,6 +76,9 @@ def _named_vlan_editor(customer, central) -> None:
         st.session_state["customer_config"] = customer
         st.session_state["central_config"] = new_central
         st.session_state.pop("preflight_results", None)
+        # acknowledgements were given against the pre-remap config — the
+        # corrected VLANs require a fresh per-risk review
+        st.session_state.pop("preflight_risk_acks", None)
         # the old config may already be provisioned — force Step 3 to re-run
         # so the corrected VLANs actually reach Central
         st.session_state.pop("provision_done", None)
@@ -85,6 +88,59 @@ def _named_vlan_editor(customer, central) -> None:
         st.session_state.pop("onboard_results_fp", None)
         st.success("VLAN mapping applied — re-running preflight.")
         st.rerun()
+
+
+def _record_ack(r, reason: str, user, customer) -> None:
+    """One audit record per acknowledgement — operator, reason, and the
+    source data behind the check. Raises AuditWriteError on failure; callers
+    must NOT treat the acknowledgement as recorded then."""
+    audit.record(
+        "preflight-override",
+        user=user,
+        customer=customer,
+        check=r.name, message=r.message[:200],
+        detail=(r.detail or "")[:200], reason=reason.strip(),
+    )
+
+
+def _render_risk_acks(overridable, acks) -> None:
+    """Per-risk acknowledgement rows (#5): each overridable blocker gets its
+    own reason + acknowledge button, and every acknowledgement is audit
+    recorded. Replaces the single global 'override everything' checkbox, which
+    left no trail of WHICH risk was accepted or why."""
+    for r in overridable:
+        check_card("⛔", r.name, r.message, r.detail or "", variant="red")
+        if (acks.get(r.name) or "").strip():
+            st.markdown(
+                f'<div style="font-size:12.5px;color:{MUTED};margin:3px 0;">'
+                f'✅ <s>{esc(r.name)}</s> — acknowledged: '
+                f'<i>{esc(acks[r.name])}</i></div>', unsafe_allow_html=True)
+            continue
+        reason = st.text_input(
+            f"Why is it safe to proceed despite “{r.name}”?",
+            key=f"pref_ack_reason_{abs(hash(r.name))}",
+            placeholder="Required — e.g. 'APs will be upgraded to a supported "
+                        "train before convert; verified with HPE matrix'")
+        if st.button("Acknowledge this blocker",
+                     key=f"pref_ack_btn_{abs(hash(r.name))}"):
+            if not reason.strip():
+                st.error("A written reason is required — the acknowledgement "
+                         "is an audit record, not a checkbox.")
+            else:
+                try:
+                    _record_ack(r, reason,
+                                user=st.session_state.get("_user"),
+                                customer=st.session_state.get("customer_name"))
+                except audit.AuditWriteError as e:
+                    # fail closed: no durable audit record, no acknowledgement
+                    st.error(f"Acknowledgement NOT recorded — the audit write "
+                             f"failed ({e}). Fix the audit pipeline before "
+                             "overriding a blocker.")
+                else:
+                    acks[r.name] = reason.strip()
+                    # no st.rerun(): the button click already re-runs the
+                    # script, and a mid-render rerun would unmount the widgets
+                    # below and garbage-collect their keyed state
 
 
 def render():
@@ -110,6 +166,16 @@ def render():
     warns  = [r for r in results if r.status == compatibility.Status.WARN]
     passes = [r for r in results if r.status == compatibility.Status.PASS]
 
+    # #5: critical blockers are non-overridable; the rest need a per-risk,
+    # audit-recorded acknowledgement. Acks for checks no longer failing are
+    # stale (source fixed / config changed) and are pruned.
+    critical    = [r for r in fails if r.critical]
+    overridable = [r for r in fails if not r.critical]
+    acks = st.session_state.setdefault("preflight_risk_acks", {})
+    live = {r.name for r in overridable}
+    for stale in [k for k in acks if k not in live]:
+        acks.pop(stale, None)
+
     # ── Score card ─────────────────────────────────────────────────────────
     m1, m2, m3 = st.columns(3)
     m1.metric("Passed",   len(passes))
@@ -126,10 +192,15 @@ def render():
     st.divider()
 
     # ── Check results ──────────────────────────────────────────────────────
-    if fails:
-        section_label("Blockers — must fix")
-        for r in fails:
+    if critical:
+        section_label("Blockers — must fix (non-overridable)")
+        for r in critical:
             check_card("⛔", r.name, r.message, r.detail or "", variant="red")
+            mono_caption("NON-OVERRIDABLE — RESOLVE AT THE SOURCE AND RE-RUN")
+
+    if overridable:
+        section_label("Blockers — fix, or acknowledge per risk")
+        _render_risk_acks(overridable, acks)
 
     if warns:
         section_label("Warnings — review before cutover")
@@ -157,17 +228,20 @@ def render():
         st.rerun()
 
     if fails:
-        override = col_mid.checkbox(
-            "Override blockers — I understand the risk and will resolve them before cutover",
-            key="preflight_override",
-        )
+        # computed AFTER the ack panel: an acknowledgement clicked in this
+        # very run must unlock the button below immediately (p4 convention)
+        blockers = compatibility.provision_blockers(results, acks)
+        gated = bool(blockers)
         if col_next.button("Provision →", type="primary", use_container_width=True,
-                           disabled=not override):
+                           disabled=gated):
             st.session_state["step"] = 2
             st.rerun()
-        if not override:
+        if gated:
             with col_mid:
-                mono_caption("RESOLVE BLOCKERS OR OVERRIDE TO CONTINUE")
+                if critical:
+                    mono_caption("RESOLVE NON-OVERRIDABLE BLOCKERS TO CONTINUE")
+                else:
+                    mono_caption("ACKNOWLEDGE EACH BLOCKER TO CONTINUE")
     else:
         if col_next.button("Provision →", type="primary", use_container_width=True):
             st.session_state["step"] = 2

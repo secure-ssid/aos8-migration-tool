@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models import (
     AP, APGroup, AuthType, ClusterInfo, CustomerConfig, ForwardMode,
-    RadiusServer, SSID, VLAN,
+    RadiusServer, ServerGroup, SSID, VLAN,
 )
 from .aos8_client import (
     AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
@@ -88,6 +88,7 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
         aps=aps,
         vlans=vlans,
         radius_servers=radius,
+        server_groups=_parse_server_groups(running),
         cluster=cluster,
         has_eap_offload=has_eap,
         has_internal_auth=has_internal,
@@ -158,6 +159,31 @@ _GROUP_PLACEHOLDERS = {"", "-", "--", "—", "n/a", "na", "none"}
 # allowed-band token sets → Central rf-band enum (shared by the ssid-profile
 # and virtual-ap parsers — the parameter officially lives on the virtual-ap)
 _BAND_MAP = {("a", "g"): "BAND_ALL", ("a",): "5GHZ", ("g",): "24GHZ"}
+
+# #9: source directives the migration cannot represent. Curated to
+# security/roaming/topology behavior (not exhaustive) — silently dropping
+# these changes the migrated network, so preflight FAILs instead of
+# defaulting them away. Line-initial keyword match, case-insensitive.
+_UNSUPPORTED_DIRECTIVES = frozenset({
+    "mfp", "mfp-capable", "mfp-required", "ieee80211w",  # mgmt frame protection
+    "dot11k", "dot11r", "dot11v",                        # RRM / fast transition
+    "okc",                                               # opportunistic key caching
+    "hs2-profile", "hotspot",                            # Passpoint / Hotspot 2.0
+    "vlan-masking",                                      # dual-role VLAN split
+})
+
+
+def _unsupported_directives(block, owner: str) -> list[str]:
+    """Unrepresentable directives in one config block, as 'owner: line'."""
+    out = []
+    for line in block:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        token = stripped.split(None, 1)[0].lower()
+        if token in _UNSUPPORTED_DIRECTIVES:
+            out.append(f"{owner}: {stripped}")
+    return out
 
 
 def _clean_group(token: str) -> str:
@@ -287,7 +313,8 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     # AOS8 'a-band'/'g-band'/'wmm' → New Central rf-band enum
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
         info = {"essid": "", "opmode": "", "passphrase": None,
-                "rf_band": "", "dtim_period": 0, "max_clients": 0}
+                "rf_band": "", "dtim_period": 0, "max_clients": 0,
+                "hidden": False, "unsupported": []}
         bands = set()
         for line in block:
             m = re.match(r"essid\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
@@ -311,8 +338,12 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             m = re.match(r"allowed-band\s+(.+)$", line, re.IGNORECASE)
             if m:
                 bands = {b for b in m.group(1).lower().split() if b in ("a", "g")}
+            if re.match(r"^hide\s*$", line, re.IGNORECASE):
+                info["hidden"] = True
         if bands:
             info["rf_band"] = _BAND_MAP.get(tuple(sorted(bands)), "BAND_ALL")
+        info["unsupported"] = _unsupported_directives(
+            block, f"ssid-profile '{name}'")
         profiles[name] = info
     return profiles
 
@@ -424,6 +455,7 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
         prof_ref = ""
         aaa_ref = ""
         vap_bands: set = set()
+        enabled = True
         for line in block:
             low = line.lower()
             m = re.match(r"vlan\s+(\S+)", line, re.IGNORECASE)
@@ -449,8 +481,14 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
                 if m:
                     vap_bands = {b for b in m.group(1).lower().split()
                                  if b in ("a", "g")}
+                # #9 parity: an administratively disabled virtual-AP must not
+                # migrate as active (the Instant paste path already did this)
+                if re.match(r"^disable\s*$", line, re.IGNORECASE):
+                    enabled = False
 
         prof = ssid_profiles.get(prof_ref, {})
+        unsupported = (list(prof.get("unsupported", []))
+                       + _unsupported_directives(block, f"virtual-ap '{name}'"))
         auth, auth_known = _opmode_to_auth(prof.get("opmode", ""))
         mac_sg = aaa_mac_sgs.get(aaa_ref, "")
         if auth == AuthType.OPEN and mac_sg:
@@ -467,6 +505,9 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
             auth_type=auth,
             auth_known=auth_known,
             essid=prof.get("essid") or None,
+            broadcast=not prof.get("hidden", False),
+            enabled=enabled,
+            unsupported_fields=unsupported,
             psk=prof.get("passphrase"),
             # prefer the real server group from inside the aaa-profile; the
             # profile name is only a last-resort placeholder. A MAC-auth
@@ -495,6 +536,23 @@ def _parse_group_vap_bindings(running: str) -> dict[str, list[str]]:
         if vaps:
             bindings[name] = vaps
     return bindings
+
+
+def _parse_server_groups(running: str) -> list[ServerGroup]:
+    """`aaa server-group "<name>"` blocks → ordered members. Order IS failover
+    order — the paste path must not lose it (#9 paste/API parity with
+    AOS8Client.get_server_groups)."""
+    groups = []
+    for name, block in _iter_blocks(running, r"aaa server-group"):
+        if name.lower() in ("default", "internal"):
+            continue  # built-in server groups — noise, mirroring the API path
+        servers = []
+        for line in block:
+            m = re.match(r"auth-server\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
+            if m:
+                servers.append(m.group(1))
+        groups.append(ServerGroup(name=name, servers=servers))
+    return groups
 
 
 def _parse_radius_servers(auth_text: str, running_text: str) -> list[RadiusServer]:
@@ -765,6 +823,7 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
         vlan, vlan_raw = 1, None
         auth_server = None
         enabled = True
+        hidden = False
         cp_ref, cp_external = "", False
         for line in block:
             m = re.match(r"essid\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
@@ -800,6 +859,8 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
                 cp_ref = m.group(1)
             if re.match(r"^disable\s*$", line, re.IGNORECASE):
                 enabled = False
+            if re.match(r"^hide\s*$", line, re.IGNORECASE):
+                hidden = True
         auth, auth_known = _opmode_to_auth(opmode)
         cp_url, cp_redirect = "", ""
         if cp_external:
@@ -818,6 +879,9 @@ def _parse_instant_ssids(running: str) -> list[SSID]:
             auth_server_group=auth_server,
             # `disable` means administratively OFF — not a hidden SSID.
             enabled=enabled,
+            broadcast=not hidden,
+            unsupported_fields=_unsupported_directives(
+                block, f"ssid-profile '{name}'"),
             captive_portal_url=cp_url,
             captive_portal_redirect=cp_redirect,
         ))

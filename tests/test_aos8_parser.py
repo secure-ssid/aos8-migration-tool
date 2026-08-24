@@ -285,3 +285,77 @@ def test_vlan_pool_tokens_set_vlan_raw():
     pool2 = next(s for s in cfg2.ssids if s.name == "pool-vap")
     assert pool2.vlan == 100
     assert pool2.vlan_raw == "100-105"
+
+
+PARITY_RUNNING = '''
+wlan ssid-profile "iot-ssid"
+   essid "IoT"
+   opmode opensystem
+   hide
+!
+aaa profile "iot-aaa"
+   mac-server-group "cppm-sg"
+!
+aaa server-group "cppm-sg"
+   auth-server cppm-primary
+   auth-server cppm-backup
+!
+wlan virtual-ap "iot-vap"
+   aaa-profile "iot-aaa"
+   ssid-profile "iot-ssid"
+   vlan 40
+   forward-mode bridge
+   disable
+!
+ap-group "campus"
+   virtual-ap "iot-vap"
+!
+'''
+
+
+def test_mc_paste_disabled_vap_not_migrated_active():
+    """#9 parity: a `disable`d virtual-AP is administratively OFF — the MC
+    paste path silently migrated it as active (Instant path already did not)."""
+    cfg = parse_customer_config({"running_config": PARITY_RUNNING},
+                                mc_ip="10.0.0.1")
+    iot = next(s for s in cfg.ssids if s.name == "iot-vap")
+    assert iot.enabled is False
+
+
+def test_mc_paste_hidden_ssid_not_broadcast():
+    """#9 parity: `hide` in the ssid-profile must not silently default to
+    broadcast=True."""
+    cfg = parse_customer_config({"running_config": PARITY_RUNNING},
+                                mc_ip="10.0.0.1")
+    iot = next(s for s in cfg.ssids if s.name == "iot-vap")
+    assert iot.broadcast is False
+
+
+def test_mc_paste_server_groups_preserve_member_order():
+    """#9 parity: aaa server-group membership is reconstructed from paste,
+    in order — order IS failover order."""
+    cfg = parse_customer_config({"running_config": PARITY_RUNNING},
+                                mc_ip="10.0.0.1")
+    sg = next(g for g in cfg.server_groups if g.name == "cppm-sg")
+    assert sg.servers == ["cppm-primary", "cppm-backup"]
+
+
+def test_unsupported_source_directives_fail_preflight():
+    """#9: a field the migration cannot represent (802.11r here) FAILs
+    preflight as non-overridable — never silently dropped onto defaults."""
+    from lib import compatibility
+    from lib.models import CentralConfig
+    cfg = parse_customer_config(
+        {"running_config": PARITY_RUNNING.replace(
+            "   hide\n", "   dot11r enable\n")},
+        mc_ip="10.0.0.1")
+    iot = next(s for s in cfg.ssids if s.name == "iot-vap")
+    assert any("dot11r" in f for f in iot.unsupported_fields)
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    results = compatibility.run_all(cfg, central)
+    hit = [r for r in results if r.name == "Unsupported Source Fields"]
+    assert len(hit) == 1
+    assert hit[0].status == compatibility.Status.FAIL
+    assert hit[0].critical
+    assert "iot-vap" in hit[0].message or "IoT" in hit[0].message
