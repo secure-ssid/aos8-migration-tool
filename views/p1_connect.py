@@ -241,6 +241,7 @@ def render():
             # old results are from a different run — never let them imply this
             # click succeeded
             st.session_state.pop("cleanup_results", None)
+            st.session_state.pop("cleanup_audit_error", None)
             nc = cl = None
             try:
                 if st.session_state.get("dest_type", "new") == "new":
@@ -267,15 +268,22 @@ def render():
                 # cleanup may have refreshed the single-use classic token
                 if cl is not None:
                     persist_classic_tokens(cl)
-                audit.record(
-                    "cleanup",
-                    user=st.session_state.get("_user"),
-                    tenant=(st.session_state.get("central_base")
-                            or st.session_state.get("central_base_classic")),
-                    prefix="zztest",
-                    deleted=sum(1 for _l, ok, _d in res if ok),
-                    failed=sum(1 for _l, ok, _d in res if not ok),
-                )
+                try:
+                    audit.record(
+                        "cleanup",
+                        user=st.session_state.get("_user"),
+                        tenant=(st.session_state.get("central_base")
+                                or st.session_state.get("central_base_classic")),
+                        prefix="zztest",
+                        deleted=sum(1 for _l, ok, _d in res if ok),
+                        failed=sum(1 for _l, ok, _d in res if not ok),
+                    )
+                except audit.AuditWriteError as e:
+                    # the cleanup itself already committed — a raising audit
+                    # log must not kill the session, but the missing
+                    # compliance evidence stays LOUD: stashed because the
+                    # rerun below would wipe a same-render warning
+                    st.session_state["cleanup_audit_error"] = str(e)
                 # rerun only after a real run — on auth failure the st.error
                 # above must stay visible
                 st.rerun()
@@ -283,6 +291,11 @@ def render():
                 st.warning("No Classic credentials registered — add the access "
                            "token (or refresh token + client id/secret) above first.")
 
+        _cleanup_audit_error = st.session_state.pop("cleanup_audit_error", None)
+        if _cleanup_audit_error:
+            st.warning("Cleanup committed, but the audit record failed — "
+                       "compliance evidence for this run is missing: "
+                       f"{_cleanup_audit_error}")
         for label, ok, detail in st.session_state.get("cleanup_results", []):
             icon, col = ("✓", OK) if ok else ("✕", FAIL)
             st.markdown(

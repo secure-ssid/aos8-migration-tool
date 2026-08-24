@@ -114,6 +114,11 @@ def render():
 
     # ── Already provisioned ────────────────────────────────────────────────
     if st.session_state.get("provision_done"):
+        _provision_audit_error = st.session_state.pop("provision_audit_error", None)
+        if _provision_audit_error:
+            st.warning("Provisioning committed, but the audit record failed — "
+                       "compliance evidence for this run is missing: "
+                       f"{_provision_audit_error}")
         _show_results(st.session_state.get("provision_results", []))
         _show_collision_adoptions(
             st.session_state.get("provision_results", []))
@@ -123,6 +128,7 @@ def render():
         if col_mid.button("Reset & re-run provisioning"):
             st.session_state.pop("provision_done", None)
             st.session_state.pop("provision_results", None)
+            st.session_state.pop("provision_audit_error", None)
             # re-provisioning invalidates any earlier cutover's "migration
             # complete" banner — it described the pre-reset config
             st.session_state.pop("onboard_results", None)
@@ -285,16 +291,23 @@ def render():
                     st.info("The Classic refresh token rotated during this run — the new "
                             "one is saved in this session.")
 
-        audit.record(
-            "provision",
-            user=st.session_state.get("_user"),
-            destination=central_cfg.destination,
-            tenant=(st.session_state.get("central_base")
-                    or st.session_state.get("central_base_classic")),
-            customer=st.session_state.get("customer_name"),
-            steps=len(results),
-            failed=sum(1 for r in results if not r[1]),
-        )
+        try:
+            audit.record(
+                "provision",
+                user=st.session_state.get("_user"),
+                destination=central_cfg.destination,
+                tenant=(st.session_state.get("central_base")
+                        or st.session_state.get("central_base_classic")),
+                customer=st.session_state.get("customer_name"),
+                steps=len(results),
+                failed=sum(1 for r in results if not r[1]),
+            )
+        except audit.AuditWriteError as e:
+            # provisioning already committed — a raising audit log must not
+            # kill the session, but the missing compliance evidence stays
+            # LOUD: stashed because the rerun below would wipe a same-render
+            # warning
+            st.session_state["provision_audit_error"] = str(e)
         st.session_state["provision_results"] = results
         st.session_state["provision_done"]    = True
         st.rerun()

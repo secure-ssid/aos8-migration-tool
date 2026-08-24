@@ -11,6 +11,14 @@ from lib.classic_central_client import (ClassicCentralAPIError,
 from lib.models import CentralConfig, site_data_error
 
 
+@pytest.fixture(autouse=True)
+def _dev_mode(monkeypatch):
+    # Offline client tests use placeholder hosts — the transport layer
+    # refuses non-allowlisted/cleartext base URLs unless the harness opts
+    # out via AOS8_DEV_MODE, exactly like a local lab (Stream C contract).
+    monkeypatch.setenv("AOS8_DEV_MODE", "true")
+
+
 def _cfg(**kw) -> CentralConfig:
     base = dict(customer_name="acme", base_url="http://x", sites=["hq"])
     base.update(kw)
