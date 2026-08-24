@@ -125,10 +125,11 @@ Multiple results from [[Glossary|opmode]] → AuthType mapping:
 
 ## Captive-portal SSIDs — `_check_captive_portal`
 Classic destination only (skipped for [[Destination - New Central|New Central]]).
-An SSID with a resolved external captive portal (`captive_portal_url` — the
+An SSID with a resolved external captive portal (`captive_portal_url` — MC: the
 virtual-ap names an aaa-profile, whose `initial-role` user-role carries
 `captive-portal <profile>`, resolved to the `aaa authentication captive-portal`
-profile when its `login-page` is an off-box URL) →
+profile when its `login-page` is an off-box URL; Instant: `captive-portal
+external [profile "X"]` / `captive-portal-profile "X"` on the ssid-profile) →
 **FAIL — critical, no override**: Classic Central's `full_wlan` API has no
 external-captive-portal field this tool can populate, so the guest SSID would
 be created as a fully OPEN network. **Remediate:** migrate these SSIDs to
