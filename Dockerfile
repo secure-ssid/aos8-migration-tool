@@ -18,10 +18,19 @@ RUN install -d -o appuser -g appuser -m 700 /home/appuser/.aos8-migration
 
 # Deployment knobs (override per environment — see docker-compose.yml):
 #   AOS8_AUTH_MODE=password  one shared gate password (simplest multi-user)
-#                  =accounts  per-person @hpe.com self-service login
-#   AOS8_APP_PASSWORD=...     the shared password (password mode)
+#                  =accounts  per-person self-service login with verified email
+#                             (any domain unless AOS8_ALLOWED_EMAIL_DOMAIN is set)
+#   AOS8_APP_PASSWORD=...     the shared password (password mode; >=16 chars,
+#                             must not be the .env.example placeholder)
 #   AOS8_CREDSTORE_KEY=...    Fernet key enabling encrypted "Remember";
 #                             unset in a multi-user mode => persistence is OFF
+#   AOS8_CA_BUNDLE=...        CA bundle for verifying the AOS 8 controller cert
+#                             (verification is ON by default)
+#   AOS8_INSECURE_TLS=true    lab-only escape hatch; disables that verification
+#   AOS8_ALLOW_CONSOLE_CODES=true
+#                             dev-only; prints email verification codes to the
+#                             container log. Never enable in production.
+# An unrecognised AOS8_AUTH_MODE is refused at startup (fail-closed).
 # The image defaults to single-user 'local' mode so a plain `docker run` works.
 ENV AOS8_AUTH_MODE=local \
     PYTHONUNBUFFERED=1

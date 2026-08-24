@@ -66,10 +66,25 @@ separator row rather than guessing on whitespace.
 
 The New Central model is **library profiles bound to scopes via scope-maps**.
 
+> ⚠️ **Alpha interface.** HPE publishes `/network-config` as an alpha API
+> "subject to change at any moment". Profile writes therefore **negotiate**
+> two request shapes and pin whichever the tenant accepts for the run:
+>
+> | | Documented (tried first) | Legacy (fallback) |
+> |---|---|---|
+> | Route | `POST /network-config/v1alpha1/<resource>` | `POST /network-config/v1/<resource>/{name}` |
+> | Body | wrapper array, e.g. `{"wlan-ssid":[{…}]}` | flat object |
+> | scope-map `resource` | absolute — `/wlan-ssids/x` | relative — `wlan-ssids/x` (+ int `scope-id`) |
+>
+> Ground truth for the documented column is HPE's "Open SSID (OWE)" Postman
+> collection in `aruba/central-python-workflows@v2`. `CentralClient.
+> detect_profile_style()` (read-only, GET-only) reports which one a tenant
+> exposes; it is surfaced in the Step 1 API probe.
+
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/network-config/v1/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). |
-| POST | `/network-config/v1/scope-maps` | Map a resource to a scope/persona. Duplicate = idempotent success. |
+| GET | `/network-config/{v1alpha1,v1}/scope-maps` | Resolve the global scope id (`persona == SERVICE_PERSONA`, else most-frequent scope-id). |
+| POST | `/network-config/{v1alpha1,v1}/scope-maps` | Map a resource to a scope/persona. Duplicate = idempotent success. |
 | GET/POST | `/network-monitoring/v1/sites` | List / create site (idempotent by name). |
 | POST | `/network-monitoring/v1/sites/{id}/devices` | Assign devices to a site (with `/central/v2/sites/associate` fallback for numeric ids). |
 | GET | `/network-config/v1/device-groups` | List device groups. |
@@ -78,10 +93,10 @@ The New Central model is **library profiles bound to scopes via scope-maps**.
 | POST | `/network-config/v1/device-groups-add-devices` | Add serials (`desScopeId`, `devices`). |
 | POST | `/network-config/v1alpha1/persona-assignment` | Assign device function (`CAMPUS_AP`). |
 | POST/PUT | `/network-config/v1/layer2-vlan/{id}` | Create/replace VLAN profile, then scope-map it. |
-| POST | `/network-config/v1/roles/{name}` | Role for overlay SSIDs (scope-mapped + `role-gpids/{name}`). |
-| POST | `/network-config/v1alpha1/policies/{name}` | Allow-all security policy. |
-| PATCH | `/network-config/v1alpha1/policy-groups` | Add the policy to the policy-group. |
-| POST/PATCH | `/network-config/v1/wlan-ssids/{name}` | Create SSID (POST), re-apply `default-role` (PATCH — POST silently drops it). |
+| POST | `/network-config/{v1alpha1/roles,v1/roles/{name}}` | Role for overlay SSIDs (scope-mapped + `role-gpids/{name}`). Negotiated. |
+| POST | `/network-config/{v1alpha1/policies,…/policies/{name}}` | Allow-all security policy. Negotiated. |
+| POST→PATCH | `/network-config/v1alpha1/policy-groups` | Add the policy to the policy-group. POST is documented; PATCH is the fallback. |
+| POST/PATCH | `/network-config/{v1alpha1/wlan-ssids,v1/wlan-ssids/{name}}` | Create SSID (POST), re-apply `default-role` (PATCH — POST silently drops it). Negotiated. |
 | POST | `/network-config/v1/overlay-wlan/{name}` | Bind a tunnel SSID to the GW cluster (GRE). |
 | POST | `/network-config/v1alpha1/gateway-clusters/{name}` | Create GW cluster (`object-type=LOCAL`, `scope-id`, `device-function=MOBILITY_GW`). |
 | POST | `/network-config/v1alpha1/auth-servers/{name}` | RADIUS auth-server library profile. |
@@ -91,7 +106,10 @@ The New Central model is **library profiles bound to scopes via scope-maps**.
 SSID forward modes: tunnel/split → `FORWARD_MODE_L2` (overlay) with
 role/policy/`overlay-wlan`; bridge → `FORWARD_MODE_BRIDGE` (underlay).
 `OPMODE` maps `AuthType` → Central opmode enum (e.g. `WPA2_PERSONAL`,
-`WPA3_SAE`, `WPA2_ENTERPRISE`, `WPA3_ENTERPRISE_CCM_128`; MAC and OPEN → `OPEN`).
+`WPA3_SAE`, `WPA2_ENTERPRISE`, `WPA3_ENTERPRISE_CCM_128`). **OWE maps to
+`ENHANCED_OPEN`, not `OPEN`** — collapsing it onto `OPEN` would silently strip
+encryption. Only MAC-auth and true OPEN map to `OPEN`, and MAC-auth is a
+preflight blocker because it loses access control.
 
 ### Runtime-verify caveats (New Central)
 
@@ -121,8 +139,10 @@ role/policy/`overlay-wlan`; bridge → `FORWARD_MODE_BRIDGE` (underlay).
 | POST | `/firmware/v2/upgrade/compliance_version` | Firmware compliance (v1 fallback on 404/405). `device_type="IAP"` for APs (incl. AOS 10). |
 | GET | `/monitoring/v2/aps` | Validation: `{"aps":[...]}` with status `Up`/`Down`. |
 
-`OPMODE_CLASSIC` maps `AuthType` → classic opmode (`opensystem`, `wpa2-psk-aes`,
-`wpa3-sae-aes`, `wpa2-aes`, `wpa3-aes-ccm-128`).
+`OPMODE_CLASSIC` maps `AuthType` → classic opmode (`opensystem`,
+`enhanced-open` for OWE, `wpa2-psk-aes`, `wpa3-sae-aes`, `wpa2-aes`,
+`wpa3-aes-ccm-128`). The base WLAN sets `opmode_transition_disable: true`, so
+an OWE SSID does not also advertise a legacy open BSS.
 
 ### The full_wlan `{"value": json.dumps(...)}` wrapper quirk
 
