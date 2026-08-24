@@ -14,7 +14,7 @@ relative to repo root (`aos8-migration-tool/`).
   [[Gateway Strategy]] radio, calls `translate()` → `CentralConfig`. Lists the
   paste commands for [[Source - Mobility Controller|MC]] and [[Source - Instant IAP|Instant]]. Redacts PSKs/secrets in the JSON export.
 - **`views/p2_preflight.py`** — runs [[Preflight Checks]] (`compatibility.run_all`),
-  blocker override gate.
+  per-row blocker acknowledgement gate (critical FAILs hold unconditionally).
 - **`views/p3_provision.py`** — calls `CentralClient.provision` ([[Destination - New Central|New]]) or
   `ClassicCentralClient.provision` ([[Destination - Classic Central|Classic]]); per-step result log; rotates
   the classic [[Glossary|refresh token]] in session.

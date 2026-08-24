@@ -12,7 +12,7 @@ verbatim in the step's result log — match the message text below.
 | AOS 8 login fails / no UIDARUBA | Wrong port, or REST API disabled | Confirm 4343 reachable and the REST API enabled, or use paste mode. (Wrong `config_path` shows up as read errors after login — see the AOS 8 login failures section.) |
 | GreenLake (GLP) claim fails: "macAddress is required" | AP discovered without a wired MAC | Re-discover with `show ap database long`; or add the device manually in GreenLake. |
 | Blank / stale page in the browser | Old Streamlit server process still bound | Stop and restart `streamlit run app.py`. |
-| Preflight blocker won't let you continue | A FAIL check (model/firmware/named VLAN/etc.) | Fix the root cause, or tick the override checkbox (acknowledge the risk). |
+| Preflight blocker won't let you continue | A FAIL check (model/firmware/named VLAN/etc.) | Fix the root cause, or — for non-critical blockers — acknowledge it individually with a written reason (an audit record, not a checkbox). Critical blockers have no override. |
 | Group created but "Architecture reads back as X, not AOS10" (classic) | Known v3 group-create flaw | Delete the group in Central; confirm the tenant supports AOS10 groups; re-run. |
 | Provisioning step failed but others continued | By design — failures are recorded per step, not fatal to the run | Read the per-step error, fix it, use "Reset & re-run provisioning". Failures are **not** free, though: each one must be individually acknowledged (with a written reason, audited) before the Step 4 cutover unlocks. |
 
@@ -146,10 +146,11 @@ the intended reset between engagements anyway).
 
 ## Preflight blockers explained
 
-Blockers (FAIL) stop you advancing to provisioning unless you tick the override
-checkbox ("Override blockers — I understand the risk and will resolve them
-before cutover"). Resolve
-them properly when you can — they represent things that will break the migration.
+Blockers (FAIL) stop you advancing to provisioning: critical blockers must be
+resolved at the source (no override), and each non-critical blocker must be
+individually acknowledged with a written reason (an audit record, not a
+checkbox). Resolve them properly when you can — they represent things that
+will break the migration.
 
 | Blocker | What to do |
 |---|---|
@@ -163,6 +164,8 @@ them properly when you can — they represent things that will break the migrati
 | MAC-Auth SSIDs Without RADIUS | A MAC-auth SSID (opensystem + `mac-server-group`) has no discovered server group and would migrate effectively open. Confirm the aaa-profile's mac-server-group (`show aaa profile`) holds real RADIUS servers, then re-discover. |
 | 802.1X SSIDs Without RADIUS Servers | Enterprise SSIDs found but zero RADIUS servers discovered — they'd provision as dot1x with nothing to authenticate against. Confirm the servers exist (`show aaa authentication-server radius`) and that discovery can read them. |
 | Classic RADIUS Servers (manual step) | The Classic API cannot create RADIUS server objects and `full_wlan` references a server by name. Create a RADIUS auth server named exactly like the source server group in each Classic group, then re-run. |
+| SSID Auth Unprovable | **Critical — cannot be overridden.** An opensystem SSID's aaa-profile could not be read, so MAC auth cannot be ruled out and migrating it as plain OPEN could publish a network that was MAC-authenticated. Restore the aaa-profile read (API permissions/connectivity) and re-discover, or switch to paste mode. |
+| Unsupported Source Fields | Paste-mode WLAN config lines the migration cannot represent would silently take Central defaults. Reproduce the setting in Central after provisioning, or acknowledge it per-row as a deliberate drop. |
 | Conflicting Duplicate ESSIDs | The same ESSID has different vlan/forward-mode/auth across virtual-aps. Central keys WLANs by ESSID; only the first would provision. Rename or consolidate. |
 | ESSID Length | ESSID > 32 characters — Central rejects it. Shorten it. |
 

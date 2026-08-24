@@ -102,7 +102,7 @@ an empty one; `debug_pull.py` dumps both.
 | `/mm/mynode` | Standalone controller. |
 
 Config objects read: `ap_group` (with `virtual_ap` bindings), `ssid_prof`
-(essid/opmode/passphrase), `virtual_ap` (vlan/forward-mode/profile refs —
+(essid/opmode/passphrase/hide-ssid), `virtual_ap` (vlan/forward-mode/profile refs —
 some builds answer the legacy name `wlan_virtual_ap` instead; the client
 tries both), `aaa_prof` (dot1x/mac server-group resolution), `vlan_id`,
 `rad_server`, `server_group_prof`.
@@ -126,8 +126,10 @@ Quirks handled in the client:
   **MAC-auth** network (legacy printer/IoT SSIDs are exactly this) —
   `auth_type` becomes `MAC`, never `OPEN`, so it cannot migrate wide open.
   On the REST discovery path this detection depends on the best-effort
-  `aaa_prof` object read: if that fetch fails, opensystem SSIDs migrate as
-  plain OPEN with no preflight flag. The paste path parses
+  `aaa_prof` object read: if that fetch fails, the opensystem SSIDs keep
+  `auth_type=OPEN` but with `auth_known=False`, and preflight raises a
+  **critical FAIL** ("SSID Auth Unprovable") that cannot be overridden —
+  they are never migrated as plain OPEN. The paste path parses
   `mac-server-group` from the running-config directly and is unaffected.
 - AP models are normalised (`205` → `AP-205`); country suffixes (`-US`, `-RW`,
   `-JP`, `-IL`, `-EG`) are stripped for the compatibility lookup, and AP-/IAP-

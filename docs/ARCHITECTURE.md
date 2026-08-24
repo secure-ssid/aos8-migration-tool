@@ -195,7 +195,7 @@ session — nothing is written to disk).
 |---|---|---|
 | `customer_config` | p1, p2 (VLAN fix), p4 (MAC edit) | The discovered `CustomerConfig`. |
 | `central_config` | p1 (on Continue), p2 (VLAN fix re-translate) | The translated `CentralConfig`. |
-| `preflight_results` | p2 | Cached `list[CheckResult]`. |
+| `preflight_results` | p2 | `{results: list[CheckResult], acks: {check name: written reason}}` — cached results plus the per-row acknowledgements of non-critical blockers (each ack is a `preflight-blocker-ack` audit record). Results and acks live in one entry and are cleared together (Re-run, VLAN remap, rediscovery), so a stale ack can never waive a fresh blocker. |
 | `provision_done`, `provision_results` | p3 | Provisioning completion flag + `[(label, ok, detail)]`. |
 | `glp_existing` | p4 | Sorted workspace serials snapshot. |
 | `glp_subscriptions` | p4 | Loaded subscription list. |
@@ -211,7 +211,7 @@ session — nothing is written to disk).
 | `validation_results` | p6 | Raw AP list fetched from Central. |
 | `validation_celebrated` | p6 | One-shot guard so balloons fire once. |
 | `_reset_downstream` | app.py | Callable injected for the reset hook (below). |
-| `preflight_override` (p2 widget key), `check_*`/`chk_*` | p2, p6 | Blocker-override checkbox; checklist widget keys mirrored into durable `chk_*` keys (the `chk_*` keys are what reset clears). |
+| `check_*`/`chk_*` | p2, p6 | Checklist widget keys mirrored into durable `chk_*` keys (the `chk_*` keys are what reset clears). |
 
 ### Reset-on-rediscovery flow
 
