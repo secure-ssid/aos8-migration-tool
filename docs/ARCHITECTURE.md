@@ -276,8 +276,8 @@ a manifest attached (`lib/manifest.py`, per customer+tenant under
 the manifest owns the object (or it was explicitly adopted in Step 3 — an
 audited, per-object decision); a foreign same-named object raises a collision
 refusal. An unreadable manifest fails closed. Sites, VLANs, auth servers,
-device groups, server groups, policies, roles, captive portals and gateway
-clusters are **not yet registered** — for them, name-based reuse (and
+New Central device groups, server groups, policies, roles, captive portals and
+gateway clusters are **not yet registered** — for them, name-based reuse (and
 "already exists"/"duplicate" swallowed as success) still applies. Both Central
 clients cache the group/site lists per run (New Central:
 `_groups_cache`/`_sites_cache`; classic: `_group_names_cache`/`_sites_cache`).

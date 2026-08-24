@@ -45,8 +45,9 @@ reusing or PATCHing a same-named tenant object is allowed only when the
 manifest owns it (created by this tool, or explicitly adopted in Step 3 — an
 audited, per-object decision). A same-named SSID/group with no manifest entry
 raises a **collision refusal** instead of being silently reused or patched.
-Every other resource kind — sites, VLANs, auth servers, device groups, server
-groups, policies, roles, captive portals, gateway clusters — is still
+Every other resource kind — sites, VLANs, auth servers, New Central device
+groups, server groups, policies, roles, captive portals, gateway clusters — is
+still
 **name-based reuse** this wave: a same-named object is silently reused as
 before. An unreadable manifest fails closed — it must not read as "we own
 nothing". Cleanup is the mirror image: with a manifest it deletes **only**
