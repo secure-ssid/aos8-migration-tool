@@ -11,6 +11,7 @@ class ForwardMode(str, Enum):
 
 class AuthType(str, Enum):
     OPEN = "open"
+    OWE = "owe"                     # Enhanced Open — encrypted, NOT the same as OPEN
     WPA2_PSK = "wpa2-psk"
     WPA3_SAE = "wpa3-sae"
     WPA2_ENTERPRISE = "wpa2-enterprise"

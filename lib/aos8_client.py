@@ -12,6 +12,7 @@ API mechanics (ArubaOS 8 REST API guide):
 
 Falls back to CLI paste mode (aos8_parser) if the API is unreachable.
 """
+import os
 import re
 import requests
 import urllib3
@@ -27,6 +28,26 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 AOS8_API_PORT = 4343
 LOGIN_PATH = "/v1/api/login"
 CONFIG_PATH_PREFIX = "/v1/configuration"
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def default_tls_verify() -> bool | str:
+    """Default TLS setting for controller connections.
+
+    Verification is ON by default — the session carries controller admin
+    credentials. Controllers usually present a self-signed cert, so operators
+    have two explicit escape hatches:
+      - ``AOS8_CA_BUNDLE=/path/to/ca.pem`` — verify against the controller's
+        own CA (preferred; keeps the connection authenticated).
+      - ``AOS8_INSECURE_TLS=true`` — disable verification entirely (lab only).
+    """
+    bundle = os.environ.get("AOS8_CA_BUNDLE", "").strip()
+    if bundle:
+        return bundle
+    return not _env_truthy("AOS8_INSECURE_TLS")
 
 # AP models known to be incompatible with AOS 10.
 # NOTE: verify against Aruba's official AOS 10 supported-platform matrix for
@@ -56,7 +77,8 @@ class AOS8APIError(Exception):
 
 class AOS8Client:
     def __init__(self, ip: str, username: str, password: str,
-                 config_path: str = "/md", timeout: int = 15):
+                 config_path: str = "/md", timeout: int = 15,
+                 verify: bool | str | None = None):
         self.base = f"https://{ip}:{AOS8_API_PORT}"
         self.ip = ip
         self.username = username
@@ -66,16 +88,26 @@ class AOS8Client:
         self.uidaruba: Optional[str] = None
         self.pull_method = "object-api"  # or "showcommand" after a fallback pull
         self.session = requests.Session()
-        self.session.verify = False
+        # Verify by default; callers (and env) may relax it explicitly.
+        self.session.verify = default_tls_verify() if verify is None else verify
 
     # ─────────────────── Auth ───────────────────
 
     def connect(self) -> bool:
-        resp = self.session.post(
-            f"{self.base}{LOGIN_PATH}",
-            data={"username": self.username, "password": self.password},
-            timeout=self.timeout,
-        )
+        try:
+            resp = self.session.post(
+                f"{self.base}{LOGIN_PATH}",
+                data={"username": self.username, "password": self.password},
+                timeout=self.timeout,
+            )
+        except requests.exceptions.SSLError as e:
+            raise AOS8APIError(
+                f"TLS verification failed for {self.ip}: {e}. Controllers "
+                f"usually present a self-signed certificate — point "
+                f"AOS8_CA_BUNDLE at the controller's CA to keep the connection "
+                f"verified, or tick 'Trust self-signed certificate' (lab only, "
+                f"equivalent to AOS8_INSECURE_TLS=true)."
+            ) from e
         resp.raise_for_status()
         data = resp.json()
         result = data.get("_global_result", {})
@@ -585,8 +617,10 @@ def _opmode_to_auth(opmode: str) -> tuple[AuthType, bool]:
     if "opensystem" in op or op == "open":
         return AuthType.OPEN, True
     if "enhanced-open" in op or "owe" in op:
-        # OWE (Enhanced Open) — no AuthType member for it, so map to OPEN
-        return AuthType.OPEN, True
+        # OWE (Enhanced Open) is ENCRYPTED — classifying it as OPEN silently
+        # downgraded the WLAN. Keep it distinct; preflight blocks the migration
+        # until the operator decides how it should land in Central.
+        return AuthType.OWE, True
     if "sae" in op or "wpa3-personal" in op:
         return AuthType.WPA3_SAE, True
     if "psk" in op:

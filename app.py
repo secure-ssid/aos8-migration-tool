@@ -51,6 +51,15 @@ inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba
 _user = identity.current_user()
 st.session_state["_user"] = _user
 _mode = identity.auth_mode()
+
+# Fail closed on a misconfigured deployment BEFORE anything renders. An unknown
+# AOS8_AUTH_MODE (typo) used to fall through every gate and serve the console
+# unauthenticated; a placeholder/weak shared password used to be accepted.
+_cfg_error = identity.auth_mode_error()
+if _cfg_error:
+    st.error(f"🔒 Refusing to start — {_cfg_error}")
+    st.stop()
+
 if identity.requires_login():        # 'password' or 'accounts' — in-app login gate
     if not auth_ui.render_gate():
         st.stop()

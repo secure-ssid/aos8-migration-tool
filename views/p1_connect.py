@@ -11,7 +11,7 @@ from lib.aos8_client import AOS8Client, AOS8APIError, is_model_compatible
 from lib.aos8_parser import parse_customer_config, parse_instant_config
 from lib.translator import translate
 from lib.styles import (
-    OK, FAIL, WARN, MUTED, TEXT, FAINT, HPE_GREEN,
+    OK, FAIL, WARN, MUTED, TEXT, FAINT,
     page_header, section_label, badge, ssid_tag, esc, mono_row, mono_caption,
     telemetry_chip,
 )
@@ -330,9 +330,18 @@ def render():
                 value=st.session_state.get("mc_config_path", "/md"),
                 help="Mobility Conductor: /md (or a specific node). Standalone controller: /mm/mynode",
             )
+            insecure_tls = st.checkbox(
+                "Trust self-signed certificate (skip TLS verification)",
+                key="mc_insecure_tls",
+                help="Lab/controller-with-self-signed-cert only. The connection "
+                     "carries controller admin credentials, so prefer setting "
+                     "AOS8_CA_BUNDLE to the controller's CA and leaving this off.",
+            )
+        _tls_note = ("self-signed cert accepted (verification OFF)" if insecure_tls
+                     else "TLS certificate verified")
         st.markdown(
             f'<div style="font-size:11.5px;color:{FAINT};margin:-0.3rem 0 0.7rem;">'
-            f'REST API on port 4343 · self-signed cert accepted · UIDARUBA session token</div>',
+            f'REST API on port 4343 · {_tls_note} · UIDARUBA session token</div>',
             unsafe_allow_html=True,
         )
 
@@ -342,7 +351,8 @@ def render():
                 try:
                     requested_path = config_path.strip() or "/md"
                     client = AOS8Client(mc_ip, mc_user, mc_pass,
-                                        config_path=requested_path)
+                                        config_path=requested_path,
+                                        verify=False if insecure_tls else None)
                     client.connect()
                     customer_cfg = client.pull_config()
                     # pull_config may auto-detect the real config node when the

@@ -42,8 +42,8 @@ def _review_checklist(central_cfg, customer) -> bool:
             f"({', '.join(g.name for g in central_cfg.groups) or '—'})",
             f"SSIDs present with correct VLANs: <b>{n_ssids}</b> SSID(s), "
             f"<b>{n_vlans}</b> VLAN(s)",
-            (f"RADIUS server-group bound to enterprise SSIDs "
-             f"(remember to set the real shared secret)" if has_radius
+            ("RADIUS server-group bound to enterprise SSIDs "
+             "(remember to set the real shared secret)" if has_radius
              else "No RADIUS — PSK/open SSIDs only"),
             f"Firmware compliance set: <b>{esc(fw)}</b>",
             "APs in GreenLake workspace with a subscription (claim below)",
@@ -484,6 +484,20 @@ def render():
                        f"`{st.session_state.get('central_base_classic','')}`.")
         if not reviewed:
             info_banner("Tick the review checklist at the top first.", color=WARN)
+
+        # Provisioning records per-step failures but still sets provision_done,
+        # so a partially-built config could previously be cut over. Converting
+        # APs into a group whose SSIDs/VLANs failed to build strands them.
+        _failed_steps = [r for r in st.session_state.get("provision_results", [])
+                         if not r[1]]
+        if _failed_steps:
+            info_banner(
+                f"<b>Step 3 finished with {len(_failed_steps)} failed step(s).</b> "
+                "Converting APs now would move them into an incomplete "
+                "configuration. Go back to Build Config, fix the errors and "
+                "re-run before cutting over.",
+                color=WARN)
+
         ap_serials = {grp.name: [s for s in grp.ap_serials if s]
                       for grp in customer.ap_groups}
         _n_aps = sum(len(v) for v in ap_serials.values())
@@ -491,8 +505,14 @@ def render():
             f"I'm in my cutover window — convert these {_n_aps} AP(s) now "
             "(they will reboot into AOS 10 and drop offline)",
             key="cutover_confirm")
+        _override_failed = True
+        if _failed_steps:
+            _override_failed = st.checkbox(
+                "I understand Step 3 had failures and want to convert anyway",
+                key="cutover_override_failed")
         if st.button("Move APs into groups + assign persona/site",
-                     type="primary", disabled=not (reviewed and cutover_ok)):
+                     type="primary",
+                     disabled=not (reviewed and cutover_ok and _override_failed)):
             box = st.empty()
             lines: list[tuple[str, bool]] = []
 

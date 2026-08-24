@@ -23,6 +23,11 @@ def _list(data, *keys) -> list:
 
 
 def _matches(name: str, prefix: str) -> bool:
+    # An empty prefix would make startswith() true for EVERY object, turning a
+    # scoped teardown into "delete the tenant". cleanup() refuses that outright;
+    # this stays defensive in case _matches is reused elsewhere.
+    if not prefix:
+        return False
     return bool(name) and name.lower().startswith(prefix.lower())
 
 
@@ -30,7 +35,15 @@ def cleanup(prefix: str, central=None, classic=None,
             on_step: Optional[Callable[[str, bool, str], None]] = None
             ) -> list[tuple[str, bool, str]]:
     """Delete <prefix>* objects across New Central (central) and Classic
-    (classic). Either client may be None. Returns [(label, ok, detail)]."""
+    (classic). Either client may be None. Returns [(label, ok, detail)].
+
+    Refuses an empty/whitespace prefix: this function issues unattended DELETEs
+    against a live tenant, and an empty prefix matches every named object."""
+    prefix = (prefix or "").strip()
+    if not prefix:
+        raise ValueError(
+            "cleanup() requires a non-empty prefix — an empty prefix matches "
+            "every object in the tenant.")
     results: list[tuple[str, bool, str]] = []
 
     def step(label: str, fn) -> None:

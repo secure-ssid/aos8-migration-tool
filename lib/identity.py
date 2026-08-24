@@ -41,10 +41,61 @@ def identity_header() -> str:
 
 SHARED_USER = "team"
 
+# Every mode the app knows how to gate. Anything else is a CONFIGURATION ERROR
+# and must fail closed — a typo like 'passwrod' previously fell through every
+# gate and served the console unauthenticated.
+VALID_MODES = ("local", "password", "accounts", "proxy")
+
+# Minimum length for the shared gate password. It protects a tool that can
+# rewrite live customer tenants, so it gets a passphrase, not a word.
+MIN_APP_PASSWORD_LEN = 16
+
+# Placeholders shipped in .env.example / docs. Treated as "not configured" so a
+# `cp .env.example .env` deploy can never serve a publicly known password.
+_PLACEHOLDER_PASSWORDS = frozenset({
+    "change-me-to-a-strong-shared-password",
+    "change-me",
+    "changeme",
+    "password",
+})
+
 
 def auth_mode() -> str:
-    """'local' (default), 'password' (shared gate), 'accounts' (login), 'proxy'."""
+    """'local' (default), 'password' (shared gate), 'accounts' (login), 'proxy'.
+
+    Returned verbatim (lowercased) even when invalid — callers use
+    ``auth_mode_error()`` to fail closed, so the bad value stays visible in the
+    operator-facing error instead of being silently coerced to a default."""
     return os.environ.get("AOS8_AUTH_MODE", "local").strip().lower()
+
+
+def auth_mode_error() -> str | None:
+    """Why the deployment cannot be served, or None when it's usable.
+
+    Fail-closed configuration gate covering BOTH the mode name and, for
+    ``password`` mode, the strength of the configured shared password."""
+    mode = auth_mode()
+    if mode not in VALID_MODES:
+        return (f"AOS8_AUTH_MODE is set to '{mode}', which is not a valid mode. "
+                f"Use one of: {', '.join(VALID_MODES)}.")
+    if mode == "password":
+        return app_password_error()
+    return None
+
+
+def app_password_error() -> str | None:
+    """Why the shared password is unusable, or None when it's acceptable."""
+    expected = os.environ.get("AOS8_APP_PASSWORD", "")
+    if not expected:
+        return ("AOS8_AUTH_MODE=password requires AOS8_APP_PASSWORD to be set. "
+                "Nobody can sign in until it is.")
+    if expected.strip().lower() in _PLACEHOLDER_PASSWORDS:
+        return ("AOS8_APP_PASSWORD is still the example placeholder. Set a real "
+                "shared passphrase before exposing this console.")
+    if len(expected) < MIN_APP_PASSWORD_LEN:
+        return (f"AOS8_APP_PASSWORD is shorter than {MIN_APP_PASSWORD_LEN} "
+                f"characters. Use a longer shared passphrase.")
+    return None
 
 
 def requires_login() -> bool:
@@ -54,12 +105,15 @@ def requires_login() -> bool:
 
 def check_app_password(password: str) -> bool:
     """Constant-time check against the single shared password
-    (``AOS8_APP_PASSWORD``). Fail-closed: with no password configured, nobody
-    gets in."""
-    expected = os.environ.get("AOS8_APP_PASSWORD", "")
-    if not expected:
+    (``AOS8_APP_PASSWORD``). Fail-closed: with no password configured — or a
+    placeholder/too-weak one — nobody gets in."""
+    if app_password_error():
         return False
-    return hmac.compare_digest(password or "", expected)
+    expected = os.environ.get("AOS8_APP_PASSWORD", "")
+    # compare_digest on str raises TypeError for non-ASCII input, which would
+    # surface as a crash on a pasted unicode password — compare bytes instead.
+    return hmac.compare_digest((password or "").encode("utf-8"),
+                               expected.encode("utf-8"))
 
 
 def is_multiuser() -> bool:
@@ -96,7 +150,11 @@ def current_user() -> str | None:
         return SHARED_USER if st.session_state.get("_authenticated") else None
     if mode == "accounts":
         return st.session_state.get("_auth_user")
-    return _header_identity()  # proxy
+    if mode == "proxy":
+        return _header_identity()
+    # Unknown mode — no identity. app.py refuses to serve these deployments;
+    # returning None here keeps every other caller fail-closed too.
+    return None
 
 
 def user_slug(user: str) -> str:

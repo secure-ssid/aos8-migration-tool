@@ -10,24 +10,41 @@ session isn't signed in yet. Three sub-states, driven by session_state:
 Identity established here flows into the per-user encrypted credstore and audit
 log via lib.identity.current_user() (which reads _auth_user in accounts mode).
 """
+import os
+
 import streamlit as st
 
 from lib import accounts, identity, mailer
 
 
+def console_codes_allowed() -> bool:
+    """Dev-only escape hatch. Printing a live verification code to the server
+    log lets anyone with log access activate a pending registration, so it is
+    OFF unless explicitly enabled."""
+    return os.environ.get("AOS8_ALLOW_CONSOLE_CODES", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _deliver_code(email: str, code: str) -> bool:
-    """Email the verification code; on failure (or no SMTP) log it to the server
-    console as a dev fallback. Returns True if it was actually emailed."""
+    """Email the verification code. Returns True if it was actually emailed.
+
+    Fails CLOSED: when delivery fails the code is not logged, because it stays
+    valid and the log is a far wider audience than the mailbox. Set
+    AOS8_ALLOW_CONSOLE_CODES=true for local development only."""
     subject = "Your AOS 8 Migration Console verification code"
     body = (f"Your verification code is: {code}\n\n"
             f"It expires in {accounts.CODE_TTL_MINUTES} minutes. "
             f"If you didn't request this, ignore this email.")
     ok, err = mailer.send(email, subject, body)
     if not ok:
-        # Dev fallback only — never shown in the UI. Whoever can read the server
-        # logs can see it; production must configure SMTP.
-        print(f"[auth] verification code for {email}: {code} "
-              f"(email not sent: {err})", flush=True)
+        if console_codes_allowed():
+            print(f"[auth] verification code for {email}: {code} "
+                  f"(email not sent: {err})", flush=True)
+        else:
+            # No code material in the log — just the delivery failure.
+            print(f"[auth] verification email to {email} FAILED: {err}. "
+                  f"Configure SMTP (or set AOS8_ALLOW_CONSOLE_CODES=true for "
+                  f"local development).", flush=True)
     return ok
 
 
@@ -39,11 +56,15 @@ def _signed_in(email: str) -> None:
 
 
 def _verify_screen(email: str) -> None:
-    st.markdown(f"#### Verify your email")
+    st.markdown("#### Verify your email")
     st.caption(f"Enter the 6-digit code we sent to **{email}**.")
     if not mailer.configured():
-        st.warning("Email delivery isn't configured on this server — the code "
-                   "was written to the server console (dev mode).")
+        if console_codes_allowed():
+            st.warning("Email delivery isn't configured on this server — the code "
+                       "was written to the server console (dev mode).")
+        else:
+            st.error("Email delivery isn't configured on this server, so no code "
+                     "could be sent. Ask an administrator to configure SMTP.")
     code = st.text_input("Verification code", max_chars=6, key="verify_code_input")
     c1, c2, c3 = st.columns([1, 1, 1])
     if c1.button("Verify", type="primary", use_container_width=True):
@@ -136,8 +157,15 @@ def render_gate() -> bool:
 
 
 def logout() -> None:
-    for k in ("_authenticated", "_auth_user", "_pending_email"):
+    """Sign out and clear the ENTIRE session.
+
+    Everything the previous operator touched — destination API secrets, Classic
+    access/refresh tokens, the discovered customer config and every derived
+    provisioning/onboarding result — lives in session_state. Popping only the
+    auth flags left all of it readable by whoever signed in next on the same
+    browser session, so wipe the session wholesale and let the next sign-in
+    rebuild it from that user's own encrypted credstore.
+    """
+    for k in list(st.session_state.keys()):
         st.session_state.pop(k, None)
-    # drop any loaded destination creds so the next user starts clean
-    st.session_state["_creds_loaded"] = False
     st.rerun()

@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models import (
     AP, APGroup, ClusterInfo, CustomerConfig, ForwardMode,
-    AuthType, RadiusServer, SSID, VLAN,
+    RadiusServer, SSID, VLAN,
 )
 from .aos8_client import _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named
 

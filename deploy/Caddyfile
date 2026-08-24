@@ -9,6 +9,15 @@
 
 migrate.your-domain.example {
     encode zstd gzip
+
+    # AOS8_AUTH_MODE=proxy trusts an identity header (default X-Forwarded-Email).
+    # A client can send that header itself, so the edge MUST strip it inbound
+    # and only a verified auth layer may re-add it. These lines are what make
+    # proxy mode safe — do not remove them.
+    request_header -X-Forwarded-Email
+    request_header -X-Forwarded-User
+    request_header -X-Auth-Request-Email
+
     reverse_proxy 127.0.0.1:8501
 
     # Internal/offline host without public DNS? Use Caddy's local CA instead of
