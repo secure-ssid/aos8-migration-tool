@@ -123,6 +123,19 @@ Multiple results from [[Glossary|opmode]] → AuthType mapping:
   add the new GW/AP IPs as RADIUS clients ([[RADIUS and NAD Changes|NAD]]).
 - All resolved → **PASS**.
 
+## Captive-portal SSIDs — `_check_captive_portal`
+Classic destination only (skipped for [[Destination - New Central|New Central]]).
+An SSID with a resolved external captive portal (`captive_portal_url` — MC: the
+virtual-ap names an aaa-profile, whose `initial-role` user-role carries
+`captive-portal <profile>`, resolved to the `aaa authentication captive-portal`
+profile when its `login-page` is an off-box URL; Instant: `captive-portal
+external [profile "X"]` / `captive-portal-profile "X"` on the ssid-profile) →
+**FAIL — critical, no override**: Classic Central's `full_wlan` API has no
+external-captive-portal field this tool can populate, so the guest SSID would
+be created as a fully OPEN network. **Remediate:** migrate these SSIDs to
+New Central, or build the captive-portal profile by hand in Classic and bind
+it before enabling the SSID.
+
 ## Unsupported source fields — `_check_unsupported_fields`
 Paste mode only: `wlan virtual-ap` / `ssid-profile` lines the migration cannot
 represent land in `CustomerConfig.unsupported_fields` → **FAIL** (overridable):
