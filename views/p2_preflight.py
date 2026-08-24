@@ -3,11 +3,99 @@ Step 2: Preflight compatibility checks.
 """
 import streamlit as st
 
-from lib import compatibility
+from lib import audit, compatibility
 from lib.models import VLAN
 from lib.translator import translate
 from lib.styles import (page_header, section_label, check_card, mono_caption,
-                        FAINT, TEXT, esc)
+                        FAINT, MUTED, TEXT, WARN, esc)
+
+
+# ─────────────────── Provision gate (finding #5) ───────────────────
+# Pure functions so the gate contract is unit-tested directly
+# (tests/test_preflight_gate.py), mirroring the Step 4 cutover gate.
+
+def provision_blockers(results, acks) -> list[str]:
+    """Why provisioning must stay locked. `acks` maps a non-critical
+    blocker's check name to the operator's free-text justification (blank is
+    not a justification). Critical blockers have no override at all. Empty
+    list = provisioning may proceed."""
+    blockers = []
+    for r in results:
+        if r.status != compatibility.Status.FAIL:
+            continue
+        if getattr(r, "critical", False):
+            blockers.append(f"Critical blocker (cannot be overridden): {r.name}")
+        elif not (acks.get(r.name) or "").strip():
+            blockers.append(f"Blocker not acknowledged: {r.name}")
+    return blockers
+
+
+def acknowledge_blocker(result, reason, *, user=None, customer=None,
+                        record=audit.record) -> str:
+    """Record the operator's written acknowledgement of one non-critical
+    blocker and return the stored reason. Raises ValueError on a blank
+    reason; propagates AuditWriteError — an acknowledgement without a
+    durable audit record must not take effect."""
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("a written reason is required")
+    record("preflight-blocker-ack",
+           user=user, customer=customer,
+           check=result.name, message=(result.message or "")[:200],
+           reason=reason)
+    return reason
+
+
+def _render_override_gate(fails, acks) -> None:
+    """Per-risk acknowledgements for the non-critical blockers: each one
+    needs its own written reason, and every acknowledgement writes an audit
+    record with the operator's identity. The global 'override everything'
+    checkbox this replaces waived every blocker at once and left no trail.
+    Critical blockers never reach this UI — they cannot be overridden."""
+    overridable = [r for r in fails if not getattr(r, "critical", False)]
+    if not overridable:
+        return
+    with st.container(border=True):
+        st.markdown(
+            f'<div style="font-weight:600;color:{WARN};margin-bottom:0.4rem;">'
+            f'🔒 Blocker acknowledgements — {len(overridable)} item(s) need an '
+            f'individual written reason before provisioning</div>',
+            unsafe_allow_html=True)
+        for r in overridable:
+            reason = (acks.get(r.name) or "").strip()
+            if reason:
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:{MUTED};margin:3px 0;">'
+                    f'✅ <s>{esc(r.name)}</s> — acknowledged: '
+                    f'<i>{esc(reason)}</i></div>', unsafe_allow_html=True)
+                continue
+            st.markdown(
+                f'<div style="font-size:12.5px;color:{TEXT};margin:5px 0 2px;">'
+                f'❌ <b>{esc(r.name)}</b></div>', unsafe_allow_html=True)
+            reason_in = st.text_input(
+                "Why is it safe to provision despite this blocker?",
+                key=f"p2_ack_reason_{abs(hash(r.name))}",
+                placeholder="Required — e.g. 'WLAN will be rebuilt by hand in "
+                            "Central before cutover'")
+            if st.button("Acknowledge this blocker",
+                         key=f"p2_ack_btn_{abs(hash(r.name))}"):
+                if not reason_in.strip():
+                    st.error("A written reason is required — the acknowledgement "
+                             "is an audit record, not a checkbox.")
+                else:
+                    try:
+                        acks[r.name] = acknowledge_blocker(
+                            r, reason_in,
+                            user=st.session_state.get("_user"),
+                            customer=st.session_state.get("customer_name"))
+                    except audit.AuditWriteError as e:
+                        # stashed because the rerun below would wipe a
+                        # same-render warning — and the ack does NOT take
+                        # effect when its audit record is missing
+                        st.session_state["p2_ack_audit_error"] = str(e)
+                    # no st.rerun(): the button click already re-runs the
+                    # script, and a mid-render rerun would unmount the
+                    # widgets below and garbage-collect their keyed state
 
 
 def _named_vlan_editor(customer, central) -> None:
@@ -103,8 +191,17 @@ def render():
 
     if "preflight_results" not in st.session_state:
         with st.spinner("Running checks..."):
-            st.session_state["preflight_results"] = compatibility.run_all(customer, central)
-    results = st.session_state["preflight_results"]
+            # results + acknowledgements live in ONE session entry, so every
+            # place that clears the cached results (Re-run, the VLAN remap
+            # above, reset_downstream_state) clears stale acks with them —
+            # an ack from a previous run must never waive a fresh blocker
+            st.session_state["preflight_results"] = {
+                "results": compatibility.run_all(customer, central),
+                "acks": {},
+            }
+    _cached = st.session_state["preflight_results"]
+    results = _cached["results"]
+    acks = _cached["acks"]
 
     fails  = [r for r in results if r.status == compatibility.Status.FAIL]
     warns  = [r for r in results if r.status == compatibility.Status.WARN]
@@ -130,6 +227,13 @@ def render():
         section_label("Blockers — must fix")
         for r in fails:
             check_card("⛔", r.name, r.message, r.detail or "", variant="red")
+            if getattr(r, "critical", False):
+                mono_caption("NOT OVERRIDABLE — RESOLVE AT THE SOURCE AND RE-RUN")
+        _render_override_gate(fails, acks)
+        _ack_err = st.session_state.pop("p2_ack_audit_error", None)
+        if _ack_err:
+            st.warning("Acknowledgement did NOT take effect — its audit "
+                       f"record could not be written: {_ack_err}")
 
     if warns:
         section_label("Warnings — review before cutover")
@@ -157,17 +261,18 @@ def render():
         st.rerun()
 
     if fails:
-        override = col_mid.checkbox(
-            "Override blockers — I understand the risk and will resolve them before cutover",
-            key="preflight_override",
-        )
+        # computed AFTER the acknowledgement UI above: ack buttons mutate
+        # `acks` earlier in this same run, and the gate must see that
+        blockers = provision_blockers(results, acks)
         if col_next.button("Provision →", type="primary", use_container_width=True,
-                           disabled=not override):
+                           disabled=bool(blockers)):
             st.session_state["step"] = 2
             st.rerun()
-        if not override:
+        if blockers:
             with col_mid:
-                mono_caption("RESOLVE BLOCKERS OR OVERRIDE TO CONTINUE")
+                mono_caption(
+                    f"{len(blockers)} BLOCKER(S) HOLDING — CRITICAL ONES MUST BE "
+                    "FIXED, THE REST ACKNOWLEDGED INDIVIDUALLY")
     else:
         if col_next.button("Provision →", type="primary", use_container_width=True):
             st.session_state["step"] = 2
