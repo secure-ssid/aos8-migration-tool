@@ -7,7 +7,8 @@ from dataclasses import asdict
 
 import streamlit as st
 
-from lib.aos8_client import AOS8Client, AOS8APIError, is_model_compatible
+from lib.aos8_client import (AOS8Client, AOS8APIError, AOS8TLSError,
+                             is_model_compatible)
 from lib.aos8_parser import parse_customer_config, parse_instant_config
 from lib.translator import translate
 from lib.styles import (
@@ -331,28 +332,36 @@ def render():
                 help="Mobility Conductor: /md (or a specific node). Standalone controller: /mm/mynode",
             )
             insecure_tls = st.checkbox(
-                "Trust self-signed certificate (skip TLS verification)",
+                "Skip TLS verification entirely (not recommended)",
                 key="mc_insecure_tls",
-                help="Lab/controller-with-self-signed-cert only. The connection "
-                     "carries controller admin credentials, so prefer setting "
-                     "AOS8_CA_BUNDLE to the controller's CA and leaving this off.",
+                help="Accepts any certificate, including an attacker's. You "
+                     "almost never need this: if the controller uses a "
+                     "self-signed cert, connect and trust its fingerprint when "
+                     "prompted — that stays protected against interception.",
             )
-        _tls_note = ("self-signed cert accepted (verification OFF)" if insecure_tls
-                     else "TLS certificate verified")
+
+        _trusted_fp = st.session_state.get("mc_trusted_fp", {}).get(mc_ip)
+        if insecure_tls:
+            _tls_note = "TLS verification OFF — any certificate accepted"
+        elif _trusted_fp:
+            _tls_note = f"certificate pinned · {_trusted_fp[:17]}…"
+        else:
+            _tls_note = "TLS certificate verified"
         st.markdown(
             f'<div style="font-size:11.5px;color:{FAINT};margin:-0.3rem 0 0.7rem;">'
             f'REST API on port 4343 · {_tls_note} · UIDARUBA session token</div>',
             unsafe_allow_html=True,
         )
 
-        if st.button("Connect & Pull Config", type="primary",
-                     disabled=not (mc_ip and mc_user and mc_pass)):
+        def _run_connect(pin: str | None):
+            """Connect + pull. Returns True when the caller should stop."""
             with st.spinner(f"Connecting to {mc_ip} ..."):
                 try:
                     requested_path = config_path.strip() or "/md"
                     client = AOS8Client(mc_ip, mc_user, mc_pass,
                                         config_path=requested_path,
-                                        verify=False if insecure_tls else None)
+                                        verify=False if insecure_tls else None,
+                                        pin_fingerprint=pin)
                     client.connect()
                     customer_cfg = client.pull_config()
                     # pull_config may auto-detect the real config node when the
@@ -379,6 +388,14 @@ def render():
                             "exact node in *Advanced — API options* (conductor: "
                             "`/md/<node>`; standalone controller: `/mm/mynode`). "
                             "Paste mode works on any box.")
+                except AOS8TLSError as e:
+                    if e.fingerprint and not pin:
+                        # Recoverable: let the operator inspect and pin the cert
+                        # instead of dead-ending on a self-signed certificate.
+                        st.session_state["mc_pending_fp"] = {
+                            "ip": mc_ip, "fingerprint": e.fingerprint}
+                        st.rerun()
+                    st.error(f"TLS error: {e}")
                 except AOS8APIError as e:
                     st.error(f"AOS 8 API error: {e}")
                     st.info("If port 4343 is firewalled or the API is disabled, "
@@ -387,6 +404,36 @@ def render():
                     st.error(f"Connection error: {e}")
                     st.info("Verify port 4343 is reachable from this machine, "
                             "then retry — or use paste mode.")
+
+        _pending = st.session_state.get("mc_pending_fp")
+        if _pending and _pending.get("ip") == mc_ip:
+            st.warning(
+                f"**{mc_ip} presented a certificate that no trusted CA vouches "
+                f"for.** That is normal for an AOS 8 controller using its "
+                f"factory self-signed certificate — but it is also what "
+                f"interception looks like, so confirm the fingerprint below "
+                f"matches the controller before trusting it.")
+            st.code(_pending["fingerprint"], language=None)
+            st.caption("Verify on the controller CLI with `show crypto pki "
+                       "servercert` (or via console/out-of-band access). Once "
+                       "trusted, this exact certificate is pinned — a different "
+                       "certificate on a later connection will be rejected.")
+            tc1, tc2 = st.columns([1, 3])
+            if tc1.button("Trust this certificate", type="primary"):
+                trusted = dict(st.session_state.get("mc_trusted_fp", {}))
+                trusted[mc_ip] = _pending["fingerprint"]
+                st.session_state["mc_trusted_fp"] = trusted
+                st.session_state.pop("mc_pending_fp", None)
+                st.session_state["mc_retry_connect"] = True
+                st.rerun()
+            if tc2.button("Cancel"):
+                st.session_state.pop("mc_pending_fp", None)
+                st.rerun()
+
+        if (st.button("Connect & Pull Config", type="primary",
+                      disabled=not (mc_ip and mc_user and mc_pass))
+                or st.session_state.pop("mc_retry_connect", False)):
+            _run_connect(st.session_state.get("mc_trusted_fp", {}).get(mc_ip))
     else:
         mc_ip = st.text_input(
             "MC IP address (RADIUS NAD reference only)",

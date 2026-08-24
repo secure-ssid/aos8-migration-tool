@@ -12,10 +12,14 @@ API mechanics (ArubaOS 8 REST API guide):
 
 Falls back to CLI paste mode (aos8_parser) if the API is unreachable.
 """
+import hashlib
 import os
 import re
+import socket
+import ssl
 import requests
 import urllib3
+from requests.adapters import HTTPAdapter
 from typing import Any, Optional
 
 from .models import (
@@ -49,6 +53,58 @@ def default_tls_verify() -> bool | str:
         return bundle
     return not _env_truthy("AOS8_INSECURE_TLS")
 
+
+def fetch_cert_fingerprint(ip: str, port: Optional[int] = None,
+                           timeout: int = 10) -> str:
+    """Return the SHA-256 fingerprint of the cert ``ip`` presents.
+
+    Deliberately does not validate the chain — the whole point is to inspect a
+    certificate that failed validation so an operator can eyeball it and decide
+    whether to pin it. Formatted as colon-separated uppercase hex, the same way
+    the controller prints it under ``show crypto pki`` .
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((ip, port or AOS8_API_PORT),
+                                  timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=ip) as tls:
+            der = tls.getpeercert(binary_form=True)
+    if not der:
+        raise AOS8APIError(f"{ip} did not present a TLS certificate")
+    digest = hashlib.sha256(der).hexdigest().upper()
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+
+def normalize_fingerprint(fp: str) -> str:
+    """Accept a fingerprint with or without colons/spaces, in any case."""
+    return re.sub(r"[^0-9A-Fa-f]", "", fp or "").upper()
+
+
+class _FingerprintAdapter(HTTPAdapter):
+    """Pin the exact server certificate instead of validating a CA chain.
+
+    Self-signed controller certs cannot be verified against any CA, but they
+    *can* be pinned: urllib3 hashes the presented cert and compares it to
+    ``assert_fingerprint``, so a MITM with a different cert is still rejected.
+    That makes trust-on-first-use meaningfully safer than ``verify=False``.
+    """
+
+    def __init__(self, fingerprint: str, **kwargs):
+        self.fingerprint = normalize_fingerprint(fingerprint)
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["assert_fingerprint"] = self.fingerprint
+        kwargs["cert_reqs"] = "CERT_NONE"
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        kwargs["assert_fingerprint"] = self.fingerprint
+        kwargs["cert_reqs"] = "CERT_NONE"
+        return super().proxy_manager_for(*args, **kwargs)
+
+
 # AP models known to be incompatible with AOS 10.
 # NOTE: verify against Aruba's official AOS 10 supported-platform matrix for
 # each release; matching is exact-token (country variants like -US stripped).
@@ -75,11 +131,28 @@ class AOS8APIError(Exception):
     pass
 
 
+class AOS8TLSError(AOS8APIError):
+    """TLS verification failed. Carries the cert so the UI can offer pinning.
+
+    ``fingerprint`` is None when the certificate could not be retrieved at all
+    (host unreachable, port closed, not speaking TLS) — in that case there is
+    nothing to trust and the operator has a connectivity problem, not a cert
+    problem.
+    """
+
+    def __init__(self, message: str, fingerprint: Optional[str] = None):
+        super().__init__(message)
+        self.fingerprint = fingerprint
+
+
 class AOS8Client:
     def __init__(self, ip: str, username: str, password: str,
                  config_path: str = "/md", timeout: int = 15,
-                 verify: bool | str | None = None):
-        self.base = f"https://{ip}:{AOS8_API_PORT}"
+                 verify: bool | str | None = None,
+                 pin_fingerprint: Optional[str] = None,
+                 port: Optional[int] = None):
+        self.port = port or AOS8_API_PORT
+        self.base = f"https://{ip}:{self.port}"
         self.ip = ip
         self.username = username
         self.password = password
@@ -88,8 +161,20 @@ class AOS8Client:
         self.uidaruba: Optional[str] = None
         self.pull_method = "object-api"  # or "showcommand" after a fallback pull
         self.session = requests.Session()
-        # Verify by default; callers (and env) may relax it explicitly.
-        self.session.verify = default_tls_verify() if verify is None else verify
+        self.pinned_fingerprint = (normalize_fingerprint(pin_fingerprint)
+                                   if pin_fingerprint else None)
+        if not self.pinned_fingerprint:
+            env_pin = os.environ.get("AOS8_CERT_FINGERPRINT", "").strip()
+            self.pinned_fingerprint = normalize_fingerprint(env_pin) or None
+        if self.pinned_fingerprint:
+            # Pinning replaces chain validation: urllib3 rejects any cert whose
+            # hash differs, so this authenticates the controller without a CA.
+            self.session.verify = False
+            self.session.mount("https://",
+                               _FingerprintAdapter(self.pinned_fingerprint))
+        else:
+            # Verify by default; callers (and env) may relax it explicitly.
+            self.session.verify = default_tls_verify() if verify is None else verify
 
     # ─────────────────── Auth ───────────────────
 
@@ -101,12 +186,25 @@ class AOS8Client:
                 timeout=self.timeout,
             )
         except requests.exceptions.SSLError as e:
-            raise AOS8APIError(
+            if self.pinned_fingerprint:
+                raise AOS8TLSError(
+                    f"{self.ip} presented a certificate that does not match the "
+                    f"pinned fingerprint {self.pinned_fingerprint}. Either the "
+                    f"controller's certificate was replaced, or the connection "
+                    f"is being intercepted. Re-confirm the fingerprint on the "
+                    f"controller with 'show crypto pki' before trusting it."
+                ) from e
+            try:
+                fingerprint = fetch_cert_fingerprint(
+                    self.ip, port=self.port, timeout=self.timeout)
+            except Exception:
+                fingerprint = None
+            raise AOS8TLSError(
                 f"TLS verification failed for {self.ip}: {e}. Controllers "
                 f"usually present a self-signed certificate — point "
-                f"AOS8_CA_BUNDLE at the controller's CA to keep the connection "
-                f"verified, or tick 'Trust self-signed certificate' (lab only, "
-                f"equivalent to AOS8_INSECURE_TLS=true)."
+                f"AOS8_CA_BUNDLE at the controller's CA, or trust this "
+                f"specific certificate by its fingerprint.",
+                fingerprint=fingerprint,
             ) from e
         resp.raise_for_status()
         data = resp.json()

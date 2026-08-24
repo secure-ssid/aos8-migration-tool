@@ -5,7 +5,6 @@ again — a fail-open auth gate, a silently accepted placeholder password, a
 session that survived sign-out, a destructive cleanup with no scope, and SSIDs
 that lost their protection in translation.
 """
-import importlib
 
 import pytest
 
@@ -192,11 +191,15 @@ def test_no_captive_portal_produces_no_check():
 
 
 # ── AOS 8 TLS verification defaults to ON ───────────────────────────────────
+# NOTE: no importlib.reload here. default_tls_verify() reads os.environ at call
+# time, and reloading the module rebinds its classes — which silently breaks
+# isinstance/pytest.raises checks in every other test module for the rest of
+# the session.
 def test_tls_verification_on_by_default(monkeypatch):
     monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
     monkeypatch.delenv("AOS8_INSECURE_TLS", raising=False)
+    monkeypatch.delenv("AOS8_CERT_FINGERPRINT", raising=False)
     import lib.aos8_client as ac
-    importlib.reload(ac)
     assert ac.default_tls_verify() is True
     assert ac.AOS8Client("10.0.0.1", "admin", "pw").session.verify is True
 
@@ -204,7 +207,6 @@ def test_tls_verification_on_by_default(monkeypatch):
 def test_ca_bundle_is_used_when_set(monkeypatch):
     monkeypatch.setenv("AOS8_CA_BUNDLE", "/etc/ssl/controller-ca.pem")
     import lib.aos8_client as ac
-    importlib.reload(ac)
     assert ac.default_tls_verify() == "/etc/ssl/controller-ca.pem"
 
 
@@ -212,7 +214,6 @@ def test_insecure_tls_requires_explicit_opt_in(monkeypatch):
     monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
     monkeypatch.setenv("AOS8_INSECURE_TLS", "true")
     import lib.aos8_client as ac
-    importlib.reload(ac)
     assert ac.default_tls_verify() is False
 
 
@@ -220,7 +221,6 @@ def test_caller_can_override_verification_per_connection(monkeypatch):
     monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
     monkeypatch.delenv("AOS8_INSECURE_TLS", raising=False)
     import lib.aos8_client as ac
-    importlib.reload(ac)
     assert ac.AOS8Client("10.0.0.1", "a", "b", verify=False).session.verify is False
 
 

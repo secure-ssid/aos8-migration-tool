@@ -26,7 +26,11 @@ RUN install -d -o appuser -g appuser -m 700 /home/appuser/.aos8-migration
 #                             unset in a multi-user mode => persistence is OFF
 #   AOS8_CA_BUNDLE=...        CA bundle for verifying the AOS 8 controller cert
 #                             (verification is ON by default)
-#   AOS8_INSECURE_TLS=true    lab-only escape hatch; disables that verification
+#   AOS8_CERT_FINGERPRINT=... pin the controller cert by SHA-256 fingerprint —
+#                             the headless equivalent of the Step 1 trust
+#                             prompt, and the right answer for self-signed certs
+#   AOS8_INSECURE_TLS=true    lab-only escape hatch; accepts ANY certificate.
+#                             Prefer AOS8_CERT_FINGERPRINT.
 #   AOS8_ALLOW_CONSOLE_CODES=true
 #                             dev-only; prints email verification codes to the
 #                             container log. Never enable in production.

@@ -48,6 +48,29 @@ show controller-ip
 show aaa authentication-server all
 ```
 
+### Controller certificate trust
+
+That login carries controller admin credentials, so the certificate is
+verified. AOS 8 controllers normally ship a **factory self-signed certificate**
+that no CA vouches for, and the tool handles that without asking you to turn
+verification off:
+
+1. Connect. If the certificate can't be chained to a CA, Step 1 stops and shows
+   its **SHA-256 fingerprint** instead of failing outright.
+2. Confirm the fingerprint against the controller — `show crypto pki
+   servercert` over console or SSH.
+3. Click **Trust this certificate**. That exact certificate is then *pinned*
+   for the session and the pull continues automatically.
+
+Pinning matters: after trusting, a connection presenting a **different**
+certificate is refused. An intercepting proxy can't silently take over the
+session the way it could with verification simply switched off.
+
+For headless or automated runs, set `AOS8_CERT_FINGERPRINT` (colons optional)
+to pin without the prompt, or `AOS8_CA_BUNDLE` if your controller uses a
+certificate from your own CA. `AOS8_INSECURE_TLS=true` still exists but accepts
+any certificate at all — you almost certainly want fingerprint pinning instead.
+
 ## New Central API Credentials
 
 Create API client credentials in HPE GreenLake (Manage → API) with access to
@@ -211,7 +234,8 @@ test suite on Python 3.12 and 3.13 for each push and pull request.
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
 | `AOS8_ALLOW_CONSOLE_CODES` | _(unset = off)_ | **Dev only.** Print verification codes to the server log when email delivery fails. Off by default so live codes never reach logs |
 | `AOS8_CA_BUNDLE` | _(unset)_ | CA bundle used to verify the AOS 8 controller certificate (verification is on by default) |
-| `AOS8_INSECURE_TLS` | _(unset = off)_ | Lab escape hatch — disables AOS 8 certificate verification entirely |
+| `AOS8_CERT_FINGERPRINT` | _(unset)_ | Pin the controller's certificate by SHA-256 fingerprint — for headless runs where nobody can click the trust prompt. Colons optional |
+| `AOS8_INSECURE_TLS` | _(unset = off)_ | Lab escape hatch — accepts **any** certificate. Prefer `AOS8_CERT_FINGERPRINT`, which is just as convenient and still blocks interception |
 | `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
 | `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address); do **not** use @hpe.com |
