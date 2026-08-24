@@ -224,9 +224,12 @@ class CentralClient:
         try:
             body = resp.json()
         except ValueError:
-            # a 2xx with a non-JSON body is still a success — never let a
-            # JSONDecodeError masquerade as a failed call
-            return {"_raw": resp.text[:300]}
+            # a 2xx with a non-JSON body is a protocol violation — every API
+            # response is JSON. Fail closed rather than flattening a success
+            # out of a body the caller cannot trust.
+            raise CentralAPIError(
+                f"{method} {path} returned 2xx with a non-JSON body — "
+                f"treated as failure: {resp.text[:300]}")
         return {"items": body} if isinstance(body, list) else body
 
     def _get(self, path, params=None):

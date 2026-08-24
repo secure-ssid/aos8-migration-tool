@@ -198,12 +198,15 @@ def test_central_401_then_429_both_get_their_retry(mock_api):
     assert c._get("/x")["ok"] is True        # separate flags: both retried
 
 
-def test_central_2xx_non_json_body_is_success(mock_api):
+def test_central_2xx_non_json_body_fails_closed(mock_api):
+    """A 2xx that is not JSON is a protocol violation, not a success — the
+    corrupt body must fail closed instead of being flattened into a dict."""
     mock_api.app = lambda m, p, q, b: (
         _token_response() if p.endswith("oauth2")
         else (200, {"Content-Type": "text/plain"}, "OK"))
     c = _central(mock_api)
-    assert c._get("/x") == {"_raw": "OK"}
+    with pytest.raises(CentralAPIError, match="non-JSON body"):
+        c._get("/x")
 
 
 def test_is_duplicate_ignores_url_path():
@@ -288,6 +291,16 @@ def test_classic_firmware_v2_falls_back_to_v1_on_404(mock_api):
     c = ClassicCentralClient(mock_api.url, "tok")
     c.set_firmware_compliance("g1", "10.7.0.0")
     assert any("firmware/v1" in p for _m, p in mock_api.calls)
+
+
+def test_classic_2xx_non_json_body_fails_closed(mock_api):
+    """A 2xx that is not JSON must raise, not flatten to {} — otherwise a
+    corrupt body reads as success and create_group re-POSTs."""
+    mock_api.app = lambda m, p, q, b: (
+        200, {"Content-Type": "text/plain"}, "OK")
+    c = ClassicCentralClient(mock_api.url, "tok")
+    with pytest.raises(ClassicCentralAPIError, match="non-JSON body"):
+        c._get("/x")
 
 
 # ─────────────────── GreenLake ───────────────────

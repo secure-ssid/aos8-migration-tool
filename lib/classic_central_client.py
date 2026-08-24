@@ -239,9 +239,12 @@ class ClassicCentralClient:
         try:
             body = resp.json()
         except ValueError:
-            # a 2xx with a non-JSON body is still a success — flattening it to
-            # {} makes list_group_names return [] and create_group re-POST
-            return {"_raw": resp.text[:300]}
+            # a 2xx with a non-JSON body is a protocol failure — every API
+            # response here is JSON. Fail closed: flattening to {} made
+            # list_group_names return [] and create_group re-POST.
+            raise ClassicCentralAPIError(
+                f"{method} {path} returned 2xx with a non-JSON body — "
+                f"failures are not flattened: {resp.text[:300]}")
         return {"items": body} if isinstance(body, list) else body
 
     def _get(self, path, params=None):
