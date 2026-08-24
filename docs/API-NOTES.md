@@ -5,9 +5,21 @@ caveats baked into the clients. Paths below are relative to each platform's base
 URL. The three cloud clients (New Central, Classic, GLP) raise on unexpected
 failure (errors are recorded per step, not swallowed) and auto-retry once on
 401 (re-auth/refresh) and once on 429 (Retry-After; both the delay-seconds and
-HTTP-date forms are tolerated). The AOS 8 client re-logins once on a 401
-(covers out-of-band session invalidation mid-pull) but has no 429 handling —
-its calls are short-lived reads inside one login session.
+HTTP-date forms are tolerated). A **2xx with a non-JSON body raises** in both
+Central clients — every API response here is JSON, so an unparseable success
+body is a protocol violation, never flattened into a fake success. The Step 1
+probe adds **response-schema validation**: a collection endpoint answering
+anything but a list of objects (or objects missing their name key) FAILs the
+probe row instead of reading as "0 resources readable". Destination base URLs
+are gated by `lib/http_base.py`: only HPE/Aruba hosts
+(`arubanetworks.com`, `cloud.hpe.com`, `greenlake.hpe.com`) are accepted,
+`http://` is refused except on loopback, and anything else needs
+`AOS8_DEV_MODE` (local dev/test only) — a mistyped base URL can never ship a
+bearer token to an unintended or cleartext endpoint. The AOS 8 client
+re-logins once on a 401 (covers out-of-band session invalidation mid-pull)
+but has no 429 handling — its calls are short-lived reads inside one login
+session. Controller TLS verification is ON by default (`AOS8_CA_BUNDLE` to
+point at the controller's CA, `AOS8_DEV_MODE` to opt out in a local lab).
 
 ## Bases and auth
 
@@ -21,6 +33,28 @@ its calls are short-lived reads inside one login session.
 New Central and GLP both use the GreenLake `client_credentials` grant against
 `sso.common.cloud.hpe.com`. Classic Central has **no** client-credentials grant —
 it uses the UI access token, refreshed via a single-use, rotating refresh token.
+
+**Ownership manifest (`lib/manifest.py`).** Objects provisioning creates are
+registered in a per-customer+tenant manifest under
+`~/.aos8-migration/manifests/` (plaintext JSON — names, ids, payload hashes;
+owner-only permissions; written atomically on every mutation so a crash
+mid-provision can't lose the record). **Coverage is currently partial:**
+registration and gating are wired for **SSIDs (both clients) and Classic
+device groups** only. For those kinds, idempotency is no longer name-only:
+reusing or PATCHing a same-named tenant object is allowed only when the
+manifest owns it (created by this tool, or explicitly adopted in Step 3 — an
+audited, per-object decision). A same-named SSID/group with no manifest entry
+raises a **collision refusal** instead of being silently reused or patched.
+Every other resource kind — sites, VLANs, auth servers, device groups, server
+groups, policies, roles, captive portals, gateway clusters — is still
+**name-based reuse** this wave: a same-named object is silently reused as
+before. An unreadable manifest fails closed — it must not read as "we own
+nothing". Cleanup is the mirror image: with a manifest it deletes **only**
+manifest-owned objects, so in practice only owned SSIDs and Classic groups
+are torn down; anything else the run created (and adopted or foreign objects)
+is kept and listed as "not manifest-owned". With no manifest on disk, both
+sides keep the legacy behavior (name-only reuse, prefix-only `zztest-*`
+teardown).
 
 ---
 
@@ -191,7 +225,9 @@ separate migration with its own delete-path semantics, not a drop-in swap.
 | Resolve global scope first | Proves config access before any write; if it fails, `provision()` returns immediately. |
 | Firmware compliance POST → PATCH on 412/duplicate | Already set for the scope; PATCH updates the version. |
 | Site id re-list after create | POST bodies don't always echo the id; a duplicate error triggers a refreshed re-list. |
-| Duplicate scope-maps / objects | "already exists"/"duplicate" **in the response detail** are treated as idempotent success (the URL path is ignored so customer-named objects can't fake it). |
+| Duplicate scope-maps / objects | "already exists"/"duplicate" **in the response detail** are treated as idempotent success (the URL path is ignored so customer-named objects can't fake it). For SSIDs the duplicate-PATCH path is additionally manifest-gated (below). |
+| Same-name SSID reuse / PATCH | With a manifest attached (Step 3 always attaches one), a duplicate SSID is PATCHed only when the manifest owns it; otherwise the step fails with a collision refusal and Step 3 offers explicit adoption. Without a manifest, legacy name-only idempotency. |
+| 2xx with a non-JSON body | Raises `CentralAPIError` — every API response is JSON, so an unparseable success body is a protocol violation, not `{"_raw": ...}`. |
 | Persona/site assignment in the devices phase | Both need claimed APs, so they run with the Step 4 cutover move (also in `phase="all"`). |
 
 ---
@@ -214,6 +250,22 @@ separate migration with its own delete-path semantics, not a drop-in swap.
 
 `OPMODE_CLASSIC` maps `AuthType` → classic opmode (`opensystem`, `wpa2-psk-aes`,
 `wpa3-sae-aes`, `wpa2-aes`, `wpa3-aes-ccm-128`).
+
+`provision()` runs in **two phases** (`phase="config|devices|all"`), mirroring
+the New Central client:
+
+- **`phase="config"`** (Step 3) builds configuration ONLY: inventory pre-add,
+  sites, groups, WLANs, firmware compliance. Nothing touches the APs, so Step
+  3's "no APs are claimed, moved or rebooted" banner is actually true. The
+  manual follow-ups (RADIUS servers, gateway-cluster binding) are config-phase
+  output so the Step 4 cutover gate can track them as outstanding work.
+- **`phase="devices"`** (the Step 4 classic cutover) moves APs into their
+  groups and associates them with the site. It is fail-closed: a group the
+  config phase didn't create aborts that group's move with a "run the config
+  phase first" error instead of building half a tenant, and a failed site
+  read is surfaced as an error rather than reading as "no sites" (which would
+  silently skip every site assignment mid-cutover).
+- **`phase="all"`** (the default) keeps the legacy single-pass behavior.
 
 ### The full_wlan `{"value": json.dumps(...)}` wrapper quirk
 
@@ -252,6 +304,8 @@ SSID name filled in.
 | Group-create Architecture readback | A known flaw lets the v3 create return success **without applying**. After creating, the client reads `/configuration/v1/groups/properties`; it raises only if `Architecture` is confirmed to be something other than `AOS10` (readback transport errors don't fail the step). |
 | Firmware v2 → v1 fallback | On 404/405 the client retries the v1 compliance endpoint. |
 | 401 → refresh → retry | On 401 the client attempts a token refresh and retries once. |
+| 2xx with a non-JSON body | Raises `ClassicCentralAPIError` — flattening to `{}` made `list_group_names` return `[]` and `create_group` re-POST. |
+| Pre-existing group / duplicate WLAN | With a manifest attached, reuse of a same-named group and the duplicate-WLAN swallow are allowed only for manifest-owned (or explicitly adopted) objects — a foreign same-name object fails the step with a collision refusal. |
 | Refresh token rotation | Each refresh returns a new refresh token; `self.refresh_token` holds the newest. Views read it back and persist it to the session. |
 | RADIUS auth-servers / GW clusters | **Cannot** be created via the classic API. Preflight **FAILs** enterprise/MAC-auth SSIDs on a Classic destination until the operator hand-creates a RADIUS server named exactly like the source server group in each group (`full_wlan` references it by name), and `provision()` still appends the MANUAL FOLLOW-UP (gateways auto-cluster on join — verify tunnel SSID binding). |
 | Tunnel WLAN `cluster_name` | Set on the WLAN but unverified by any reference example — confirm in the Central UI. |
@@ -288,7 +342,7 @@ before expiry instead of waiting for a mid-run 401.
 | Behaviour | Why |
 |---|---|
 | `macAddress` **required** to claim | The client raises before submitting any device without a MAC — re-discover with `show ap database long`. |
-| Claim is async + reconciled | The tool polls the async-operation, then re-reads the workspace inventory and reconciles **submitted serials vs. actual workspace** — it never trusts the async body shape alone. Serials missing post-claim are flagged. |
+| Claim is async + reconciled | The tool polls the async-operation, then re-reads the workspace inventory and reconciles **submitted serials vs. actual workspace** — it never trusts the async body shape alone. Serials missing post-claim are flagged. The reconciliation read is fail-closed: if it fails, the run **aborts** (no devices are assigned or moved) — a failed verification must never expand the mutation set beyond positively confirmed serials. |
 | Active subscriptions only | The UI filters out `ENDED` subscriptions; AP-type subscriptions (`CENTRAL_AP`/`FOUNDATION_AP`-style) are listed first. |
 | Subscription key vs UUID | Canonical UUIDs pass through; keys are OData-resolved. Unsafe characters are rejected with guidance to pass the UUID. |
 | Claim body shape | The claim posts `{"network":[...], "compute":[], "storage":[]}`. |

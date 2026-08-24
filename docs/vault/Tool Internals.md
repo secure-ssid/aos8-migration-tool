@@ -50,6 +50,19 @@ relative to repo root (`aos8-migration-tool/`).
   rotating refresh, manual follow-ups.
 - **`lib/glp_client.py`** — `GLPClient` ([[GreenLake Onboarding]]): claim (async poll),
   workspace reconcile, subscription resolve/assign.
+- **`lib/manifest.py`** — ownership registry (per customer+tenant, under
+  `~/.aos8-migration/manifests/`): provisioning registers what it creates;
+  `gate()` refuses to reuse a same-named foreign object (collision refusal,
+  adoptable in Step 3); cleanup deletes only manifest-owned objects.
+  Registration/gating currently covers **SSIDs (both clients) + Classic
+  groups**; other kinds are still name-reused.
+- **`lib/http_base.py`** — `normalize_base()`: destination base-URL allowlist
+  (HPE/Aruba hosts only, `http://` refused outside loopback) shared by the
+  cloud clients; `AOS8_DEV_MODE` is the only opt-out.
+- **`lib/cleanup.py`** — "Clean up test objects" (`zztest-*`): with a manifest,
+  manifest-owned objects only; without one, legacy prefix teardown.
+- **`lib/audit.py`** — JSON audit lines to stdout; a failed write raises
+  `AuditWriteError` (not best-effort).
 - **`lib/runbook.py`** — `generate()`: [[Source - Mobility Controller|ap convert]] runbook (single MC / L2 / L3
   sequencing, rollback) and `_generate_instant` ([[Source - Instant IAP|Central-driven]]). `MODEL_FAMILIES`
   for the manual image-server path.

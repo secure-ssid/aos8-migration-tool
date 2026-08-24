@@ -37,6 +37,12 @@ Existence is checked via `GET /configuration/v2/groups`
 > The readback itself is best-effort — transport errors don't fail the step;
 > only a *confirmed* wrong architecture does.
 
+With a [[Tool Internals|manifest]] attached, reuse is gated: a pre-existing
+group (and a duplicate-WLAN swallow in `create_wlan`) is accepted only when
+the manifest owns the object or it was explicitly adopted in Step 3 —
+otherwise the step fails with a collision refusal rather than touching
+another administrator's object.
+
 ## WLANs — `full_wlan` value-wrapper payload
 
 `create_wlan` → `POST /configuration/full_wlan/{group}/{name}`. The body is the
@@ -67,12 +73,31 @@ WLANs are keyed by **[[Glossary|ESSID]]**; duplicate ESSIDs in a group are skipp
 - **Move to group** — `POST /configuration/v1/devices/move`.
 - **Sites** — `POST /central/v2/sites`; associate via
   `POST /central/v2/sites/associations` with `device_type="IAP"`. (Address and
-  geolocation are mutually exclusive — defaults to zeroed geolocation when no
-  address.)
+  geolocation are mutually exclusive — the zeroed-geolocation fallback exists
+  only in lab/test mode; see Provision phases above.)
 - **Firmware compliance** — `POST /firmware/v2/upgrade/compliance_version`
   (v1 fallback). `device_type` for APs is **`"IAP"`** even on AOS 10.
 - **Monitoring** — `GET /monitoring/v2/aps` → `{"aps":[...]}`, status Up/Down
   (used by Step 6 validation).
+
+## Provision phases
+
+`provision(phase="config|devices|all")` mirrors the New Central client's split:
+
+- **`config`** (Step 3) — inventory pre-add, sites, groups, WLANs, firmware
+  compliance. **No APs are claimed, moved or rebooted** — the Step 3 banner is
+  literally true. Manual follow-ups are emitted here so the Step 4 cutover
+  gate tracks them as outstanding work.
+- **`devices`** (the Step 4 classic cutover, after GreenLake claiming) — moves
+  APs into their groups and associates them with the site. Fail-closed: a
+  group the config phase didn't create aborts that group's move ("run the
+  config phase first") rather than building half a tenant; a failed site read
+  surfaces as an error instead of reading as "no sites".
+- **`all`** (default) — legacy single-pass.
+
+Site creation is also gated: incomplete address data raises unless the
+**lab/test mode** switch (Step 1) is on — placeholder sites (`0.0, 0.0`
+geolocation) are lab-only, never silently created in a production tenant.
 
 ## Manual follow-ups (classic can't automate)
 
@@ -89,8 +114,11 @@ WLANs are keyed by **[[Glossary|ESSID]]**; duplicate ESSIDs in a group are skipp
 ## GreenLake note
 
 Most current classic accounts are GLP-onboarded, so [[GreenLake Onboarding]] still
-applies. If the account predates GreenLake onboarding, the Step 3 inventory
-pre-add covers it and you can skip Step 4.
+applies. If the account predates GreenLake onboarding, the config phase's
+inventory pre-add covers it and the GreenLake claim can be skipped — but the
+**Step 4 classic cutover can't**: moving the APs into their groups
+(`phase="devices"`) is what converts them, and it runs behind the same
+cutover gate as New Central.
 
 ## Related
 [[Migration Paths]] · [[Destination - New Central]] · [[GreenLake Onboarding]] ·

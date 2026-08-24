@@ -14,7 +14,7 @@ verbatim in the step's result log — match the message text below.
 | Blank / stale page in the browser | Old Streamlit server process still bound | Stop and restart `streamlit run app.py`. |
 | Preflight blocker won't let you continue | A FAIL check (model/firmware/named VLAN/etc.) | Fix the root cause, or tick the override checkbox (acknowledge the risk). |
 | Group created but "Architecture reads back as X, not AOS10" (classic) | Known v3 group-create flaw | Delete the group in Central; confirm the tenant supports AOS10 groups; re-run. |
-| Provisioning step failed but others continued | By design — failures are recorded, not fatal | Read the per-step error, fix it, use "Reset & re-run provisioning". |
+| Provisioning step failed but others continued | By design — failures are recorded per step, not fatal to the run | Read the per-step error, fix it, use "Reset & re-run provisioning". Failures are **not** free, though: each one must be individually acknowledged (with a written reason, audited) before the Step 4 cutover unlocks. |
 
 ---
 
@@ -77,7 +77,7 @@ the new token into the session and shows a banner:
 | Cause | Fix |
 |---|---|
 | Wrong `config_path` | Conductor (MM) uses `/md` (default); standalone controller uses `/mm/mynode`. Set it under Step 1 → Advanced — API options. |
-| Port 4343 firewalled or REST API disabled | The REST API is on TCP **4343** with a self-signed cert (verification is skipped by default — set `AOS8_CA_BUNDLE` to your CA bundle if you deployed your own CA to the controllers). Confirm reachability from the machine running the tool; otherwise switch to **Paste CLI output** mode. |
+| Port 4343 firewalled or REST API disabled | The REST API is on TCP **4343** with a self-signed cert. Certificate verification is **ON by default**, so a stock self-signed controller cert fails the TLS handshake until you set `AOS8_CA_BUNDLE` to a bundle containing the controller's CA (or set `AOS8_DEV_MODE` for a local lab — never in production). Confirm reachability from the machine running the tool; otherwise switch to **Paste CLI output** mode. |
 | `Login rejected (HTTP 401/403)` | Wrong username/password, or the account lacks API access — a login 401/403 is translated to this message instead of a generic connection error. |
 | Bad credentials / non-zero login status | The controller (MC — Mobility Conductor/Controller) returns `status != 0`; check username/password. The status can be int `0` or string `"0"` depending on build (the client handles both). |
 | Object/show read errors after login | Usually a `config_path` mismatch on a Conductor. Try the node path, or fall back to paste mode. |
@@ -181,7 +181,17 @@ its error and the run continues, so you get the full picture. After the run:
 1. Read each failed step's error (shown as a code block).
 2. Fix the cause (allowlist, token, permissions, naming collision, etc.).
 3. Click **Reset & re-run provisioning**. Idempotent steps reuse anything that
-   already succeeded (sites/groups/VLANs/SSIDs/clusters matched by name).
+   already succeeded — with the ownership manifest attached, SSIDs (and Classic
+   device groups) are reused only when the manifest owns them; a same-named
+   foreign object fails with a collision refusal you can resolve with the
+   per-object **Adopt** action in Step 3. Other kinds (sites/VLANs/auth
+   servers/clusters) are still matched by name.
+
+A failed step also **gates the Step 4 cutover**: the AP move stays locked until
+each failure is either fixed by re-running or acknowledged with a written
+reason (an audit record, not a checkbox), and each deferred manual follow-up
+(gateway cluster, overlay binding, placeholder secrets, captive-portal checks)
+is confirmed done.
 
 The one hard stop in New Central is "Resolve global scope" — if that fails,
 nothing else can run. Check the API client has Aruba Central (network-config)

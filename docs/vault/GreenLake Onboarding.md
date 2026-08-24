@@ -38,7 +38,10 @@ conversion (recommended order: provision → claim → convert).
 The async-op body shape isn't trusted alone. After the claim, the tool calls
 `workspace_serials()` (`GET /devices/v1/devices`, paginated, uppercased) and
 diffs the **submitted serials against the actual workspace inventory** →
-reports claimed vs NOT-in-workspace. "Check workspace" can also be run first to
+reports claimed vs NOT-in-workspace. **The reconciliation read is
+fail-closed:** if it fails, the run aborts — no devices are assigned or moved,
+because a failed verification must never expand the mutation set beyond
+positively confirmed serials. "Check workspace" can also be run first to
 mark APs already claimed (via CSV/UI) so only the delta is claimed.
 
 ## Application + subscription assignment
@@ -67,10 +70,17 @@ cutover**: "Move APs into groups + assign persona/site" runs
 `provision(phase="devices")` — moving a live AOS 8 AP into its AOS 10 device
 group makes Central push the conversion (each AP reboots, ~10-20 min offline),
 gated by a review checklist and an "I'm in my cutover window" confirmation.
-On [[Destination - Classic Central|Classic]], the whole step can be skipped for pre-GreenLake accounts:
-Step 3 already pre-added the serial+MAC pairs to the classic inventory;
-GreenLake claiming still applies to GLP-onboarded classic accounts (most
-current ones).
+The cutover is additionally **hard-gated on Step 3's outcome**: every failed
+provisioning step needs a written acknowledgement (audited with the operator's
+identity and reason), and every deferred/manual follow-up (gateway cluster,
+overlay binding, placeholder PSK/RADIUS secrets, captive-portal checks) needs
+an explicit "verified done" confirmation before the move is enabled.
+On [[Destination - Classic Central|Classic]], **claiming** can be skipped for pre-GreenLake accounts
+(Step 3 already pre-added the serial+MAC pairs to the classic inventory) —
+but the classic **cutover cannot**: moving the APs into their groups
+(`provision(phase="devices")`) is what converts them, and it sits behind the
+same gate. GreenLake claiming still applies to GLP-onboarded classic accounts
+(most current ones).
 
 ## Related
 [[Migration Paths]] · [[Source - Mobility Controller]] · [[Source - Instant IAP]] ·

@@ -107,6 +107,9 @@ rather than fall back to an unauthenticated mode.
   redeploy. Keep `AOS8_CREDSTORE_KEY` stable across deploys.
 - **Audit trail.** Sensitive actions (provision, cutover, claim, cleanup)
   are emitted as JSON audit lines to stdout, tagged with the signed-in user.
+  Auditing is not best-effort: a failed audit write raises `AuditWriteError`
+  instead of being silently dropped, so a missing record always surfaces as
+  an error.
 - **Scaling.** Streamlit sessions are websocket-bound to one replica. If you
   scale `app`, pin each user to one replica (cookie/IP affinity) at the LB
   and share the volume so all replicas see the same accounts.
@@ -120,7 +123,7 @@ rather than fall back to an unauthenticated mode.
 | `AOS8_AUTH_MODE` | `local` | `password` = one shared gate password; `accounts` = per-person verified-email login (any domain unless restricted); `proxy` = reverse-proxy header; `local` = single user. Any other value fails closed (the app refuses to serve). |
 | `AOS8_APP_PASSWORD` | _(unset)_ | The shared password for `password` mode. Required in that mode, and the app refuses to serve if it is unset, shorter than 16 characters, or still the `change-me-to-a-strong-shared-password` placeholder from `.env.example` |
 | `AOS8_ALLOWED_EMAIL_DOMAIN` | _(unset — any email)_ | Restrict registration to one domain in `accounts` mode (e.g. `example.com`) |
-| `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume) |
+| `AOS8_USERS_FILE` | `~/.aos8-migration/users.json` | Path to the user registry (put on a persistent volume). Fail-closed: a corrupt or unreadable registry raises `AccountsStorageError` (the app surfaces the error and stops) rather than treating it as empty and later overwriting recoverable account data |
 | `AOS8_SMTP_MODE` | `relay` | `direct` = MX-lookup delivery (no relay); `relay` = send via `AOS8_SMTP_HOST` |
 | `AOS8_SMTP_FROM` | _(sending host)_ | From address on verification emails — set to your sender (e.g. a gmail address) |
 | `AOS8_SMTP_HOST` / `_PORT` / `_USER` / `_PASS` | _(unset)_ / `587` / — / — | `relay` mode SMTP server. With no delivery path configured, registration is blocked unless console codes are explicitly enabled (below) |
@@ -130,3 +133,4 @@ rather than fall back to an unauthenticated mode.
 | `AOS8_IDENTITY_HEADER` | `X-Forwarded-Email` | (`proxy` mode only) the single trusted identity header; the proxy must set **and** inbound-strip it |
 | `AOS8_LOCAL_USER` | `local@localhost` | Principal used to scope the credstore in `local` mode |
 | `AOS8_CA_BUNDLE` | _(unset — verification on)_ | Path to a CA bundle for verifying the AOS 8 controller's TLS certificate. Certificate verification is ON by default, so a stock self-signed controller cert blocks out-of-box discovery until the controller's CA is imported into the bundle here (or `AOS8_DEV_MODE` is set for a local lab) — this protects the controller admin credentials from MITM on the management network |
+| `AOS8_DEV_MODE` | _(unset — off)_ | `true` = local dev/test opt-out: permits cleartext `http://` destination base URLs, non-allowlisted destination hosts, and disables controller TLS verification. Without it, destination base URLs must be HTTPS on an HPE/Aruba host (`arubanetworks.com`, `cloud.hpe.com`, `greenlake.hpe.com`; loopback excepted) — a mistyped URL can never ship a bearer token to an unintended or cleartext endpoint. **Never set in production** |
