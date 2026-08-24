@@ -30,6 +30,13 @@ class CheckResult:
     status: Status
     message: str
     detail: Optional[str] = None
+    # critical FAILs are non-overridable in the Step 2 gate: they either
+    # silently degrade security (WEP/OWE→open, MAC-auth without RADIUS,
+    # captive-portal loss, unprovable auth) or make the migration impossible
+    # (incompatible hardware, unsupported firmware, unresolved VLANs,
+    # conflicting ESSIDs, missing auth infrastructure). Non-critical FAILs
+    # may be acknowledged per-row with a written, audited reason.
+    critical: bool = False
 
     @property
     def icon(self) -> str:
@@ -52,6 +59,7 @@ def run_all(customer: CustomerConfig, central: CentralConfig) -> list[CheckResul
     results += _check_serials(customer)
     results += _check_ssid_auth(customer, central)
     results += _check_captive_portal(customer, central)
+    results += _check_unsupported_fields(customer)
     results += _check_named_vlans(customer)
     results += _check_split_tunnel(customer, central)
     results += _check_duplicate_essids(customer)
@@ -72,6 +80,7 @@ def _check_ap_models(customer: CustomerConfig) -> list[CheckResult]:
         results.append(CheckResult(
             name="AP Model Compatibility",
             status=Status.FAIL,
+            critical=True,
             message=f"{len(incompatible)} AP(s) do not support AOS 10 — hardware refresh required before migration.",
             detail="Incompatible APs:\n" + "\n".join(incompatible),
         ))
@@ -148,6 +157,7 @@ def _check_firmware(customer: CustomerConfig) -> list[CheckResult]:
     return [CheckResult(
         name="MC Firmware Version",
         status=Status.FAIL,
+        critical=True,
         message=f"MC firmware {fw} does not support ap convert. Upgrade to ≥ 8.10.0.12 "
                 "(8.10 train) or ≥ 8.12.0.1 (8.12 train) first — interim trains like 8.11 do not qualify.",
         detail="After upgrading MC firmware, run 'write erase' + reload if migrating an MC that had prior upgrades.",
@@ -161,6 +171,7 @@ def _check_dhcp(customer: CustomerConfig) -> list[CheckResult]:
         return [CheckResult(
             name="AP DHCP Requirement",
             status=Status.FAIL,
+            critical=True,
             message=f"{len(static_aps)} AP(s) have static IPs. AOS 10 requires DHCP for all APs.",
             detail="Static IP APs:\n" + "\n".join(names),
         )]
@@ -310,6 +321,7 @@ def _check_eap_offload(customer: CustomerConfig) -> list[CheckResult]:
         return [CheckResult(
             name="EAP-Offload / FastConnect",
             status=Status.FAIL,
+            critical=True,
             message="EAP-Offload (AAA FastConnect) is configured but NOT supported in AOS 10. Must be redesigned before migration.",
             detail="Remove AAA FastConnect config from all VAP/AAA profiles. Use standard 802.1X instead.",
         )]
@@ -325,6 +337,7 @@ def _check_internal_auth(customer: CustomerConfig) -> list[CheckResult]:
         return [CheckResult(
             name="Internal Authentication Server",
             status=Status.FAIL,
+            critical=True,
             message="MC internal auth server is in use but NOT supported in AOS 10. Must migrate to external RADIUS (ClearPass/NPS) before migration.",
         )]
     return [CheckResult(
@@ -433,6 +446,7 @@ def _check_named_vlans(customer: CustomerConfig) -> list[CheckResult]:
     return [CheckResult(
         name="Named VLANs Unresolved",
         status=Status.FAIL,
+        critical=True,
         message=f"{len(unresolved)} SSID(s) reference a named VLAN or a VLAN "
                 "pool/range that couldn't be resolved to a single VLAN ID — "
                 "they would provision onto the wrong VLAN.",
@@ -486,6 +500,7 @@ def _check_duplicate_essids(customer: CustomerConfig) -> list[CheckResult]:
         results.append(CheckResult(
             name="Conflicting Duplicate ESSIDs",
             status=Status.FAIL,
+            critical=True,
             message="Central keys WLANs by ESSID — virtual-aps sharing an ESSID with "
                     "different settings cannot coexist. Only the FIRST definition would "
                     "be provisioned.",
@@ -526,6 +541,7 @@ def _check_captive_portal(customer: CustomerConfig,
     return [CheckResult(
         name="Captive-Portal SSIDs (classic destination)",
         status=Status.FAIL,
+        critical=True,
         message=f"External captive-portal SSIDs: {', '.join(cp_ssids)}. Classic "
                 "Central's WLAN API cannot express an external portal — these "
                 "would be created as fully OPEN guest networks.",
@@ -534,14 +550,56 @@ def _check_captive_portal(customer: CustomerConfig,
     )]
 
 
+def _check_unsupported_fields(customer: CustomerConfig) -> list[CheckResult]:
+    """#9: lines in the pasted WLAN config the migration cannot represent.
+    FAIL so the operator must look — but overridable: a deliberate drop is
+    acknowledgeable per-row (with an audit record) at the Step 2 gate."""
+    fields = getattr(customer, "unsupported_fields", None) or []
+    if not fields:
+        return []
+    return [CheckResult(
+        name="Unsupported Source Fields",
+        status=Status.FAIL,
+        message=f"{len(fields)} line(s) in the pasted WLAN config are not "
+                "represented in the migration — the migrated WLANs would "
+                "silently take Central defaults for them.",
+        detail="\n".join(fields) +
+               "\nFor each line: reproduce the setting in Central after "
+               "provisioning, or acknowledge it here as a deliberate drop.",
+    )]
+
+
 def _check_ssid_auth(customer: CustomerConfig,
                      central: CentralConfig) -> list[CheckResult]:
     results = []
+    # #4 fail-closed: opensystem SSIDs whose aaa-profile read failed. The
+    # opmode is genuinely opensystem, but with server-group resolution
+    # unprovable a mac-server-group can neither be confirmed nor ruled out —
+    # provisioning them as OPEN may publish a network that was MAC-authed.
+    # Critical: no override; the operator must restore discovery (or move to
+    # paste mode, which parses the server-group directly).
+    unprovable = [s.display_name for s in customer.ssids
+                  if s.auth_type == AuthType.OPEN and not s.auth_known]
+    if unprovable:
+        results.append(CheckResult(
+            name="SSID Auth Unprovable",
+            status=Status.FAIL,
+            critical=True,
+            message=f"Opensystem SSIDs whose AAA profiles could not be read: "
+                    f"{', '.join(unprovable)}. MAC auth cannot be ruled out — "
+                    "migrating them as OPEN could publish a network that was "
+                    "MAC-authenticated.",
+            detail="Restore the aaa-profile read (API permissions/connectivity) "
+                   "and re-run discovery, or switch to paste mode: the paste "
+                   "path parses mac-server-group directly from the running-config. "
+                   "This blocker cannot be overridden.",
+        ))
     wep = [s.display_name for s in customer.ssids if s.auth_type == AuthType.WEP]
     if wep:
         results.append(CheckResult(
             name="WEP SSIDs Unsupported",
             status=Status.FAIL,
+            critical=True,
             message=f"WEP SSIDs: {', '.join(wep)}. AOS 10 has no WEP opmode — "
                     "migrating them would silently change the network's "
                     "security (or fail at the API).",
@@ -556,6 +614,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="MAC-Auth SSIDs Without RADIUS",
             status=Status.FAIL,
+            critical=True,
             message=f"MAC-auth SSIDs with no discovered server group: "
                     f"{', '.join(mac_no_group)}. They would migrate as OPEN "
                     "networks with MAC authentication effectively disabled.",
@@ -580,6 +639,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="Enhanced Open (OWE) SSIDs",
             status=Status.FAIL,
+            critical=True,
             message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Classic AOS10 "
                     "has no Enhanced-Open opmode — these SSIDs would migrate "
                     "unencrypted.",
@@ -587,7 +647,10 @@ def _check_ssid_auth(customer: CustomerConfig,
                    "Target New Central for them, or accept and document the "
                    "downgrade explicitly before provisioning.",
         ))
-    unknown = [s.display_name for s in customer.ssids if not s.auth_known]
+    unknown = [s.display_name for s in customer.ssids
+               if not s.auth_known and s.auth_type != AuthType.OPEN]
+    # opensystem + unknown is the unprovable-MAC-auth case above — a
+    # critical FAIL, not this benign WPA2-Enterprise-fallback warning
     if unknown:
         results.append(CheckResult(
             name="SSID Auth Detection",
@@ -612,6 +675,7 @@ def _check_ssid_auth(customer: CustomerConfig,
         results.append(CheckResult(
             name="802.1X SSIDs Without RADIUS Servers",
             status=Status.FAIL,
+            critical=True,
             message=f"Enterprise SSIDs ({', '.join(enterprise)}) but ZERO "
                     "RADIUS servers were discovered — they would provision as "
                     "dot1x networks with nothing to authenticate against.",

@@ -132,6 +132,11 @@ class CustomerConfig:
     # True when SSID→AP-group bindings could not be discovered and all SSIDs
     # were assigned to every group as a fallback (surfaced as a preflight WARN).
     ssid_mapping_incomplete: bool = False
+    # Lines inside the pasted WLAN blocks (virtual-ap / ssid-profile) that
+    # the migration neither consumes nor deliberately maps. Surfaced as an
+    # overridable preflight FAIL so they are never silently dropped with
+    # defaults applied (#9 paste/API parity; paste path only).
+    unsupported_fields: list[str] = field(default_factory=list)
 
     def ssid_by_name(self, name: str) -> Optional[SSID]:
         return next((s for s in self.ssids if s.name == name), None)

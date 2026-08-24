@@ -285,3 +285,90 @@ def test_vlan_pool_tokens_set_vlan_raw():
     pool2 = next(s for s in cfg2.ssids if s.name == "pool-vap")
     assert pool2.vlan == 100
     assert pool2.vlan_raw == "100-105"
+
+
+def test_paste_server_groups_reconstructed_with_failover_order():
+    """#9: the API path keeps RADIUS server-group membership in failover
+    order; the paste path must rebuild the same from `aaa server-group`
+    blocks, or migrated enterprise/MAC SSIDs reference a group that is
+    never created."""
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG + '''
+aaa server-group "clearpass-sg"
+   auth-server "clearpass-1"
+   auth-server "clearpass-2"
+!
+aaa server-group "internal"
+   auth-server Internal
+!
+'''},
+        mc_ip="10.0.0.1")
+    groups = {g.name: g.servers for g in cfg.server_groups}
+    # built-ins are noise (mirrors the API path); membership keeps order
+    assert groups == {"clearpass-sg": ["clearpass-1", "clearpass-2"]}
+
+
+def test_paste_hidden_ssid_does_not_default_to_broadcast():
+    """#9: `hide-ssid` on the ssid-profile is a hidden-but-active WLAN —
+    silently defaulting broadcast=True would publish it."""
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace(
+            'essid "Corp"', 'essid "Corp"\n   hide-ssid')},
+        mc_ip="10.0.0.1")
+    corp = next(s for s in cfg.ssids if s.name == "corp-vap")
+    assert corp.broadcast is False
+    assert corp.enabled is True      # hidden ≠ administratively disabled
+
+
+def test_paste_disabled_virtual_ap_stays_disabled():
+    """#9: `no vap-enable` is an administratively disabled WLAN — parity
+    with the REST path's vap-enable read."""
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace(
+            "forward-mode tunnel", "forward-mode tunnel\n   no vap-enable")},
+        mc_ip="10.0.0.1")
+    corp = next(s for s in cfg.ssids if s.name == "corp-vap")
+    assert corp.enabled is False
+    guest = next(s for s in cfg.ssids if s.name == "guest-vap")
+    assert guest.enabled is True
+
+
+def test_paste_unsupported_wlan_fields_are_surfaced():
+    """#9: a source setting the migration cannot represent must surface for
+    preflight classification — never silently dropped with defaults
+    applied."""
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace(
+            "forward-mode tunnel",
+            "forward-mode tunnel\n   deny-inter-user-traffic")},
+        mc_ip="10.0.0.1")
+    assert any("corp-vap" in f and "deny-inter-user-traffic" in f
+               for f in cfg.unsupported_fields)
+
+
+def test_recognized_config_yields_no_unsupported_fields():
+    # every line in the canned config's WLAN blocks is consumed — the
+    # unsupported-field surface must stay empty, not cry wolf
+    cfg = _parse()
+    assert cfg.unsupported_fields == []
+
+
+def test_unsupported_fields_are_an_overridable_preflight_fail():
+    """#9 + #5: unsupported fields FAIL preflight (operator must look) but
+    are NOT critical — a deliberate drop is acknowledgeable per-row."""
+    from lib import compatibility
+    from lib.models import CentralConfig
+    cfg = parse_customer_config(
+        {"running_config": RUNNING_CONFIG.replace(
+            "forward-mode tunnel",
+            "forward-mode tunnel\n   deny-inter-user-traffic"),
+         "ap_database": AP_DATABASE},
+        mc_ip="10.0.0.1")
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    fails = [r for r in compatibility.run_all(cfg, central)
+             if r.status == compatibility.Status.FAIL]
+    unsupported = next((r for r in fails if "Unsupported" in r.name), None)
+    assert unsupported is not None
+    assert "deny-inter-user-traffic" in (unsupported.detail or "")
+    assert not unsupported.critical

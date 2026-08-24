@@ -1090,6 +1090,78 @@ def test_aos8_api_mac_auth_ssid_detected(aos8_api):
     assert iot.auth_server_group == "cppm-sg"
 
 
+def _opensystem_vap_app(aaa_status):
+    """virtual-ap + ssid-profile reads succeed (opensystem); the aaa_prof
+    read answers with `aaa_status` — the best-effort server-group resolution
+    path in get_ssids."""
+    def app(method, path, query, body):
+        if path.endswith("/object/ssid_prof"):
+            return (200, {}, {"ssid_prof": [
+                {"profile-name": "guest-ssid", "essid": "Guest",
+                 "opmode": {"opensystem": True}}]})
+        if path.endswith("/object/aaa_prof"):
+            return (aaa_status, {}, {"error": "internal"})
+        if path.endswith("/object/virtual_ap"):
+            return (200, {}, {"virtual_ap": [
+                {"profile-name": "guest-vap", "vlan": "50",
+                 "aaa_prof": {"profile-name": "guest-aaa"},
+                 "ssid_prof": {"profile-name": "guest-ssid"},
+                 "forward-mode": "bridge"}]})
+        return (200, {}, {})
+    return app
+
+
+def test_aos8_api_opensystem_with_failed_aaa_read_is_unprovable(aos8_api):
+    """#4: the aaa_prof read is best-effort — when it fails, an opensystem
+    SSID's mac-server-group cannot be resolved, so MAC auth can neither be
+    confirmed nor ruled out. The SSID must surface as UNKNOWN auth
+    (auth_known=False), never as a provable OPEN network."""
+    from lib.models import AuthType
+
+    aos8_api.app = _opensystem_vap_app(aaa_status=500)
+    c = _aos8(aos8_api)
+    [guest] = c.get_ssids()
+    assert guest.auth_type is AuthType.OPEN   # raw opmode is genuinely opensystem
+    assert not guest.auth_known               # …but MAC-auth cannot be ruled out
+
+
+def test_opensystem_unprovable_auth_fails_preflight_critical(aos8_api):
+    """#4 contract: an opensystem SSID whose server-group resolution cannot
+    be proven is a CRITICAL preflight blocker — FAIL, not WARN, and never
+    handed to provisioning as OPEN."""
+    from lib import compatibility
+    from lib.models import AuthType, CentralConfig, CustomerConfig
+
+    aos8_api.app = _opensystem_vap_app(aaa_status=500)
+    ssids = _aos8(aos8_api).get_ssids()
+    customer = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                              controller_vlan=1, ssids=ssids)
+    central = CentralConfig(customer_name="acme", base_url="https://x",
+                            destination="new")
+    results = compatibility.run_all(customer, central)
+    fails = [r for r in results if r.status == compatibility.Status.FAIL]
+    auth_fail = next((r for r in fails if "Guest" in r.message), None)
+    assert auth_fail is not None, "unprovable opensystem auth must FAIL preflight"
+    assert auth_fail.critical, "unknown-auth blocker must be non-overridable"
+    # and it must NOT be reported as a benign 'provisioned as WPA2-Enterprise'
+    # warning on top of the blocker
+    warns = [r for r in results if r.status == compatibility.Status.WARN]
+    assert not any("Guest" in r.message and "Auth Detection" in r.name
+                   for r in warns)
+
+    # sanity: the same SSID with a healthy aaa_prof read is provably OPEN —
+    # no unknown-auth blocker
+    aos8_api.app = _opensystem_vap_app(aaa_status=200)
+    ssids_ok = _aos8(aos8_api).get_ssids()
+    assert ssids_ok[0].auth_type is AuthType.OPEN and ssids_ok[0].auth_known
+    customer_ok = CustomerConfig(mc_ip="10.0.0.1", mc_firmware="8.10.0.12",
+                                 controller_vlan=1, ssids=ssids_ok)
+    results_ok = compatibility.run_all(customer_ok, central)
+    assert not any("Guest" in r.message
+                   for r in results_ok
+                   if r.status == compatibility.Status.FAIL)
+
+
 def test_p4_group_names_are_html_escaped():
     """L1: device-group names come from the controller — raw interpolation
     into unsafe_allow_html is stored HTML injection."""
@@ -1106,3 +1178,27 @@ def test_validate_status_badge_treats_online_as_up():
     assert _status_is_up("ONLINE")
     assert _status_is_up("online")
     assert not _status_is_up("Down")
+
+
+def test_aos8_api_hidden_ssid_does_not_default_to_broadcast(aos8_api):
+    """#9 (API path): hide-ssid on the ssid profile is a hidden-but-active
+    WLAN — parity with the paste path, which parses the same flag from the
+    running-config. Defaulting broadcast=True would publish it."""
+    def app(method, path, query, body):
+        if path.endswith("/object/ssid_prof"):
+            return (200, {}, {"ssid_prof": [
+                {"profile-name": "corp-ssid", "essid": "Corp",
+                 "opmode": {"wpa2-aes": True}, "hide-ssid": True}]})
+        if path.endswith("/object/aaa_prof"):
+            return (200, {}, {"aaa_prof": []})
+        if path.endswith("/object/virtual_ap"):
+            return (200, {}, {"virtual_ap": [
+                {"profile-name": "corp-vap", "vlan": "100",
+                 "ssid_prof": {"profile-name": "corp-ssid"},
+                 "forward-mode": "tunnel"}]})
+        return (200, {}, {})
+    aos8_api.app = app
+    c = _aos8(aos8_api)
+    [corp] = c.get_ssids()
+    assert corp.broadcast is False
+    assert corp.enabled is True      # hidden ≠ administratively disabled

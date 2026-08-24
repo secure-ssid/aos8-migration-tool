@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models import (
     AP, APGroup, AuthType, ClusterInfo, CustomerConfig, ForwardMode,
-    RadiusServer, SSID, VLAN,
+    RadiusServer, ServerGroup, SSID, VLAN,
 )
 from .aos8_client import (
     AOS8Client, _opmode_to_auth, _normalize_model, _safe_vlan, _vlan_is_named,
@@ -88,10 +88,12 @@ def parse_customer_config(pasted_outputs: dict[str, str], mc_ip: str = "") -> Cu
         aps=aps,
         vlans=vlans,
         radius_servers=radius,
+        server_groups=_parse_server_groups(running),
         cluster=cluster,
         has_eap_offload=has_eap,
         has_internal_auth=has_internal,
         ssid_mapping_incomplete=mapping_incomplete,
+        unsupported_fields=_unsupported_wlan_fields(running),
     )
 
 
@@ -287,7 +289,8 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
     # AOS8 'a-band'/'g-band'/'wmm' → New Central rf-band enum
     for name, block in _iter_blocks(running, r"wlan ssid-profile"):
         info = {"essid": "", "opmode": "", "passphrase": None,
-                "rf_band": "", "dtim_period": 0, "max_clients": 0}
+                "rf_band": "", "dtim_period": 0, "max_clients": 0,
+                "hidden": False}
         bands = set()
         for line in block:
             m = re.match(r"essid\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
@@ -296,6 +299,10 @@ def _parse_ssid_profiles(running: str) -> dict[str, dict]:
             m = re.match(r"opmode\s+([\w\-]+)", line, re.IGNORECASE)
             if m:
                 info["opmode"] = m.group(1)
+            if re.match(r"hide-ssid\s*$", line, re.IGNORECASE):
+                # hidden-but-active WLAN — NOT the same as a disabled one;
+                # silently defaulting broadcast=True would publish it (#9)
+                info["hidden"] = True
             # quoted passphrases may contain spaces — capture to end of line
             # and strip the quotes (\S+ would keep the quote and truncate)
             m = re.match(r'wpa-passphrase\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
@@ -412,6 +419,62 @@ def _aaa_mac_server_groups(running: str) -> dict[str, str]:
     return groups
 
 
+def _parse_server_groups(running: str) -> list[ServerGroup]:
+    """RADIUS server-groups with membership in failover order. The API path
+    reads these from server_group_prof; the paste path must rebuild them
+    from `aaa server-group` blocks or migrated enterprise/MAC SSIDs
+    reference a group that is never created (#9)."""
+    groups = []
+    for name, block in _iter_blocks(running, r"aaa server-group"):
+        if name.lower() in ("default", "internal"):
+            continue  # built-in server groups — noise, not customer config
+        servers = []
+        for line in block:
+            m = re.match(r'auth-server\s+"?(.+?)"?\s*$', line, re.IGNORECASE)
+            if m:
+                servers.append(m.group(1))
+        groups.append(ServerGroup(name=name, servers=servers))
+    return groups
+
+
+# Lines the migration consumes (or deliberately maps) inside the two WLAN
+# blocks it reads. Anything else in these blocks is a source setting the
+# migration would silently drop with defaults applied — surfaced at
+# preflight instead (#9).
+_VAP_KNOWN_LINES = (
+    re.compile(r"vlan\s+\S+", re.IGNORECASE),
+    re.compile(r"forward-mode\s+", re.IGNORECASE),
+    re.compile(r"ssid-profile\s+", re.IGNORECASE),
+    re.compile(r"aaa-profile\s+", re.IGNORECASE),
+    re.compile(r"allowed-band\s+", re.IGNORECASE),
+    re.compile(r"(no\s+)?vap-enable\s*$", re.IGNORECASE),
+)
+_SSID_PROFILE_KNOWN_LINES = (
+    re.compile(r"essid\s+", re.IGNORECASE),
+    re.compile(r"opmode\s+", re.IGNORECASE),
+    re.compile(r"wpa-passphrase\s+", re.IGNORECASE),
+    re.compile(r"dtim-period\s+", re.IGNORECASE),
+    re.compile(r"max-clients-threshold\s+", re.IGNORECASE),
+    re.compile(r"allowed-band\s+", re.IGNORECASE),
+    re.compile(r"hide-ssid\s*$", re.IGNORECASE),
+)
+
+
+def _unsupported_wlan_fields(running: str) -> list[str]:
+    """Lines inside the wlan virtual-ap / ssid-profile blocks that the
+    migration neither consumes nor deliberately maps. Preflight FAILs
+    (overridable) on any of these so nothing is silently defaulted (#9)."""
+    out = []
+    for block_pattern, label, known in (
+            (r"wlan virtual-ap", "virtual-ap", _VAP_KNOWN_LINES),
+            (r"wlan ssid-profile", "ssid-profile", _SSID_PROFILE_KNOWN_LINES)):
+        for name, block in _iter_blocks(running, block_pattern):
+            for line in block:
+                if not any(rx.search(line) for rx in known):
+                    out.append(f'{label} "{name}": {line}')
+    return out
+
+
 def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> list[SSID]:
     ssids = []
     mc_cps = mc_captive_portals(running)
@@ -423,6 +486,7 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
         fwd = ForwardMode.TUNNEL
         prof_ref = ""
         aaa_ref = ""
+        enabled = True
         vap_bands: set = set()
         for line in block:
             low = line.lower()
@@ -437,6 +501,12 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
                     fwd = ForwardMode.BRIDGE
                 elif "split" in low:
                     fwd = ForwardMode.SPLIT
+            elif re.match(r"no\s+vap-enable\s*$", line, re.IGNORECASE):
+                # administratively disabled WLAN — parity with the REST
+                # path's vap-enable read; must not migrate as active (#9)
+                enabled = False
+            elif re.match(r"vap-enable\s*$", line, re.IGNORECASE):
+                enabled = True
             else:
                 m = re.match(r"ssid-profile\s+\"?(.+?)\"?\s*$", line, re.IGNORECASE)
                 if m:
@@ -477,6 +547,8 @@ def _parse_ssids_from_running(running: str, ssid_profiles: dict[str, dict]) -> l
                      if vap_bands else prof.get("rf_band", "")),
             dtim_period=prof.get("dtim_period", 0),
             max_clients=prof.get("max_clients", 0),
+            broadcast=not prof.get("hidden", False),
+            enabled=enabled,
             captive_portal_url=cp.get("url", ""),
             captive_portal_redirect=cp.get("redirect", ""),
         ))
