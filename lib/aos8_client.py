@@ -103,10 +103,20 @@ class AOS8Client:
         self.running_config_error = ""
         self.show_errors: dict[str, str] = {}
         self.session = requests.Session()
-        # Controllers ship self-signed certs, so verification defaults off;
-        # an operator who deployed their own CA can opt back into MITM
-        # protection by pointing AOS8_CA_BUNDLE at the bundle path.
-        self.session.verify = os.environ.get("AOS8_CA_BUNDLE") or False
+        # Controllers ship self-signed certs, but certificate verification is
+        # ON by default (review finding 10): operator credentials never ride
+        # an unverified TLS channel. Operators who deployed their own CA point
+        # AOS8_CA_BUNDLE at the bundle path; AOS8_DEV_MODE (local lab / test
+        # harness) is the only opt-out from verification.
+        _bundle = os.environ.get("AOS8_CA_BUNDLE", "").strip()
+        _dev = os.environ.get("AOS8_DEV_MODE", "").strip().lower() in (
+            "1", "true", "yes", "on")
+        if _bundle:
+            self.session.verify = _bundle
+        elif _dev:
+            self.session.verify = False
+        else:
+            self.session.verify = True
 
     # ─────────────────── Auth ───────────────────
 
