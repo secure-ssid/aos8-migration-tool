@@ -2,7 +2,9 @@
 
 [[Migration Paths|Step 2]]. Every compatibility/safety gate in `lib/compatibility.py`
 (`run_all`). Each returns a `CheckResult` with status **PASS / WARN / FAIL**.
-FAIL = blocker (must fix or explicitly override to continue); WARN = review.
+FAIL = blocker: **critical** FAILs must be fixed at the source (no override);
+non-critical FAILs must be fixed or individually acknowledged with a written
+reason (an audit record) to continue. WARN = review.
 Run against the discovered `CustomerConfig` + translated `CentralConfig`, so
 results depend on the chosen [[Gateway Strategy]] and [[Migration Paths|source/destination]]. See [[Tool Internals]].
 
@@ -107,14 +109,26 @@ column); `show ap active` has none. Else **PASS**.
 
 ## SSID auth detection — `_check_ssid_auth`
 Multiple results from [[Glossary|opmode]] → AuthType mapping:
-- **Auth unknown** (opmode couldn't be parsed) → **WARN**: provisioned as
-  WPA2-Enterprise — verify. Paste mode: include the `wlan ssid-profile` blocks
-  (with `opmode`).
+- **Opensystem SSID, aaa-profile unreadable** (`auth_known=False` on the REST
+  path) → **FAIL — critical, no override**: MAC auth can neither be confirmed
+  nor ruled out, so migrating as plain OPEN could publish a network that was
+  MAC-authenticated. Restore the aaa-profile read and re-discover, or switch
+  to paste mode (parses `mac-server-group` from the running-config directly).
+- **Auth unknown** (non-opensystem; opmode couldn't be parsed) → **WARN**:
+  provisioned as WPA2-Enterprise — verify. Paste mode: include the
+  `wlan ssid-profile` blocks (with `opmode`).
 - **PSK without recovered passphrase** → **WARN**: created, but set the
   passphrase in Central.
 - **Enterprise SSIDs** → **WARN**: attach the RADIUS auth server in Central and
   add the new GW/AP IPs as RADIUS clients ([[RADIUS and NAD Changes|NAD]]).
 - All resolved → **PASS**.
+
+## Unsupported source fields — `_check_unsupported_fields`
+Paste mode only: `wlan virtual-ap` / `ssid-profile` lines the migration cannot
+represent land in `CustomerConfig.unsupported_fields` → **FAIL** (overridable):
+the migrated WLANs would silently take Central defaults for those settings.
+Reproduce each setting in Central after provisioning, or acknowledge the row
+as a deliberate drop.
 
 ## Named VLANs unresolved — `_check_named_vlans`
 An SSID referencing a **named VLAN pool** that couldn't resolve to a numeric id
@@ -140,10 +154,13 @@ virtual-aps sharing an essid:
 ESSID > **32 characters** → **FAIL** (Central rejects it). Shorten first.
 Within limit → no result emitted.
 
-## Override
-Blockers (FAIL) gate the Provision button; Step 2 offers an explicit "Override
-blockers — I understand the risk and will resolve them before cutover" checkbox
-to proceed anyway.
+## Acknowledgement
+Blockers (FAIL) gate the Provision button. **Critical** FAILs (e.g. SSID Auth
+Unprovable, WEP, 802.1X/MAC-auth without RADIUS) cannot be overridden — resolve
+them at the source and Re-run. Each non-critical FAIL can be acknowledged
+individually with a written reason; every acknowledgement is an audited
+`preflight-blocker-ack` record. Re-run, VLAN remap, or rediscovery clears the
+cached results and their acknowledgements together.
 
 ## Related
 [[Migration Paths]] · [[Gateway Strategy]] · [[Source - Mobility Controller]] ·

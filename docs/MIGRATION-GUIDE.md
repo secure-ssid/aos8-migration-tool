@@ -252,8 +252,10 @@ so a second customer's data can never leak forward.
 ## Step 2 — Preflight Checks
 
 Read-only. Nothing is written to Central. Produces pass / warn / fail
-(blocker) results. Blockers must be fixed or explicitly overridden (a checkbox
-acknowledging the risk) before you can advance to provisioning.
+(blocker) results. Critical blockers must be fixed at the source — they have
+no override. Each non-critical blocker must be fixed or individually
+acknowledged with a written reason (each acknowledgement is an audit record)
+before you can advance to provisioning.
 
 ![Step 2 — preflight results](screenshots/04-preflight.png)
 
@@ -263,8 +265,10 @@ acknowledging the risk) before you can advance to provisioning.
    to take before cutover (NAD updates, VLAN trunking, cluster sequencing…).
 2. Fix any **blocker** at the source and hit **Re-run** — or map named
    VLANs in the inline editor and click **Apply VLAN mapping** (this
-   re-runs preflight automatically). Genuinely unavoidable blockers can be
-   overridden with the acknowledgement checkbox — the risk is yours.
+   re-runs preflight automatically). Genuinely unavoidable non-critical
+   blockers can be acknowledged individually with a written reason — each
+   acknowledgement is an audit record, and the risk is yours. Critical
+   blockers cannot be acknowledged; resolve them at the source and Re-run.
 3. **Provision →** when the list is green enough to proceed.
 
 ### What each check means
@@ -294,10 +298,13 @@ acknowledging the risk) before you can advance to provisioning.
 | MAC-Auth SSIDs | FAIL if a MAC-auth SSID has no discovered server group; WARN otherwise | opensystem + a `mac-server-group` on the bound aaa-profile is detected as MAC auth (not OPEN) and migrates with MAC authentication enabled on both destinations. With no server group it would migrate effectively open — confirm the profile (`show aaa profile`) holds real RADIUS servers first. MAC-only auth is trivially spoofable; every client MAC must be registered. |
 | 802.1X SSIDs Without RADIUS Servers | FAIL if enterprise SSIDs exist but zero RADIUS servers were discovered | They would provision as dot1x networks with nothing to authenticate against. Confirm the servers exist (`show aaa authentication-server radius`) and that discovery can read them. |
 | Classic RADIUS Servers (manual step) | FAIL for enterprise/MAC-auth SSIDs on a Classic destination | The Classic API cannot create RADIUS server objects, and `full_wlan` references a server **by name** — the reference dangles until the server exists. In each Classic group, create a RADIUS auth server named **exactly** like the source server group (with the real host/secret), then proceed. |
-| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown auth → provisioned as WPA2-Enterprise (verify before cutover); missing PSK → set in Central; enterprise → server-group is bound automatically (New Central) but the shared secrets are placeholders — set the real secrets in Central. |
+| SSID Auth Unprovable | FAIL — **critical, cannot be overridden** — if an opensystem SSID's aaa-profile could not be read | MAC auth can neither be confirmed nor ruled out, so migrating the SSID as plain OPEN could publish a network that was MAC-authenticated. Restore the aaa-profile read (API permissions/connectivity) and re-discover, or switch to paste mode (parses `mac-server-group` directly from the running-config). |
+| Unsupported Source Fields (paste mode) | FAIL — overridable — if the pasted WLAN config has lines the migration cannot represent | The migrated WLANs would silently take Central defaults for those settings. Reproduce each setting in Central after provisioning, or acknowledge it per-row as a deliberate drop. |
+| SSID Auth Detection / PSK / 802.1X | WARN per finding; PASS if all clean | Unknown (non-opensystem) auth → provisioned as WPA2-Enterprise (verify before cutover) — an opensystem SSID whose auth can't be proven is the critical **SSID Auth Unprovable** FAIL above, not this warning; missing PSK → set in Central; enterprise → server-group is bound automatically (New Central) but the shared secrets are placeholders — set the real secrets in Central. |
 
 Navigation: Re-run re-evaluates checks; Back returns to Step 1; Provision
-advances (gated by the override checkbox when blockers exist).
+advances (gated while any critical blocker stands or any non-critical
+blocker lacks a written acknowledgement).
 
 ---
 
