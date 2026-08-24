@@ -562,18 +562,21 @@ def _run_add_body(devices: list[dict], sub: dict, app: dict | None,
 
     # Never trust the async-op body alone — reconcile against the workspace,
     # and only assign/move serials that are actually there (mirrors Step 4).
-    verify_ok = True
     try:
         with st.spinner("Verifying claims against the workspace inventory..."):
             in_ws = glp.workspace_serials()
     except Exception as e:
-        verify_ok = False
+        # Fail-closed (finding #7): a failed verification read must never
+        # EXPAND the set of devices eligible for mutation. Abort the run —
+        # only serials positively confirmed in the workspace may be assigned
+        # or moved.
         results.append(("Verify workspace inventory", False,
-                        str(e)[:200] + " — proceeding with the submitted serials"))
-        in_ws = existing | {s.upper() for s in to_claim}
+                        str(e)[:200] + " — aborting: no devices are assigned "
+                        "or moved until the workspace inventory read succeeds"))
+        return
     ok_serials = [s for s in serials if s.upper() in in_ws]
     failed = sorted({s.upper() for s in serials} - in_ws)
-    if to_claim and verify_ok and not failed:
+    if to_claim and not failed:
         results.append((f"Claim verified — all {len(serials)} device(s) in the "
                         "workspace", True, ""))
     if failed:

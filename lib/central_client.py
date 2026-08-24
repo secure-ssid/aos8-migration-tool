@@ -17,11 +17,12 @@ orchestrator records and displays it.
 import re
 import time
 from typing import Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import requests
 
 from .http_base import normalize_base
+from .manifest import KIND_SSID
 from .models import CentralConfig, ForwardMode, AuthType, RadiusServer, SSID
 
 TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
@@ -138,6 +139,9 @@ class CentralClient:
         # which /network-config API version this tenant answered on (ordering
         # hint for _config_request; see its docstring)
         self._config_version: Optional[str] = None
+        # ownership registry (lib.manifest) attached by the Step 3 view —
+        # None keeps the legacy name-only idempotency
+        self.manifest = None
 
     # ─────────────────── Auth / HTTP ───────────────────
 
@@ -220,9 +224,12 @@ class CentralClient:
         try:
             body = resp.json()
         except ValueError:
-            # a 2xx with a non-JSON body is still a success — never let a
-            # JSONDecodeError masquerade as a failed call
-            return {"_raw": resp.text[:300]}
+            # a 2xx with a non-JSON body is a protocol violation — every API
+            # response is JSON. Fail closed rather than flattening a success
+            # out of a body the caller cannot trust.
+            raise CentralAPIError(
+                f"{method} {path} returned 2xx with a non-JSON body — "
+                f"treated as failure: {resp.text[:300]}")
         return {"items": body} if isinstance(body, list) else body
 
     def _get(self, path, params=None):
@@ -397,7 +404,7 @@ class CentralClient:
 
     def create_site(self, name: str, address: str = "", city: str = "",
                     state: str = "", country: str = "", zipcode: str = "",
-                    timezone_id: str = "UTC") -> str:
+                    timezone_id: str = "UTC", lab_mode: bool = False) -> str:
         """Idempotent: returns the existing site's id when the name matches.
 
         Body shape from HPE's shipping New Central workflows (wpa3-psk-overlay /
@@ -408,10 +415,19 @@ class CentralClient:
         for site in self.list_sites():
             if self._site_name(site) == name:
                 return self._site_id(site) or name
+        if not all((address.strip(), city.strip(), country.strip())) \
+                and not lab_mode:
+            # blank site data must not silently become a REAL placeholder site
+            # in a production tenant — the lab fixture below is for labs only
+            raise CentralAPIError(
+                f"Site '{name}' has incomplete address data (street address, "
+                "city and country are required) — refusing to create a "
+                "placeholder site in a production tenant. Supply the site "
+                "address, or enable lab/test mode for a throwaway lab tenant.")
         # New Central requires the FULL geographic body (pycentral Site:
         # name+address+city+state+country+zipcode+timezone are all required and
-        # country/state are ISO-3166 validated). Fall back to valid placeholders
-        # for a lab/test site when the operator didn't supply an address.
+        # country/state are ISO-3166 validated). Placeholder values are only
+        # reachable in lab/test mode (gated above).
         body: dict = {
             "name": name,
             "address": address or "1 Lab Street",
@@ -764,13 +780,22 @@ class CentralClient:
         """Create the wlan-ssid, or if it already exists PATCH it with the same
         body so bindings (auth-server-group, VLAN, data rates) reflect the
         CURRENT config on re-runs — a plain duplicate-swallow would leave a
-        stale binding (e.g. an SSID still pointing at a previous server-group)."""
+        stale binding (e.g. an SSID still pointing at a previous server-group).
+
+        With a manifest attached, the PATCH path is gated: patching a same-name
+        SSID another administrator created is finding #3, so only manifest-owned
+        (or explicitly adopted) SSIDs are patched."""
         try:
             self._config_request("POST", f"wlan-ssids/{encoded}", json=body)
         except CentralAPIError as e:
             if not _is_duplicate(e):
                 raise
+            if self.manifest is not None:
+                self.manifest.gate(KIND_SSID, unquote(encoded), exists=True)
             self._config_request("PATCH", f"wlan-ssids/{encoded}", json=body)
+        else:
+            if self.manifest is not None:
+                self.manifest.register(KIND_SSID, unquote(encoded), payload=body)
 
     def create_underlay_ssid(self, ssid: SSID, scope_id: str,
                              server_group: str = "") -> None:
@@ -1015,7 +1040,8 @@ class CentralClient:
                      lambda s=site_name: site_ids.update({s: self.create_site(
                          s, cc.site_address, cc.site_city, cc.site_state,
                          cc.site_country, cc.site_zipcode,
-                         timezone_id=getattr(cc, "site_timezone", "UTC"))}))
+                         timezone_id=getattr(cc, "site_timezone", "UTC"),
+                         lab_mode=getattr(cc, "lab_mode", False))}))
         else:
             try:
                 for site in self.list_sites(refresh=True):

@@ -1,6 +1,6 @@
 """
-Read-only API connectivity probe — run once with real credentials to learn
-what a tenant actually supports BEFORE attempting any writes. Catches the
+Read-only API probe: run once with real credentials to learn
+what a tenant actually supports BEFORE probing any writes. Catches the
 quirks that otherwise surface one provisioning error at a time: which site
 route works, whether the tenant is a hybrid cluster, scope reads, GLP reach,
 classic token validity.
@@ -9,8 +9,20 @@ Every check is a GET, with ONE exception: the device-group write check really
 does create a disposable group (there is no dry-run on that route) and then
 deletes it, reporting a WARNING if the deletion could not be confirmed. Each
 check returns a ProbeResult the UI renders as a row.
+
+Response-schema validation: a probe must never report green on a payload
+that does not match the documented API shape — a 2xx with a non-JSON body
+flattens to {} and must not read as "0 site(s) readable" (review finding 10 /
+response-schema weakness).
 """
+import re
 from dataclasses import dataclass
+from typing import Optional
+
+# AOS 10 target versions are full 4-part releases (10.7.0.0), the shape the
+# tenant firmware-compliance APIs expect. "10.7" or "10.7.0" is not a
+# downloadable build number and cannot be validated against a tenant.
+_FW_RE = re.compile(r"^\d+\.\d+\.\d+\.\d+$")
 
 from .central_client import CentralClient, CentralAPIError
 from .glp_client import GLPClient
@@ -35,7 +47,63 @@ def _probe(name: str, fn) -> ProbeResult:
         return ProbeResult(name, "fail", msg[:200])
 
 
-def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list[ProbeResult]:
+def _require_object_list(name: str, items) -> list:
+    """Fail closed on a response whose shape does not match the documented
+    API: a list of dicts for resource collections. A malformed payload (a
+    dict, a list of strings, a non-JSON 2xx flattened to {}) must never read
+    as '0 resources readable' — that would hide a proxy/API error behind a
+    green probe row."""
+    if not isinstance(items, list):
+        raise ValueError(
+            f"response schema mismatch: {name} returned "
+            f"{type(items).__name__}, expected a list (response-schema "
+            "validation)")
+    bad = [x for x in items if not isinstance(x, dict)]
+    if bad:
+        raise ValueError(
+            f"response schema mismatch: {name} contained "
+            f"{len(bad)} non-object entr{'y' if len(bad) == 1 else 'ies'} "
+            "(response-schema validation)")
+    return items
+
+
+def check_target_firmware(target: str, *, supported: Optional[list[str]] = None,
+                          error: str = "") -> ProbeResult:
+    """Validate a target AOS 10 firmware against the tenant's supported set.
+
+    - A non-4-part target (e.g. '10.7') is a hard FAIL — it is not a
+      downloadable build the tenant can be checked against.
+    - A well-formed target with NO tenant query (supported is None or the
+      live query errored) is a WARN with an explicit 'cannot validate' —
+      never a silent pass.
+    - A well-formed target outside the tenant's supported set is a FAIL.
+    """
+    target = (target or "").strip()
+    if not _FW_RE.match(target):
+        return ProbeResult(
+            "Target firmware", "fail",
+            f"'{target}' is not a valid AOS 10 version — expected "
+            "4-part build e.g. 10.7.0.0")
+    if error:
+        return ProbeResult(
+            "Target firmware", "warn",
+            f"cannot validate '{target}' against tenant supported versions — "
+            f"{error}")
+    if supported is None:
+        return ProbeResult(
+            "Target firmware", "warn",
+            f"cannot validate '{target}' against tenant supported versions "
+            "(no live query available)")
+    if target not in supported:
+        return ProbeResult(
+            "Target firmware", "fail",
+            f"'{target}' is NOT in this tenant's supported version set")
+    return ProbeResult("Target firmware", "ok",
+                       f"'{target}' is in the tenant's supported set")
+
+
+def probe_new_central(base_url: str, client_id: str, client_secret: str,
+                      target_fw: str = "") -> list[ProbeResult]:
     results: list[ProbeResult] = []
     client = CentralClient(base_url, client_id, client_secret)
 
@@ -55,12 +123,24 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
     results.append(_probe("Read — global scope (/network-config/v1/scope-maps)", scope))
 
     def sites():
-        s = client.list_sites()
+        s = _require_object_list("sites", client.list_sites())
+        missing = [x for x in s if not (x.get("siteName") or x.get("name"))]
+        if missing:
+            raise ValueError(
+                f"response schema mismatch: {len(missing)} site entr"
+                f"{'y' if len(missing) == 1 else 'ies'} missing siteName/name "
+                "(response-schema validation)")
         return f"{len(s)} site(s) readable via /network-config sites routes"
     results.append(_probe("Read — sites", sites))
 
     def groups():
-        g = client.list_device_groups()
+        g = _require_object_list("device groups", client.list_device_groups())
+        missing = [x for x in g if not (x.get("scopeName") or x.get("name"))]
+        if missing:
+            raise ValueError(
+                f"response schema mismatch: {len(missing)} device group"
+                f"{'s' if len(missing) != 1 else ''} missing scopeName/name "
+                "(response-schema validation)")
         return f"{len(g)} device group(s) readable"
     results.append(_probe("Read — device groups", groups))
 
@@ -71,8 +151,40 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
             # it into "0 AP(s)" probes green on a 403 monitoring scope
             raise RuntimeError("monitoring read failed — check API-client "
                                "monitoring scope")
+        _require_object_list("monitored devices", a)
         return f"{len(a)} AP(s) readable via /network-monitoring/v1/devices"
     results.append(_probe("Read — monitored devices (validation source)", aps))
+
+    # target-firmware gate: the chosen AOS 10 build is checked against the
+    # tenant's published firmware list, so an unsupported target surfaces at
+    # probe/preflight instead of silently provisioning a build Central can't
+    # apply. Only runs when a target was entered; an empty target is skipped
+    # (the wizard separately blocks Continue until one is set). check_target_
+    # firmware owns the status semantics: FAIL on an outside-set or malformed
+    # build, WARN on a failed/no live query — never a silent pass.
+    if target_fw.strip():
+        def target_firmware() -> ProbeResult:
+            try:
+                data = client._get("/firmware/v1/versions",
+                                   params={"device_type": "IAP"})
+                raw = data.get("data") if isinstance(data, dict) else None
+                if not isinstance(raw, list):
+                    raise ValueError(
+                        "supported-versions response is not a list "
+                        "(response-schema validation)")
+                supported = {str(v.get("firmware_version")).strip()
+                             for v in raw if isinstance(v, dict)
+                             and v.get("firmware_version")}
+                if not supported:
+                    raise ValueError("supported-versions response listed no "
+                                     "firmware versions")
+                return check_target_firmware(target_fw,
+                                             supported=sorted(supported))
+            except Exception as e:
+                # a failed or malformed live query is a WARN ("cannot
+                # validate"), never a silent pass
+                return check_target_firmware(target_fw, error=str(e))
+        results.append(target_firmware())
 
     # hybrid detection: a dry probe of the group-create route. The API has no
     # dry-run, so we send a clearly-disposable name and treat a hybrid block as
@@ -143,10 +255,14 @@ def probe_glp(client_id: str, client_secret: str) -> list[ProbeResult]:
     results.append(a)
     if a.status != "ok":
         return results
-    results.append(_probe("Read — GLP devices (workspace inventory)",
-                          lambda: f"{len(client.list_devices(limit=1))}+ device(s) readable"))
-    results.append(_probe("Read — GLP subscriptions",
-                          lambda: f"{len(client.list_subscriptions(limit=100))} subscription(s)"))
+    results.append(_probe(
+        "Read — GLP devices (workspace inventory)",
+        lambda: f"{len(_require_object_list('GLP devices', client.list_devices(limit=1)))}"
+                "+ device(s) readable"))
+    results.append(_probe(
+        "Read — GLP subscriptions",
+        lambda: f"{len(_require_object_list('GLP subscriptions', client.list_subscriptions(limit=100)))}"
+                " subscription(s)"))
     return results
 
 
@@ -170,6 +286,7 @@ def probe_classic(base_url: str, access_token: str, client_id: str = "",
         if a is None:
             raise RuntimeError("monitoring read failed — check the token's "
                                "monitoring scope")
+        _require_object_list("classic monitored APs", a)
         return f"{len(a)} AP(s) via /monitoring/v2/aps"
     results.append(_probe("Read — classic monitored APs", classic_aps))
     return results, client

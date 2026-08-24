@@ -25,6 +25,107 @@ def _esc_join(names) -> str:
     return ", ".join(esc(n) for n in names) or "—"
 
 
+# ─────────────────── Cutover gate (findings #2 + #6) ───────────────────
+# Pure functions so the gate contract is unit-tested directly
+# (tests/test_cutover_gates.py). `results` rows are (label, ok, err).
+
+def failed_provisioning_steps(results) -> list[tuple[str, str]]:
+    """Every Step 3 step that failed, as (label, error). A failed step used
+    to be downgraded to a warning; it now blocks the cutover until the
+    operator acknowledges THAT failure with a written reason."""
+    return [(label, err) for label, ok, err in results if not ok]
+
+
+def outstanding_manual_steps(results) -> list[str]:
+    """Labels of DEFERRED / MANUAL FOLLOW-UP work: gateway cluster formation,
+    overlay WLAN binding, PSK + RADIUS-secret replacement, captive-portal
+    validation. These rows carry ok=True (nothing the API could do failed)
+    but the work is NOT done — deferred != success."""
+    return [label for label, _ok, _err in results
+            if "DEFERRED" in label or label.startswith("MANUAL FOLLOW-UP")]
+
+
+def cutover_blockers(results, acks, confirmations) -> list[str]:
+    """Why the cutover must stay locked. `acks` maps a failed step's label to
+    the operator's free-text justification (blank is not a justification);
+    `confirmations` maps an outstanding manual step's label to True once the
+    operator confirms it done. Empty list = the cutover may proceed."""
+    blockers = []
+    for label, _err in failed_provisioning_steps(results):
+        if not (acks.get(label) or "").strip():
+            blockers.append(f"Failed step not acknowledged: {label}")
+    for label in outstanding_manual_steps(results):
+        if not confirmations.get(label):
+            blockers.append(f"Outstanding manual work: {label}")
+    return blockers
+
+
+def _render_cutover_gate(results, acks, confirmations) -> None:
+    """The gate UI: surface every blocker and collect the per-item decisions
+    that lift it. Each acknowledgement writes an audit record with the
+    operator's identity, the failed step, and the reason — the global
+    'override everything' checkbox this replaces left no such trail."""
+    failed = failed_provisioning_steps(results)
+    outstanding = outstanding_manual_steps(results)
+    if not failed and not outstanding:
+        return
+    with st.container(border=True):
+        st.markdown(
+            f'<div style="font-weight:600;color:{WARN};margin-bottom:0.4rem;">'
+            f'🔒 Cutover gate — {len(failed) + len(outstanding)} item(s) must be '
+            f'resolved before APs can be converted</div>',
+            unsafe_allow_html=True)
+        for label, err in failed:
+            if (acks.get(label) or "").strip():
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:{MUTED};margin:3px 0;">'
+                    f'✅ <s>{esc(label)}</s> — acknowledged: '
+                    f'<i>{esc(acks[label])}</i></div>', unsafe_allow_html=True)
+                continue
+            st.markdown(
+                f'<div style="font-size:12.5px;color:{TEXT};margin:5px 0 2px;">'
+                f'❌ <b>{esc(label)}</b></div>', unsafe_allow_html=True)
+            if err:
+                st.code(err, language="text")
+            reason = st.text_input(
+                "Why is it safe to convert despite this failure?",
+                key=f"ack_reason_{abs(hash(label))}",
+                placeholder="Required — e.g. 'SSID built by hand in Central; "
+                            "verified against source config'")
+            if st.button("Acknowledge this failure",
+                         key=f"ack_btn_{abs(hash(label))}"):
+                if not reason.strip():
+                    st.error("A written reason is required — the acknowledgement "
+                             "is an audit record, not a checkbox.")
+                else:
+                    audit.record(
+                        "cutover-failure-ack",
+                        user=st.session_state.get("_user"),
+                        customer=st.session_state.get("customer_name"),
+                        step=label, error=err[:200], reason=reason.strip(),
+                    )
+                    acks[label] = reason.strip()
+                    # no st.rerun(): the button click already re-runs the
+                    # script, and a mid-render rerun would unmount the cutover
+                    # checkboxes below and garbage-collect their state
+        for label in outstanding:
+            done = bool(confirmations.get(label))
+            st.markdown(
+                f'<div style="font-size:12.5px;color:{MUTED if done else TEXT};'
+                f'margin:5px 0 2px;">{"✅" if done else "⏳"} {esc(label)}</div>',
+                unsafe_allow_html=True)
+            if not done and st.button("Mark done — verified in Central",
+                                      key=f"manual_btn_{abs(hash(label))}"):
+                audit.record(
+                    "cutover-manual-confirmed",
+                    user=st.session_state.get("_user"),
+                    customer=st.session_state.get("customer_name"),
+                    step=label,
+                )
+                confirmations[label] = True
+                # no st.rerun() — see the acknowledgement path above
+
+
 def _review_checklist(central_cfg, customer) -> bool:
     """Pre-onboarding gate — the operator reviews the staged config in New
     Central before any AP is claimed or moved. Returns True once confirmed."""
@@ -84,19 +185,26 @@ def render():
             st.rerun()
         return
 
+    # Cutover gate state (findings #2/#6): acknowledgements of failed steps
+    # and confirmations of deferred manual work live in session state and are
+    # wiped by _reset_downstream / re-provisioning like everything derived.
+    prov_results = st.session_state.get("provision_results", [])
+    gate_acks = st.session_state.setdefault("cutover_failure_acks", {})
+    gate_confirms = st.session_state.setdefault("cutover_manual_confirmations", {})
+
     if not st.session_state.get("provision_done"):
         info_banner("Configuration isn't built yet (Step 3). Build it first so you can "
                     "review it here before onboarding APs: build config → review → "
                     "claim → move APs → convert.",
                     color=WARN)
     else:
-        _failed_steps = [r for r in st.session_state.get("provision_results", [])
-                         if not r[1]]
-        if _failed_steps:
-            st.warning(f"⚠️ Step 3 finished with **{len(_failed_steps)} failed "
-                       f"step(s)** — converted APs may not find their full config. "
-                       "Consider fixing and re-running provisioning before "
-                       "onboarding.")
+        _render_cutover_gate(prov_results, gate_acks, gate_confirms)
+
+    # computed AFTER the gate panel: an acknowledgement/confirmation clicked
+    # in this very run must unlock the cutover below immediately
+    blockers = cutover_blockers(prov_results, acks=gate_acks,
+                                confirmations=gate_confirms) \
+        if st.session_state.get("provision_done") else []
 
     central_cfg = st.session_state.get("central_config")
     # Pre-onboarding review checklist (only meaningful for the New Central path
@@ -109,10 +217,11 @@ def render():
 
     if central_cfg and getattr(central_cfg, "destination", "new") == "classic":
         info_banner(
-            "<b>Classic destination:</b> Step 3 already pre-added the serial+MAC pairs "
-            "to the classic device inventory. This GreenLake step applies to "
-            "GLP-onboarded classic accounts (most current ones) — if this account "
-            "predates GreenLake onboarding, just continue to the runbook.",
+            "<b>Classic destination:</b> Step 3 built the configuration and pre-added "
+            "the serial+MAC pairs to the classic device inventory — no APs have been "
+            "moved yet. This GreenLake step applies to GLP-onboarded classic accounts "
+            "(most current ones); the group move itself is the cutover at the bottom "
+            "of this page.",
         )
 
     claimable = [ap for ap in customer.aps if ap.serial and ap.mac]
@@ -527,6 +636,11 @@ def render():
                        f"`{st.session_state.get('central_base_classic','')}`.")
         if not reviewed:
             info_banner("Tick the review checklist at the top first.", color=WARN)
+        if blockers:
+            info_banner(
+                "<b>The cutover is locked by the gate above:</b><br>"
+                + "<br>".join(f"• {esc(b)}" for b in blockers),
+                color=WARN)
         ap_serials = {grp.name: [s for s in grp.ap_serials if s]
                       for grp in customer.ap_groups}
         _n_aps = sum(len(v) for v in ap_serials.values())
@@ -560,7 +674,8 @@ def render():
             key="cutover_confirm")
         if st.button("Move APs into groups + assign persona/site",
                      type="primary",
-                     disabled=not (reviewed and cutover_ok and sub_ok)):
+                     disabled=not (reviewed and cutover_ok and sub_ok
+                                   and not blockers)):
             box = st.empty()
             lines: list[tuple[str, bool]] = []
 
@@ -628,6 +743,86 @@ def render():
             else:
                 st.success("APs moved into their groups and assigned — migration complete.")
             with st.expander("Onboarding step log", expanded=False):
+                for label, success, _ in onb:
+                    provision_step_line(label, success)
+
+    # ── Classic cutover: the devices phase (move APs into groups) ──────────
+    # Step 3 runs classic provisioning with phase="config" — sites/groups/
+    # WLANs/firmware only. The AP move that converts them happens HERE, behind
+    # the same gate as the New Central cutover.
+    if central_cfg and getattr(central_cfg, "destination", "new") == "classic" \
+            and st.session_state.get("provision_done"):
+        st.divider()
+        section_label("Move APs into groups + assign site (classic)", color=HPE_GREEN)
+        info_banner(
+            "⚠️ <b>This is the cutover — it moves your APs into their AOS 10 "
+            "groups now.</b> Moving a claimed AP into its group converts it: "
+            "<b>each AP reboots and goes offline ~10–20 min</b>, then comes up "
+            "on AOS 10. Only run this inside your maintenance/cutover window.",
+            color=WARN)
+        if blockers:
+            info_banner(
+                "<b>The cutover is locked by the gate above:</b><br>"
+                + "<br>".join(f"• {esc(b)}" for b in blockers),
+                color=WARN)
+        ap_serials = {grp.name: [s for s in grp.ap_serials if s]
+                      for grp in customer.ap_groups}
+        _n_aps = sum(len(v) for v in ap_serials.values())
+        cutover_ok_c = st.checkbox(
+            f"I'm in my cutover window — move these {_n_aps} AP(s) into their "
+            "groups now (they will reboot into AOS 10 and drop offline)",
+            key="cutover_confirm_classic")
+        if st.button("Move APs into groups + assign site",
+                     type="primary",
+                     disabled=not (cutover_ok_c and not blockers)):
+            box = st.empty()
+            lines: list[tuple[str, bool]] = []
+
+            def on_step(label: str, ok: bool):
+                lines.append((label, ok))
+                with box.container():
+                    for lbl, success in lines:
+                        provision_step_line(lbl, success)
+            try:
+                classic = build_classic_client()
+                try:
+                    with st.spinner("Moving APs and assigning site..."):
+                        results = classic.provision(central_cfg,
+                                                    ap_serials=ap_serials,
+                                                    on_step=on_step,
+                                                    phase="devices")
+                finally:
+                    # the classic refresh token is single-use: persist it on the
+                    # failure path too, or the spent one is all that survives
+                    persist_classic_tokens(classic)
+                audit.record(
+                    "cutover",
+                    user=st.session_state.get("_user"),
+                    tenant=st.session_state.get("central_base_classic"),
+                    customer=st.session_state.get("customer_name"),
+                    destination="classic",
+                    steps=len(results),
+                    failed=sum(1 for r in results if not r[1]),
+                )
+                st.session_state["onboard_results"] = results
+                st.rerun()
+            except Exception as e:
+                st.error(f"Classic cutover failed: {e}")
+
+        onb = st.session_state.get("onboard_results")
+        if onb:
+            fail = [r for r in onb if not r[1]]
+            if fail:
+                st.warning(f"{len(fail)} step(s) failed — APs must be claimed in "
+                           "GreenLake first; fix and re-run.")
+                for label, _, err in fail:
+                    provision_step_line(label, False)
+                    if err:
+                        st.code(err, language="text")
+            else:
+                st.success("APs moved into their groups and assigned — migration "
+                           "complete.")
+            with st.expander("Cutover step log", expanded=False):
                 for label, success, _ in onb:
                     provision_step_line(label, success)
 

@@ -152,10 +152,14 @@ def render():
         site_tz = st.selectbox("Timezone", _TZ_CHOICES,
                                index=_TZ_CHOICES.index(_tz_cur) if _tz_cur in _TZ_CHOICES else 0,
                                help="IANA zone — required by New Central site-create")
-        st.markdown(
-            f'<div style="font-size:11.5px;color:{FAINT};margin-top:0.3rem;">'
-            f'Leave blank to use valid lab placeholders (1 Lab Street, San Jose, CA, '
-            f'United States, 95002).</div>', unsafe_allow_html=True)
+        lab_mode = st.checkbox(
+            "Lab/test mode — allow placeholder sites when the address is blank",
+            value=st.session_state.get("lab_mode", False),
+            help="Production tenants must get a real site address. With this "
+                 "OFF, Step 3 refuses to provision a site from incomplete "
+                 "data; with it ON, blank data becomes a placeholder site "
+                 "(1 Lab Street, San Jose / 0.0,0.0 geolocation) — throwaway "
+                 "lab tenants only.")
 
     st.divider()
 
@@ -232,10 +236,12 @@ def render():
             from lib import cleanup as _cleanup
             from lib.session_clients import (build_central_client, build_classic_client,
                                              have_classic_creds,
-                                             persist_classic_tokens)
+                                             persist_classic_tokens,
+                                             tenant_fingerprint)
             # old results are from a different run — never let them imply this
             # click succeeded
             st.session_state.pop("cleanup_results", None)
+            st.session_state.pop("cleanup_audit_error", None)
             nc = cl = None
             try:
                 if st.session_state.get("dest_type", "new") == "new":
@@ -246,21 +252,38 @@ def render():
                 st.error(f"Auth failed: {e}")
                 nc = cl = None
             if nc is not None or cl is not None:
+                # Finding #3: when a manifest exists for this customer+tenant,
+                # teardown deletes ONLY the objects this migration created —
+                # same-prefix objects owned by someone else (or explicitly
+                # adopted) are kept. No manifest on disk = legacy prefix
+                # teardown (objects that predate the manifest).
+                from lib.manifest import Manifest, manifest_path
+                _mpath = manifest_path(st.session_state.get("customer_name", ""),
+                                       tenant_fingerprint())
+                _manifest = Manifest(_mpath) if _mpath.is_file() else None
                 with st.spinner("Deleting zztest-* objects..."):
-                    res = _cleanup.cleanup("zztest", central=nc, classic=cl)
+                    res = _cleanup.cleanup("zztest", central=nc, classic=cl,
+                                           manifest=_manifest)
                 st.session_state["cleanup_results"] = res
                 # cleanup may have refreshed the single-use classic token
                 if cl is not None:
                     persist_classic_tokens(cl)
-                audit.record(
-                    "cleanup",
-                    user=st.session_state.get("_user"),
-                    tenant=(st.session_state.get("central_base")
-                            or st.session_state.get("central_base_classic")),
-                    prefix="zztest",
-                    deleted=sum(1 for _l, ok, _d in res if ok),
-                    failed=sum(1 for _l, ok, _d in res if not ok),
-                )
+                try:
+                    audit.record(
+                        "cleanup",
+                        user=st.session_state.get("_user"),
+                        tenant=(st.session_state.get("central_base")
+                                or st.session_state.get("central_base_classic")),
+                        prefix="zztest",
+                        deleted=sum(1 for _l, ok, _d in res if ok),
+                        failed=sum(1 for _l, ok, _d in res if not ok),
+                    )
+                except audit.AuditWriteError as e:
+                    # the cleanup itself already committed — a raising audit
+                    # log must not kill the session, but the missing
+                    # compliance evidence stays LOUD: stashed because the
+                    # rerun below would wipe a same-render warning
+                    st.session_state["cleanup_audit_error"] = str(e)
                 # rerun only after a real run — on auth failure the st.error
                 # above must stay visible
                 st.rerun()
@@ -268,6 +291,11 @@ def render():
                 st.warning("No Classic credentials registered — add the access "
                            "token (or refresh token + client id/secret) above first.")
 
+        _cleanup_audit_error = st.session_state.pop("cleanup_audit_error", None)
+        if _cleanup_audit_error:
+            st.warning("Cleanup committed, but the audit record failed — "
+                       "compliance evidence for this run is missing: "
+                       f"{_cleanup_audit_error}")
         for label, ok, detail in st.session_state.get("cleanup_results", []):
             icon, col = ("✓", OK) if ok else ("✕", FAIL)
             st.markdown(
@@ -814,7 +842,8 @@ def render():
             if dest_type == "new":
                 rows += api_probe.probe_new_central(
                     central_base, central_client_id,
-                    st.session_state.get("central_secret", ""))
+                    st.session_state.get("central_secret", ""),
+                    target_fw=aos10_fw.strip())
                 rows += api_probe.probe_glp(
                     central_client_id, st.session_state.get("central_secret", ""))
                 from lib.session_clients import (classic_client_creds,
@@ -914,6 +943,7 @@ def render():
             central_cfg.site_country = site_country.strip()
             central_cfg.site_zipcode = site_zip.strip()
             central_cfg.site_timezone = site_tz
+            central_cfg.lab_mode     = bool(lab_mode)
             central_cfg.destination  = dest_type
 
             # Re-Continuing with a CHANGED target invalidates everything the
@@ -966,6 +996,7 @@ def render():
                 "site_country":      site_country,
                 "site_zipcode":      site_zip,
                 "site_timezone":     site_tz,
+                "lab_mode":          bool(lab_mode),
                 "central_client_id": central_client_id.strip(),
                 "aos10_fw":          aos10_fw.strip(),
                 "central_config":    central_cfg,

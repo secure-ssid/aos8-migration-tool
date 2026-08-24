@@ -4,15 +4,18 @@ auth servers, firmware compliance.
 """
 import streamlit as st
 
+from lib.manifest import CollisionError, Manifest, manifest_path, parse_collision
+from lib.models import site_data_error
 from lib.session_clients import (
     build_central_client, build_classic_client, persist_classic_tokens,
-    use_classic_for_moves,
+    use_classic_for_moves, tenant_fingerprint,
 )
 from lib.styles import (
     BORDER, FAINT, MUTED, TEXT,
     page_header, section_label, provision_step_line, badge, esc, info_banner,
 )
 from lib import audit
+from views.p4_greenlake import outstanding_manual_steps
 
 
 def render():
@@ -111,17 +114,29 @@ def render():
 
     # ── Already provisioned ────────────────────────────────────────────────
     if st.session_state.get("provision_done"):
+        _provision_audit_error = st.session_state.pop("provision_audit_error", None)
+        if _provision_audit_error:
+            st.warning("Provisioning committed, but the audit record failed — "
+                       "compliance evidence for this run is missing: "
+                       f"{_provision_audit_error}")
         _show_results(st.session_state.get("provision_results", []))
+        _show_collision_adoptions(
+            st.session_state.get("provision_results", []))
         st.divider()
         col_back, col_mid, col_next = st.columns([1, 3, 1])
         col_back.button("← Back", on_click=lambda: st.session_state.update({"step": 1}))
         if col_mid.button("Reset & re-run provisioning"):
             st.session_state.pop("provision_done", None)
             st.session_state.pop("provision_results", None)
+            st.session_state.pop("provision_audit_error", None)
             # re-provisioning invalidates any earlier cutover's "migration
             # complete" banner — it described the pre-reset config
             st.session_state.pop("onboard_results", None)
             st.session_state.pop("onboard_results_fp", None)
+            # …and every cutover-gate decision: the failures and deferred
+            # work they referred to no longer exist
+            st.session_state.pop("cutover_failure_acks", None)
+            st.session_state.pop("cutover_manual_confirmations", None)
             st.rerun()
         if col_next.button("GreenLake →", type="primary", use_container_width=True):
             st.session_state["step"] = 3
@@ -171,11 +186,31 @@ def render():
     col_back, _, col_run = st.columns([1, 3, 1])
     col_back.button("← Back", on_click=lambda: st.session_state.update({"step": 1}))
 
-    if col_run.button("🚀 Provision", type="primary", use_container_width=True):
+    # Finding #8: blank site data must not silently become a REAL placeholder
+    # site in a production tenant — provisioning stays locked until the
+    # address is complete (Step 1) or lab/test mode is explicitly on.
+    _site_err = site_data_error(central_cfg)
+    if _site_err:
+        st.error(_site_err)
+
+    if col_run.button("🚀 Provision", type="primary", use_container_width=True,
+                      disabled=bool(_site_err)):
         ap_serials = {
             grp.name: [s for s in grp.ap_serials if s]
             for grp in customer.ap_groups
         }
+
+        # Finding #3: the ownership manifest — every object this run creates
+        # is registered, and same-named tenant objects it did NOT create
+        # collide (adoption UI below) instead of being silently reused or
+        # patched. An unreadable manifest fails closed: it would otherwise
+        # read as "we own nothing" and re-open every collision gate.
+        try:
+            manifest = Manifest(manifest_path(
+                st.session_state.get("customer_name", ""), tenant_fingerprint()))
+        except CollisionError as e:
+            st.error(str(e))
+            return
 
         progress_box = st.empty()
         status_lines: list[tuple[str, bool]] = []
@@ -203,10 +238,16 @@ def render():
                     return
             st.success("Classic Central reachable")
             ap_macs = {ap.serial: ap.mac for ap in customer.aps if ap.serial and ap.mac}
+            client.manifest = manifest
             try:
-                with st.spinner("Provisioning classic Central..."):
+                with st.spinner("Provisioning classic Central (config only — no "
+                                "APs are moved)..."):
+                    # Finding #1: config phase ONLY — AP group moves are the
+                    # Step 4 cutover, so "no APs are claimed, moved or
+                    # rebooted" here is actually true
                     results = client.provision(central_cfg, ap_serials=ap_serials,
-                                               ap_macs=ap_macs, on_step=on_step)
+                                               ap_macs=ap_macs, on_step=on_step,
+                                               phase="config")
             finally:
                 # a mid-run 401-refresh rotates the single-use token even when
                 # provisioning then fails — persist on EVERY exit path or the
@@ -225,11 +266,13 @@ def render():
                             "Aruba Central (network-config) access in GreenLake.")
                     return
             st.success("Authenticated with New Central")
+            client.manifest = manifest
             # hybrid clusters need the Classic API for device-group create/move
             # — only when the tenant is explicitly marked hybrid
             classic_client = None
             if use_classic_for_moves():
                 classic_client = build_classic_client()
+                classic_client.manifest = manifest
                 st.caption("Hybrid mode: device groups + moves will route through "
                            "the Classic API Gateway.")
             elif st.session_state.get("hybrid_tenant"):
@@ -248,28 +291,98 @@ def render():
                     st.info("The Classic refresh token rotated during this run — the new "
                             "one is saved in this session.")
 
-        audit.record(
-            "provision",
-            user=st.session_state.get("_user"),
-            destination=central_cfg.destination,
-            tenant=(st.session_state.get("central_base")
-                    or st.session_state.get("central_base_classic")),
-            customer=st.session_state.get("customer_name"),
-            steps=len(results),
-            failed=sum(1 for r in results if not r[1]),
-        )
+        try:
+            audit.record(
+                "provision",
+                user=st.session_state.get("_user"),
+                destination=central_cfg.destination,
+                tenant=(st.session_state.get("central_base")
+                        or st.session_state.get("central_base_classic")),
+                customer=st.session_state.get("customer_name"),
+                steps=len(results),
+                failed=sum(1 for r in results if not r[1]),
+            )
+        except audit.AuditWriteError as e:
+            # provisioning already committed — a raising audit log must not
+            # kill the session, but the missing compliance evidence stays
+            # LOUD: stashed because the rerun below would wipe a same-render
+            # warning
+            st.session_state["provision_audit_error"] = str(e)
         st.session_state["provision_results"] = results
         st.session_state["provision_done"]    = True
         st.rerun()
 
 
+def _show_collision_adoptions(results: list[tuple[str, bool, str]]) -> None:
+    """Finding #3: when the manifest gate refuses a same-named tenant object,
+    the failure surfaces here with an explicit, per-resource ADOPT action —
+    recorded in the manifest and the audit log with the operator's identity.
+    Adopted objects may be reused by provisioning but are never deleted by
+    cleanup (they belong to someone else)."""
+    collisions = []
+    for _label, ok, err in results:
+        if not ok:
+            parsed = parse_collision(err)
+            if parsed:
+                collisions.append(parsed)
+    if not collisions:
+        return
+    manifest = Manifest(manifest_path(
+        st.session_state.get("customer_name", ""), tenant_fingerprint()))
+    with st.container(border=True):
+        st.markdown(
+            '<div style="font-weight:600;margin-bottom:0.3rem;">'
+            '⚠️ Name collisions — these objects already exist in the tenant '
+            'and were NOT created by this tool</div>'
+            f'<div style="font-size:12px;color:{FAINT};margin-bottom:0.5rem;">'
+            f'Provisioning refused to touch them. Adopt an object only if you '
+            f'own it and want this migration to reuse it — otherwise rename or '
+            f'delete it in Central, then re-run.</div>',
+            unsafe_allow_html=True)
+        for kind, name in collisions:
+            if manifest.lookup(kind, name):
+                st.markdown(
+                    f'<div style="font-size:12.5px;color:{MUTED};margin:2px 0;">'
+                    f'✅ {esc(kind)} <b>{esc(name)}</b> — adopted</div>',
+                    unsafe_allow_html=True)
+                continue
+            c1, c2 = st.columns([3, 1])
+            c1.markdown(
+                f'<div style="font-size:12.5px;color:{TEXT};padding-top:6px;">'
+                f'{esc(kind)} <b>{esc(name)}</b></div>', unsafe_allow_html=True)
+            if c2.button("Adopt", key=f"adopt_{kind}_{name}"):
+                manifest.adopt(kind, name,
+                               user=st.session_state.get("_user") or "")
+                audit.record(
+                    "manifest-adopt",
+                    user=st.session_state.get("_user"),
+                    customer=st.session_state.get("customer_name"),
+                    kind=kind, name=name,
+                )
+                st.rerun()
+
+
 def _show_results(results: list[tuple[str, bool, str]]):
     ok   = [r for r in results if r[1]]
     fail = [r for r in results if not r[1]]
+    # Finding #6: DEFERRED / MANUAL FOLLOW-UP rows carry ok=True (the API part
+    # succeeded) but the WORK is outstanding — they must not inflate the
+    # "steps completed" metric or read as done.
+    outstanding = outstanding_manual_steps(results)
+    done = len(ok) - len(outstanding)
 
-    m1, m2 = st.columns(2)
-    m1.metric("Steps completed", len(ok))
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Steps completed", done)
     m2.metric("Steps failed",    len(fail))
+    m3.metric("Outstanding manual work", len(outstanding))
+
+    if outstanding:
+        st.warning(f"{len(outstanding)} step(s) produced manual follow-up work "
+                   "(gateway cluster, overlay binding, placeholder secrets, "
+                   "captive-portal checks) — the Step 4 cutover stays locked "
+                   "until each is confirmed done.")
+        for label in outstanding:
+            provision_step_line(label, True)
 
     if fail:
         st.error(f"{len(fail)} step(s) failed — review each error, fix the cause, "

@@ -136,8 +136,13 @@ def mock_api(monkeypatch):
 
 
 @pytest.fixture()
-def aos8_api():
-    """HTTPS mock for the AOS 8 controller API (port 4343 is TLS-only)."""
+def aos8_api(monkeypatch):
+    """HTTPS mock for the AOS 8 controller API (port 4343 is TLS-only).
+
+    The mock serves a self-signed cert, and AOS8Client now verifies by
+    default — so the test harness opts out through AOS8_DEV_MODE exactly
+    like a local lab would."""
+    monkeypatch.setenv("AOS8_DEV_MODE", "true")
     api = MockAPI(tls=True)
     yield api
     api.close()
@@ -198,12 +203,15 @@ def test_central_401_then_429_both_get_their_retry(mock_api):
     assert c._get("/x")["ok"] is True        # separate flags: both retried
 
 
-def test_central_2xx_non_json_body_is_success(mock_api):
+def test_central_2xx_non_json_body_fails_closed(mock_api):
+    """A 2xx that is not JSON is a protocol violation, not a success — the
+    corrupt body must fail closed instead of being flattened into a dict."""
     mock_api.app = lambda m, p, q, b: (
         _token_response() if p.endswith("oauth2")
         else (200, {"Content-Type": "text/plain"}, "OK"))
     c = _central(mock_api)
-    assert c._get("/x") == {"_raw": "OK"}
+    with pytest.raises(CentralAPIError, match="non-JSON body"):
+        c._get("/x")
 
 
 def test_is_duplicate_ignores_url_path():
@@ -228,7 +236,8 @@ def test_central_create_site_duplicate_resolves_via_relist(mock_api):
     mock_api.app = app
     c = _central(mock_api)
     c._sites_cache = []                      # pre-list saw nothing
-    assert c.create_site("branch-1") == "42"
+    assert c.create_site("branch-1", address="1 Main St", city="San Jose",
+                         country="US") == "42"
 
 
 # ─────────────────── Classic Central ───────────────────
@@ -250,7 +259,8 @@ def test_classic_create_site_finds_id_despite_stale_cache(mock_api):
 
     mock_api.app = app
     c = ClassicCentralClient(mock_api.url, "tok")
-    assert c.create_site("branch-1") == 7
+    assert c.create_site("branch-1", address="1 Main St", city="San Jose",
+                         country="US") == 7
 
 
 def test_classic_401_refreshes_and_rotates_token(mock_api):
@@ -286,6 +296,16 @@ def test_classic_firmware_v2_falls_back_to_v1_on_404(mock_api):
     c = ClassicCentralClient(mock_api.url, "tok")
     c.set_firmware_compliance("g1", "10.7.0.0")
     assert any("firmware/v1" in p for _m, p in mock_api.calls)
+
+
+def test_classic_2xx_non_json_body_fails_closed(mock_api):
+    """A 2xx that is not JSON must raise, not flatten to {} — otherwise a
+    corrupt body reads as success and create_group re-POSTs."""
+    mock_api.app = lambda m, p, q, b: (
+        200, {"Content-Type": "text/plain"}, "OK")
+    c = ClassicCentralClient(mock_api.url, "tok")
+    with pytest.raises(ClassicCentralAPIError, match="non-JSON body"):
+        c._get("/x")
 
 
 # ─────────────────── GreenLake ───────────────────
@@ -1015,14 +1035,30 @@ def test_aos8_login_401_reports_auth_failure(aos8_api):
         c.connect()
 
 
+def test_aos8_tls_verification_defaults_on(monkeypatch):
+    """L4 flip: cert verification is ON by default; the CA-bundle env still
+    selects a specific chain, and AOS8_DEV_MODE is the ONLY opt-out (test
+    harness / local self-signed controllers)."""
+    monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("AOS8_DEV_MODE", raising=False)
+    c = AOS8Client("10.0.0.1", "admin", "pw")
+    assert c.session.verify is True
+
+
 def test_aos8_ca_bundle_env_enables_verification(monkeypatch):
-    """L4: controllers default to verify=False (self-signed certs); an
-    operator-deployed CA bundle must be honored for MITM protection."""
+    """L4: an operator-deployed CA bundle is honored for MITM protection."""
     monkeypatch.setenv("AOS8_CA_BUNDLE", "/path/to/ca.pem")
+    monkeypatch.delenv("AOS8_DEV_MODE", raising=False)
     c = AOS8Client("10.0.0.1", "admin", "pw")
     assert c.session.verify == "/path/to/ca.pem"
-    monkeypatch.delenv("AOS8_CA_BUNDLE")
-    assert AOS8Client("10.0.0.1", "admin", "pw").session.verify is False
+
+
+def test_aos8_dev_mode_opt_out_disables_verification(monkeypatch):
+    """L4: dev/test mode is the only verify=False escape hatch."""
+    monkeypatch.setenv("AOS8_DEV_MODE", "true")
+    monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
+    c = AOS8Client("10.0.0.1", "admin", "pw")
+    assert c.session.verify is False
 
 
 def test_aos8_api_mac_auth_ssid_detected(aos8_api):
