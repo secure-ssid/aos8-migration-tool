@@ -182,3 +182,29 @@ class CentralConfig:
     site_country: str = ""
     site_zipcode: str = ""
     site_timezone: str = "UTC"   # IANA zone id; New Central site-create requires it
+    # Lab/test mode: the ONLY way blank site data may become a placeholder
+    # site ("1 Lab Street" / 0.0,0.0 geolocation). Default off — production
+    # tenants must supply a real address (site_data_error below).
+    lab_mode: bool = False
+
+
+def site_data_error(cc: "CentralConfig") -> Optional[str]:
+    """None when the site data is provisionable; otherwise why not.
+
+    Blank/incomplete site data used to silently create REAL placeholder sites
+    in production tenants (New Central: '1 Lab Street, San Jose'; Classic:
+    latitude/longitude 0.0,0.0). Production mode requires a complete address;
+    the placeholder fallback exists only behind the explicit lab-mode switch.
+    """
+    if not cc.sites or cc.lab_mode:
+        return None
+    missing = [label for label, value in (
+        ("street address", cc.site_address),
+        ("city", cc.site_city),
+        ("country", cc.site_country),
+    ) if not (value or "").strip()]
+    if not missing:
+        return None
+    return ("Site data is incomplete (missing: " + ", ".join(missing) + ") — "
+            "production tenants need a real site address; placeholder sites "
+            "are only created in lab/test mode (Step 1 → 'Lab/test mode').")

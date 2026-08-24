@@ -18,6 +18,11 @@ deliberately not touched here rather than removed by an invented call."""
 from urllib.parse import quote
 from typing import Callable, Optional
 
+from .manifest import (KIND_AUTH_SERVER, KIND_CAPTIVE_PORTAL,
+                       KIND_DEVICE_GROUP, KIND_GATEWAY_CLUSTER, KIND_GROUP,
+                       KIND_POLICY, KIND_ROLE, KIND_SERVER_GROUP, KIND_SITE,
+                       KIND_SSID, KIND_VLAN)
+
 
 def _list(data, *keys) -> list:
     if not isinstance(data, dict):
@@ -34,10 +39,16 @@ def _matches(name: str, prefix: str) -> bool:
 
 
 def cleanup(prefix: str, central=None, classic=None,
-            on_step: Optional[Callable[[str, bool, str], None]] = None
-            ) -> list[tuple[str, bool, str]]:
+            on_step: Optional[Callable[[str, bool, str], None]] = None,
+            manifest=None) -> list[tuple[str, bool, str]]:
     """Delete <prefix>* objects across New Central (central) and Classic
-    (classic). Either client may be None. Returns [(label, ok, detail)]."""
+    (classic). Either client may be None. Returns [(label, ok, detail)].
+
+    With a `manifest` attached (lib.manifest.Manifest), ONLY manifest-owned
+    resources are deleted — same-prefix objects another administrator created,
+    and objects this migration explicitly ADOPTED, are left alone. Without a
+    manifest the legacy prefix-only behavior is kept (lab teardown of
+    pre-manifest objects)."""
     # An empty prefix matches EVERY object in the tenant (startswith("") is
     # always True) — refuse outright rather than risk an account-wide wipe.
     if not (prefix or "").strip():
@@ -45,18 +56,40 @@ def cleanup(prefix: str, central=None, classic=None,
                          "prefix would match every object in the tenant")
     results: list[tuple[str, bool, str]] = []
 
-    def step(label: str, fn) -> None:
+    def step(label: str, fn) -> bool:
         try:
             fn()
             results.append((label, True, ""))
+            ok = True
         except Exception as e:
             msg = str(e)
             if "404" in msg or "not found" in msg.lower() or "does not exist" in msg.lower():
                 results.append((label, True, "already gone"))
+                ok = True
             else:
                 results.append((label, False, msg[:200]))
+                ok = False
         if on_step:
-            results and on_step(*results[-1])
+            on_step(*results[-1])
+        return ok
+
+    def _owned(kind: str, name: str) -> bool:
+        """The ownership gate: without a manifest the prefix alone decides
+        (legacy); with one, only resources this migration CREATED may be
+        deleted — adopted objects belong to someone else."""
+        if manifest is None or manifest.may_delete(kind, name):
+            return True
+        results.append((f"Keep {kind}: {name} (not manifest-owned)", True,
+                        "skipped"))
+        if on_step:
+            on_step(*results[-1])
+        return False
+
+    def _deleted(kind: str, name: str, ok: bool) -> None:
+        """Drop the manifest entry once the object is really gone so a second
+        cleanup doesn't chase it."""
+        if ok and manifest is not None:
+            manifest.remove(kind, name)
 
     # Classic group names, fetched once on first use — used to decide whether
     # a failed New Central group delete can really be deferred to Classic.
@@ -90,7 +123,7 @@ def cleanup(prefix: str, central=None, classic=None,
             essid = s.get("essid")
             name = (s.get("ssid") or (essid.get("name") if isinstance(essid, dict) else essid)
                     or s.get("name") or "")
-            if _matches(name, prefix):
+            if _matches(name, prefix) and _owned(KIND_SSID, name):
                 enc = quote(name, safe="")
                 # best-effort — underlay SSIDs have no overlay-wlan. v1 is
                 # where provisioning creates them; keep v1alpha1 as fallback.
@@ -101,8 +134,10 @@ def cleanup(prefix: str, central=None, classic=None,
                         break
                     except Exception:
                         continue
-                step(f"Delete SSID: {name}",
-                     lambda e=enc: central._delete(f"/network-config/v1/wlan-ssids/{e}"))
+                _deleted(KIND_SSID, name,
+                         step(f"Delete SSID: {name}",
+                              lambda e=enc: central._delete(
+                                  f"/network-config/v1/wlan-ssids/{e}")))
 
         # 1b. External captive-portal profiles (SHARED/global; SSIDs above
         #     referenced them by name, so they go after the SSIDs)
@@ -116,10 +151,11 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for cp in portals:
             nm = cp.get("name", "")
-            if _matches(nm, prefix):
-                step(f"Delete captive portal: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/captive-portal/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_CAPTIVE_PORTAL, nm):
+                _deleted(KIND_CAPTIVE_PORTAL, nm,
+                         step(f"Delete captive portal: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/captive-portal/{n}")))
 
         # 1c. VLANs — layer2-vlan objects scope-mapped to the groups. VLAN 1
         #     is the built-in default ("aruba-vlan/1") and is never touched.
@@ -144,12 +180,15 @@ def cleanup(prefix: str, central=None, classic=None,
                 continue
             if vid <= 1 or not _matches(vname, prefix):
                 continue
+            if not _owned(KIND_VLAN, vname):
+                continue
             def _del_vlan(i=vid):
                 try:
                     central._delete(f"/network-config/v1/layer2-vlan/{i}")
                 except Exception:
                     central._delete(f"/network-config/v1alpha1/layer2-vlan/{i}")
-            step(f"Delete VLAN {vid} ({vname})", _del_vlan)
+            _deleted(KIND_VLAN, vname,
+                     step(f"Delete VLAN {vid} ({vname})", _del_vlan))
 
         # 2. Server-groups (must go BEFORE auth-servers they reference)
         try:
@@ -162,10 +201,11 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for g in groups:
             nm = g.get("name", "")
-            if _matches(nm, prefix):
-                step(f"Delete server-group: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/server-groups/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_SERVER_GROUP, nm):
+                _deleted(KIND_SERVER_GROUP, nm,
+                         step(f"Delete server-group: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/server-groups/{n}")))
 
         # 3. Auth servers (now unreferenced)
         try:
@@ -178,10 +218,11 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for sv in servers:
             nm = sv.get("name", "")
-            if _matches(nm, prefix):
-                step(f"Delete auth server: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/auth-servers/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_AUTH_SERVER, nm):
+                _deleted(KIND_AUTH_SERVER, nm,
+                         step(f"Delete auth server: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/auth-servers/{n}")))
 
         # 3b. Roles + security policies (created by the overlay/tunnel SSID
         #     path, named after the SSID). Policy-group ENTRIES reference the
@@ -200,7 +241,7 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for entry in pg_entries:
             nm = entry.get("name", "") if isinstance(entry, dict) else ""
-            if _matches(nm, prefix):
+            if _matches(nm, prefix) and _owned(KIND_POLICY, nm):
                 step(f"Remove policy-group entry: {nm}",
                      lambda n=quote(nm, safe=""): central._delete(
                          "/network-config/v1alpha1/policy-groups"
@@ -215,10 +256,11 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for pol in policies:
             nm = pol.get("name", "")
-            if _matches(nm, prefix):
-                step(f"Delete policy: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/policies/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_POLICY, nm):
+                _deleted(KIND_POLICY, nm,
+                         step(f"Delete policy: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/policies/{n}")))
         try:
             roles = _list(central._get("/network-config/v1alpha1/roles"),
                           "roles", "role")
@@ -229,10 +271,11 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for role in roles:
             nm = role.get("name", "")
-            if _matches(nm, prefix):
-                step(f"Delete role: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/roles/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_ROLE, nm):
+                _deleted(KIND_ROLE, nm,
+                         step(f"Delete role: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/roles/{n}")))
 
         # 4. Device groups — on a HYBRID tenant these are Classic-owned, so the
         #    New Central delete 400s and the Classic delete (below) is what
@@ -249,7 +292,8 @@ def cleanup(prefix: str, central=None, classic=None,
         for grp in nc_groups:
             gname = grp.get("scopeName", "")
             gid = grp.get("scopeId")
-            if _matches(gname, prefix) and gid is not None:
+            if _matches(gname, prefix) and gid is not None \
+                    and _owned(KIND_DEVICE_GROUP, gname):
                 step(f"Delete firmware compliance → {gname}",
                      lambda i=gid: central._delete(
                          "/network-config/v1alpha1/firmware-compliance",
@@ -258,40 +302,49 @@ def cleanup(prefix: str, central=None, classic=None,
         for grp in nc_groups:
             gname = grp.get("scopeName", "")
             gid = grp.get("scopeId")
-            if _matches(gname, prefix) and gid is not None:
-                def _del_group(i=gid):
-                    try:
-                        central._delete("/network-config/v1/device-groups/bulk",
-                                        json={"items": [{"id": i}]})
-                    except Exception:
-                        # spec offers bulk deletes only; the single-id
-                        # form is a last-resort for older tenants
-                        central._delete(f"/network-config/v1/device-groups/{i}")
-                if classic is not None:
-                    # hybrid: let the Classic delete handle it — but only
-                    # when the failure IS the hybrid restriction (or Classic
-                    # really owns the group). Anything else (auth/5xx/
-                    # timeout) is a real failure and must stay red-flagged.
-                    try:
-                        _del_group()
-                        results.append((f"Delete device group: {gname}", True, ""))
-                    except Exception as e:
-                        msg = str(e)
-                        if "404" in msg or "not found" in msg.lower() \
-                                or "does not exist" in msg.lower():
-                            results.append((f"Delete device group: {gname}",
-                                            True, "already gone"))
-                        elif ("HYBRID_CLUSTER" in msg or "API_ACCESS_RESTRICTED" in msg
-                                or gname in _classic_group_names()):
-                            results.append((f"Delete device group: {gname}", True,
-                                            "deferred to Classic (hybrid)"))
-                        else:
-                            results.append((f"Delete device group: {gname}", False,
-                                            msg[:200]))
-                    if on_step:
-                        on_step(*results[-1])
-                else:
-                    step(f"Delete device group: {gname}", _del_group)
+            if not (_matches(gname, prefix) and gid is not None
+                    and _owned(KIND_DEVICE_GROUP, gname)):
+                continue
+            def _del_group(i=gid):
+                try:
+                    central._delete("/network-config/v1/device-groups/bulk",
+                                    json={"items": [{"id": i}]})
+                except Exception:
+                    # spec offers bulk deletes only; the single-id
+                    # form is a last-resort for older tenants
+                    central._delete(f"/network-config/v1/device-groups/{i}")
+            if classic is not None:
+                # hybrid: let the Classic delete handle it — but only
+                # when the failure IS the hybrid restriction (or Classic
+                # really owns the group). Anything else (auth/5xx/
+                # timeout) is a real failure and must stay red-flagged.
+                gone = False
+                try:
+                    _del_group()
+                    results.append((f"Delete device group: {gname}", True, ""))
+                    gone = True
+                except Exception as e:
+                    msg = str(e)
+                    if "404" in msg or "not found" in msg.lower() \
+                            or "does not exist" in msg.lower():
+                        results.append((f"Delete device group: {gname}",
+                                        True, "already gone"))
+                        gone = True
+                    elif ("HYBRID_CLUSTER" in msg or "API_ACCESS_RESTRICTED" in msg
+                            or gname in _classic_group_names()):
+                        results.append((f"Delete device group: {gname}", True,
+                                        "deferred to Classic (hybrid)"))
+                        # not deleted yet — the Classic pass below owns the
+                        # manifest removal for hybrid groups
+                    else:
+                        results.append((f"Delete device group: {gname}", False,
+                                        msg[:200]))
+                if on_step:
+                    on_step(*results[-1])
+                _deleted(KIND_DEVICE_GROUP, gname, gone)
+            else:
+                _deleted(KIND_DEVICE_GROUP, gname,
+                         step(f"Delete device group: {gname}", _del_group))
 
         # 4b. Gateway clusters — formed manually at cutover per the runbook;
         #     prefix-named lab clusters still need teardown

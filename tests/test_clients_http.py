@@ -228,7 +228,8 @@ def test_central_create_site_duplicate_resolves_via_relist(mock_api):
     mock_api.app = app
     c = _central(mock_api)
     c._sites_cache = []                      # pre-list saw nothing
-    assert c.create_site("branch-1") == "42"
+    assert c.create_site("branch-1", address="1 Main St", city="San Jose",
+                         country="US") == "42"
 
 
 # ─────────────────── Classic Central ───────────────────
@@ -250,7 +251,8 @@ def test_classic_create_site_finds_id_despite_stale_cache(mock_api):
 
     mock_api.app = app
     c = ClassicCentralClient(mock_api.url, "tok")
-    assert c.create_site("branch-1") == 7
+    assert c.create_site("branch-1", address="1 Main St", city="San Jose",
+                         country="US") == 7
 
 
 def test_classic_401_refreshes_and_rotates_token(mock_api):

@@ -34,6 +34,7 @@ from urllib.parse import quote
 import requests
 
 from .http_base import normalize_base
+from .manifest import KIND_GROUP, KIND_SSID
 from .models import AuthType, CentralConfig, ForwardMode, SSID
 from .central_client import PSK_PLACEHOLDER, secret_looks_unusable
 
@@ -141,6 +142,9 @@ class ClassicCentralClient:
         # naturally fresh; created objects are appended locally
         self._group_names_cache: Optional[list[str]] = None
         self._sites_cache: Optional[list[dict]] = None
+        # ownership registry (lib.manifest) attached by the Step 3 view —
+        # None keeps the legacy name-only idempotency
+        self.manifest = None
 
     # ─────────────────── Auth / HTTP ───────────────────
 
@@ -314,7 +318,12 @@ class ClassicCentralClient:
         device-collections — required for the hybrid path where SSIDs/VLANs are
         then configured on the New Central side. False = pure classic group."""
         if name in self.list_group_names():
-            # a pre-existing group is reused, but a hybrid (New-Central-managed)
+            # a pre-existing group is reused — but only when the manifest
+            # proves it's ours (created or explicitly adopted). Reusing a
+            # same-named group another administrator owns is finding #3.
+            if self.manifest is not None:
+                self.manifest.gate(KIND_GROUP, name, exists=True)
+            # a hybrid (New-Central-managed)
             # run must not silently reuse a group with the wrong architecture —
             # that dead-ends later with unrelated-looking SSID/VLAN errors
             wrong = self._read_back_architecture(name)
@@ -355,6 +364,8 @@ class ClassicCentralClient:
                 "the tenant supports AOS10 groups.")
         if self._group_names_cache is not None:
             self._group_names_cache.append(name)
+        if self.manifest is not None:
+            self.manifest.register(KIND_GROUP, name, payload=props)
         return name
 
     # ─────────────────── Inventory / devices ───────────────────
@@ -399,7 +410,8 @@ class ClassicCentralClient:
         return self._sites_cache
 
     def create_site(self, name: str, address: str = "", city: str = "",
-                    state: str = "", country: str = "", zipcode: str = "") -> int:
+                    state: str = "", country: str = "", zipcode: str = "",
+                    lab_mode: bool = False) -> int:
         for site in self.list_sites():
             if site.get("site_name") == name:
                 return int(site.get("site_id"))
@@ -409,6 +421,14 @@ class ClassicCentralClient:
                 "address": address, "city": city, "state": state,
                 "country": country, "zipcode": zipcode,
             }.items() if v}
+        elif not lab_mode:
+            # blank site data must not silently become a REAL 0.0,0.0 site in
+            # a production tenant — placeholders need the explicit lab switch
+            raise ClassicCentralAPIError(
+                f"Site '{name}' has no address data — refusing to create a "
+                "placeholder site (0.0, 0.0 geolocation) in a production "
+                "tenant. Supply the site address, or enable lab/test mode for "
+                "a throwaway lab tenant.")
         else:
             # site_address and geolocation are mutually exclusive but one is
             # required — default to a zeroed geolocation when no address given
@@ -507,6 +527,14 @@ class ClassicCentralClient:
         except ClassicCentralAPIError as e:
             if not _is_duplicate(e):
                 raise
+            # a duplicate is idempotent reuse ONLY for an SSID the manifest
+            # owns — swallowing it for a foreign same-name SSID means leaving
+            # another administrator's WLAN in place and calling it migrated
+            if self.manifest is not None:
+                self.manifest.gate(KIND_SSID, name, exists=True)
+        else:
+            if self.manifest is not None:
+                self.manifest.register(KIND_SSID, name, payload=wlan)
 
     # ─────────────────── Firmware ───────────────────
 
@@ -568,9 +596,30 @@ class ClassicCentralClient:
         ap_serials: dict[str, list[str]],
         ap_macs: Optional[dict[str, str]] = None,
         on_step: Optional[Callable[[str, bool], None]] = None,
+        phase: str = "all",
     ) -> list[tuple[str, bool, str]]:
-        """Classic AOS 10 provisioning. ap_macs maps serial → wired MAC for
-        the inventory pre-add (skipped for serials without a MAC)."""
+        """Classic AOS 10 provisioning in two phases (mirrors the New Central
+        client):
+
+        phase="config" — build configuration ONLY: inventory pre-add, site,
+        groups, WLANs, firmware compliance. Nothing touches the APs, so Step
+        3's "No APs are claimed, moved or rebooted" banner is actually true.
+
+        phase="devices" — move APs into their groups and assign them to the
+        site. Runs at the Step 4 cutover, after the APs are claimed in
+        GreenLake. Fail-closed: groups/sites must already exist (the config
+        phase created them) — a missing group aborts that group's move with a
+        'run the config phase first' error instead of creating half a tenant.
+
+        phase="all" (default) — both, in one pass (legacy single-shot).
+
+        ap_macs maps serial → wired MAC for the inventory pre-add (skipped
+        for serials without a MAC)."""
+        if phase not in ("config", "devices", "all"):
+            raise ValueError(f"phase must be 'config', 'devices' or 'all', "
+                             f"got {phase!r}")
+        do_config = phase in ("config", "all")
+        do_devices = phase in ("devices", "all")
         results: list[tuple[str, bool, str]] = []
         cc = central_config
         ap_macs = ap_macs or {}
@@ -588,22 +637,38 @@ class ClassicCentralClient:
                     on_step(label, False)
                 return False
 
-        # 1. inventory pre-add (serial+MAC pairs we have)
-        all_serials = sorted({s for ss in ap_serials.values() for s in ss})
-        inv = [{"serial": s, "mac": ap_macs[s]} for s in all_serials if ap_macs.get(s)]
-        if inv:
-            step(f"Add {len(inv)} devices to classic inventory",
-                 lambda: self.add_to_inventory(inv))
-
-        # 2. site
-        site_ids: dict[str, int] = {}
-        for site_name in cc.sites:
-            step(f"Create site: {site_name}",
-                 lambda s=site_name: site_ids.update({s: self.create_site(
-                     s, cc.site_address, cc.site_city, cc.site_state,
-                     cc.site_country, cc.site_zipcode)}))
-
         keep_gws = bool(cc.gw_cluster_name)
+
+        if do_config:
+            # 1. inventory pre-add (serial+MAC pairs we have)
+            all_serials = sorted({s for ss in ap_serials.values() for s in ss})
+            inv = [{"serial": s, "mac": ap_macs[s]} for s in all_serials
+                   if ap_macs.get(s)]
+            if inv:
+                step(f"Add {len(inv)} devices to classic inventory",
+                     lambda: self.add_to_inventory(inv))
+
+        # 2. sites — created in the config phase; resolved from the tenant in
+        #    the devices phase (APs are assigned to them at cutover)
+        site_ids: dict[str, int] = {}
+        if do_config:
+            for site_name in cc.sites:
+                step(f"Create site: {site_name}",
+                     lambda s=site_name: site_ids.update({s: self.create_site(
+                         s, cc.site_address, cc.site_city, cc.site_state,
+                         cc.site_country, cc.site_zipcode,
+                         lab_mode=getattr(cc, "lab_mode", False))}))
+        elif do_devices:
+            try:
+                for site in self.list_sites(refresh=True):
+                    if site.get("site_name") in cc.sites:
+                        site_ids[site["site_name"]] = int(site.get("site_id"))
+            except Exception as e:
+                # a failed site read must not read as "no sites" — every group
+                # would silently skip its site assignment mid-cutover
+                results.append(("Resolve sites in tenant", False, str(e)))
+                if on_step:
+                    on_step("Resolve sites in tenant", False)
 
         for group_cfg in cc.groups:
             # serials are keyed by the AOS 8 source group name, not the
@@ -612,13 +677,41 @@ class ClassicCentralClient:
             _srcs = ([group_cfg.source_group or group_cfg.name]
                      + list(group_cfg.extra_source_groups))
             serials = [s for src in _srcs for s in ap_serials.get(src, [])]
-            if not step(f"Create AOS10 group: {group_cfg.name}"
-                        + (" (APs+Gateways)" if keep_gws else " (APs)"),
-                        lambda g=group_cfg: self.create_group(g.name, keep_gws)):
-                continue
 
-            if serials:
+            if do_config:
+                if not step(f"Create AOS10 group: {group_cfg.name}"
+                            + (" (APs+Gateways)" if keep_gws else " (APs)"),
+                            lambda g=group_cfg: self.create_group(g.name, keep_gws)):
+                    continue
+
+                seen_essids: set[str] = set()
+                idx = 0
+                for ssid in group_cfg.ssids:
+                    if ssid.display_name in seen_essids:
+                        results.append((
+                            f"SSID {ssid.display_name} → {group_cfg.name} — SKIPPED "
+                            "(duplicate ESSID in group)", True, ""))
+                        continue
+                    seen_essids.add(ssid.display_name)
+                    idx += 1
+                    step(f"Create WLAN: {ssid.display_name} → {group_cfg.name}",
+                         lambda s=ssid, g=group_cfg, i=idx: self.create_wlan(
+                             g.name, s, i, cc.gw_cluster_name or ""))
+
+                step(f"Set firmware compliance {group_cfg.firmware_version} → {group_cfg.name}",
+                     lambda g=group_cfg: self.set_firmware_compliance(
+                         g.name, g.firmware_version))
+
+            if do_devices and serials:
+                # fail closed: the group must already exist (config phase).
+                # Moving APs into a group this run didn't verify would strand
+                # them in a half-built tenant.
                 def _move(g=group_cfg, s=serials):
+                    if g.name not in self.list_group_names():
+                        raise ClassicCentralAPIError(
+                            f"Group '{g.name}' not found in the tenant — run "
+                            "the config phase (Step 3) first; refusing to move "
+                            "APs into a group this run cannot verify.")
                     try:
                         self.move_devices(g.name, s)
                     except ClassicCentralAPIError:
@@ -636,42 +729,26 @@ class ClassicCentralClient:
                             f"skipped: {', '.join(skipped[:10])}")
                 step(f"Move {len(serials)} APs to group: {group_cfg.name}", _move)
 
-            seen_essids: set[str] = set()
-            idx = 0
-            for ssid in group_cfg.ssids:
-                if ssid.display_name in seen_essids:
-                    results.append((
-                        f"SSID {ssid.display_name} → {group_cfg.name} — SKIPPED "
-                        "(duplicate ESSID in group)", True, ""))
-                    continue
-                seen_essids.add(ssid.display_name)
-                idx += 1
-                step(f"Create WLAN: {ssid.display_name} → {group_cfg.name}",
-                     lambda s=ssid, g=group_cfg, i=idx: self.create_wlan(
-                         g.name, s, i, cc.gw_cluster_name or ""))
-
-            step(f"Set firmware compliance {group_cfg.firmware_version} → {group_cfg.name}",
-                 lambda g=group_cfg: self.set_firmware_compliance(
-                     g.name, g.firmware_version))
-
-            if serials and group_cfg.site_name in site_ids:
+            if do_devices and serials and group_cfg.site_name in site_ids:
                 step(f"Assign {len(serials)} APs to site: {group_cfg.site_name}",
                      lambda s=serials, sn=group_cfg.site_name:
                          self.associate_site(site_ids[sn], s))
 
-        # manual follow-ups the classic API can't automate
-        followups = []
-        if any(s.auth_type in ENTERPRISE for g in cc.groups for s in g.ssids):
-            followups.append("create the RADIUS auth-server(s) in each group "
-                             "(Group → Devices → Config → Security) — enterprise "
-                             "WLANs reference them by name")
-        if keep_gws:
-            followups.append(f"gateways auto-cluster when moved into the group — "
-                             f"verify tunnel SSIDs bind to cluster "
-                             f"'{cc.gw_cluster_name}' in the group WLAN config")
-        for f in followups:
-            results.append((f"MANUAL FOLLOW-UP: {f}", True, ""))
-            if on_step:
-                on_step(f"MANUAL FOLLOW-UP: {f}", True)
+        # manual follow-ups the classic API can't automate — config-phase
+        # output, so the cutover gate can track them as outstanding work
+        if do_config:
+            followups = []
+            if any(s.auth_type in ENTERPRISE for g in cc.groups for s in g.ssids):
+                followups.append("create the RADIUS auth-server(s) in each group "
+                                 "(Group → Devices → Config → Security) — enterprise "
+                                 "WLANs reference them by name")
+            if keep_gws:
+                followups.append(f"gateways auto-cluster when moved into the group — "
+                                 f"verify tunnel SSIDs bind to cluster "
+                                 f"'{cc.gw_cluster_name}' in the group WLAN config")
+            for f in followups:
+                results.append((f"MANUAL FOLLOW-UP: {f}", True, ""))
+                if on_step:
+                    on_step(f"MANUAL FOLLOW-UP: {f}", True)
 
         return results

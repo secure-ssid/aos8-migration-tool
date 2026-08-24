@@ -65,3 +65,78 @@ def test_classic_auth_failure_aborts_before_any_claim(monkeypatch):
 def test_classic_auth_success_proceeds_to_inventory_read(monkeypatch):
     glp, results = _run(monkeypatch, classic_fail=False)
     assert "workspace_serials" in glp.calls
+
+
+class _VerifyFailGLP:
+    """Claim succeeds but the post-claim inventory read FAILS — finding #7:
+    the run used to fall open and assign/move the submitted serials anyway."""
+
+    def __init__(self):
+        self.calls = []
+        self._reads = 0
+
+    def authenticate(self):
+        self.calls.append("authenticate")
+
+    def workspace_serials(self):
+        self.calls.append("workspace_serials")
+        self._reads += 1
+        if self._reads == 1:
+            return set()          # pre-claim read: nothing there yet
+        raise RuntimeError("GLP inventory read failed 500")
+
+    def add_devices(self, payload):
+        self.calls.append("add_devices")
+        return "task-1"
+
+    def poll_task(self, task, on_poll=None):
+        self.calls.append("poll_task")
+        return {"status": "SUCCEEDED", "result": {}}
+
+    def failed_serials(self, result):
+        return []
+
+    def assign_subscription(self, serial, key):
+        self.calls.append(f"assign_subscription:{serial}")
+
+    def assign_application(self, serial, app_id, region, sub):
+        self.calls.append(f"assign_application:{serial}")
+
+
+def test_verification_failure_aborts_before_any_mutation(monkeypatch):
+    """A failed post-claim workspace read must ABORT the run: no subscription
+    assignment, no group move — only serials positively confirmed in the
+    workspace are ever mutated."""
+    glp = _VerifyFailGLP()
+    monkeypatch.setattr(ad, "_glp_client", lambda: glp)
+    monkeypatch.setattr(ad, "use_classic_for_moves", lambda: False)
+    results = []
+    ad._run_add_body([{"serial": "S1", "mac": "aa:bb:cc:dd:ee:01",
+                       "group": "g1"}],
+                     {"key": "k"}, None, False, results)
+    verify = next(r for r in results
+                  if r[0].startswith("Verify workspace inventory"))
+    assert verify[1] is False
+    assert "abort" in verify[2].lower()
+    # nothing beyond claim + the failed verify happened
+    assert not any(c.startswith("assign_") for c in glp.calls)
+
+
+def test_successful_verification_still_assigns(monkeypatch):
+    """Fail-closed must not break the happy path: confirmed serials get their
+    subscription as before."""
+
+    class _OkGLP(_VerifyFailGLP):
+        def workspace_serials(self):
+            self.calls.append("workspace_serials")
+            self._reads += 1
+            return {"S1"} if self._reads > 1 else set()
+
+    glp = _OkGLP()
+    monkeypatch.setattr(ad, "_glp_client", lambda: glp)
+    results = []
+    ad._run_add_body([{"serial": "S1", "mac": "aa:bb:cc:dd:ee:01",
+                       "group": "g1"}],
+                     {"key": "k"}, None, False, results)
+    assert "assign_subscription:S1" in glp.calls
+    assert any(r[0].startswith("Claim verified") and r[1] for r in results)
