@@ -1,6 +1,7 @@
 """Account-store behavior: hashing, verification codes, lockout, throttling.
 Uses a temp users file — never touches ~/.aos8-migration."""
 from datetime import timedelta
+import os
 
 import pytest
 
@@ -104,5 +105,19 @@ def test_register_raises_on_unreadable_store(tmp_path, monkeypatch):
     monkeypatch.setattr(accounts, "_load",
                         lambda: (_ for _ in ()).throw(
                             accounts.AccountsStorageError("read failed")))
+    with pytest.raises(accounts.AccountsStorageError):
+        accounts.register("user@example.com", "longenough123")
+
+
+# ── Write-failure must surface too: an unwritable registry raises
+# AccountsStorageError, never a raw OSError at the UI boundary (review A2). ──
+
+def test_register_raises_on_unwritable_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "USERS_FILE", tmp_path / "users.json")
+
+    def _deny(*args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(os, "replace", _deny)
     with pytest.raises(accounts.AccountsStorageError):
         accounts.register("user@example.com", "longenough123")

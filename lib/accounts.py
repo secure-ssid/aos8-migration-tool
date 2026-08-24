@@ -127,13 +127,17 @@ def _load() -> dict:
 
 
 def _save(users: dict) -> None:
-    USERS_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(users, f)
-    os.replace(tmp, USERS_FILE)
-    os.chmod(USERS_FILE, 0o600)
+    try:
+        USERS_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        tmp = USERS_FILE.with_name(USERS_FILE.name + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(users, f)
+        os.replace(tmp, USERS_FILE)
+        os.chmod(USERS_FILE, 0o600)
+    except (OSError, ValueError) as e:
+        raise AccountsStorageError(
+            f"account registry {USERS_FILE} is unwritable: {e}") from e
 
 
 def _pw_hash(password: str, salt: bytes) -> str:
