@@ -136,8 +136,13 @@ def mock_api(monkeypatch):
 
 
 @pytest.fixture()
-def aos8_api():
-    """HTTPS mock for the AOS 8 controller API (port 4343 is TLS-only)."""
+def aos8_api(monkeypatch):
+    """HTTPS mock for the AOS 8 controller API (port 4343 is TLS-only).
+
+    The mock serves a self-signed cert, and AOS8Client now verifies by
+    default — so the test harness opts out through AOS8_DEV_MODE exactly
+    like a local lab would."""
+    monkeypatch.setenv("AOS8_DEV_MODE", "true")
     api = MockAPI(tls=True)
     yield api
     api.close()
@@ -1015,14 +1020,30 @@ def test_aos8_login_401_reports_auth_failure(aos8_api):
         c.connect()
 
 
+def test_aos8_tls_verification_defaults_on(monkeypatch):
+    """L4 flip: cert verification is ON by default; the CA-bundle env still
+    selects a specific chain, and AOS8_DEV_MODE is the ONLY opt-out (test
+    harness / local self-signed controllers)."""
+    monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("AOS8_DEV_MODE", raising=False)
+    c = AOS8Client("10.0.0.1", "admin", "pw")
+    assert c.session.verify is True
+
+
 def test_aos8_ca_bundle_env_enables_verification(monkeypatch):
-    """L4: controllers default to verify=False (self-signed certs); an
-    operator-deployed CA bundle must be honored for MITM protection."""
+    """L4: an operator-deployed CA bundle is honored for MITM protection."""
     monkeypatch.setenv("AOS8_CA_BUNDLE", "/path/to/ca.pem")
+    monkeypatch.delenv("AOS8_DEV_MODE", raising=False)
     c = AOS8Client("10.0.0.1", "admin", "pw")
     assert c.session.verify == "/path/to/ca.pem"
-    monkeypatch.delenv("AOS8_CA_BUNDLE")
-    assert AOS8Client("10.0.0.1", "admin", "pw").session.verify is False
+
+
+def test_aos8_dev_mode_opt_out_disables_verification(monkeypatch):
+    """L4: dev/test mode is the only verify=False escape hatch."""
+    monkeypatch.setenv("AOS8_DEV_MODE", "true")
+    monkeypatch.delenv("AOS8_CA_BUNDLE", raising=False)
+    c = AOS8Client("10.0.0.1", "admin", "pw")
+    assert c.session.verify is False
 
 
 def test_aos8_api_mac_auth_ssid_detected(aos8_api):

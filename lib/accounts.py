@@ -79,6 +79,15 @@ def _norm(email: str) -> str:
     return (email or "").strip().lower()
 
 
+class AccountsStorageError(Exception):
+    """The account registry cannot be read.
+
+    A read failure must NEVER be treated as an empty registry: a subsequent
+    read-modify-write would overwrite an unreadable (possibly recoverable)
+    account database. Mutations and the login path raise this so the
+    operator sees the problem instead of silently losing accounts."""
+
+
 # users.json is read-modify-written by every mutation. Streamlit serves
 # sessions from threads (and the farm may share the volume between replicas),
 # so an unlocked write can lose a registration or reset another user's
@@ -104,10 +113,17 @@ def _locked():
 
 def _load() -> dict:
     try:
-        data = json.loads(USERS_FILE.read_text())
-        return data if isinstance(data, dict) else {}
-    except (FileNotFoundError, ValueError, OSError):
-        return {}
+        data = json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}                       # fresh registry — first write creates it
+    except (OSError, ValueError) as e:
+        raise AccountsStorageError(
+            f"account registry {USERS_FILE} is unreadable: {e}") from e
+    if not isinstance(data, dict):
+        raise AccountsStorageError(
+            f"account registry {USERS_FILE} is not a JSON object — refusing "
+            "to treat it as empty and overwrite the account database")
+    return data
 
 
 def _save(users: dict) -> None:
