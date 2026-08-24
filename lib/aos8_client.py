@@ -443,6 +443,11 @@ class AOS8Client:
                 "dtim_period": _safe_int(self._field(item, "dtim-period", default=0), 0),
                 "max_clients": _safe_int(self._field(item, "max-clients", "max-clients-threshold", default=0), 0),
                 "passphrase": str(self._field(item, "wpa-passphrase", "wpa-hexkey", default="")) or None,
+                # hidden-but-active WLAN — parity with the paste path's
+                # `hide-ssid` parse; defaulting broadcast=True would
+                # publish it (#9)
+                "hidden": bool(self._field(item, "hide-ssid", "hide_ssid",
+                                           default=False)),
             }
         return profiles
 
@@ -461,11 +466,12 @@ class AOS8Client:
             pass  # opmode/essid enrichment is best-effort
         aaa_sgs: dict[str, str] = {}
         aaa_mac_sgs: dict[str, str] = {}
+        aaa_read_failed = False
         try:
             aaa_sgs = self.get_aaa_server_groups()
             aaa_mac_sgs = self.get_aaa_mac_server_groups()
         except Exception:
-            pass  # server-group resolution is best-effort
+            aaa_read_failed = True  # server-group resolution is best-effort
 
         ssids, seen = [], set()
         for item in self._get_virtual_aps():
@@ -501,6 +507,13 @@ class AOS8Client:
                 # MAC-auth network (legacy printer/IoT SSIDs are exactly this)
                 # — migrating it as OPEN publishes a wide-open network.
                 auth = AuthType.MAC
+            elif auth == AuthType.OPEN and aaa_read_failed:
+                # the aaa_prof read failed, so a mac-server-group can neither
+                # be confirmed nor ruled out: this MIGHT be a MAC-auth
+                # network. Fail closed — auth stays the raw opensystem value
+                # but is marked unknown so preflight blocks instead of
+                # handing provisioning a provably-open network (#4).
+                auth_known = False
 
             # per-VAP band selection ("all"/"a"/"g") → New Central rf-band enum,
             # mirroring paste mode's allowed-band mapping
@@ -531,6 +544,7 @@ class AOS8Client:
                 # current behaviour (enabled) rather than disabling live WLANs.
                 enabled=bool(self._field(item, "vap-enable", "vap_enable",
                                          default=True)),
+                broadcast=not prof.get("hidden", False),
                 captive_portal_url=cp.get("url", ""),
                 captive_portal_redirect=cp.get("redirect", ""),
             ))
