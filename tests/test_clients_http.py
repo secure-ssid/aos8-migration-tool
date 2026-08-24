@@ -664,10 +664,17 @@ def test_classic_create_group_survives_readback_failure(mock_api):
     assert c.create_group("g1") == "g1"
 
 
-def test_owe_migrates_as_owe_and_blocks_on_classic():
-    """OWE is encrypted — mapping it to OPEN publishes an unencrypted SSID."""
+def test_owe_migrates_as_owe_on_both_destinations():
+    """OWE is encrypted — mapping it to OPEN publishes an unencrypted SSID.
+
+    Enhanced-Open is a first-class opmode on *both* destinations. HPE's Classic
+    Central reference uses it directly (Classic-Central/wlan_config/
+    configurations/enhanced_captive.yaml -> "opmode: enhanced-open"), so there
+    is nothing to block and nothing to downgrade.
+    """
     from lib.aos8_client import _opmode_to_auth
     from lib.central_client import OPMODE
+    from lib.classic_central_client import OPMODE_CLASSIC
     from lib import compatibility
     from lib.models import (AuthType, CentralConfig, CustomerConfig,
                             ForwardMode, SSID)
@@ -675,6 +682,12 @@ def test_owe_migrates_as_owe_and_blocks_on_classic():
     assert _opmode_to_auth("wpa3-owe") == (AuthType.OWE, True)
     assert _opmode_to_auth("enhanced-open") == (AuthType.OWE, True)
     assert OPMODE[AuthType.OWE] == "ENHANCED_OPEN"
+    assert OPMODE_CLASSIC[AuthType.OWE] == "enhanced-open"
+
+    # The actual regression: neither destination may resolve OWE to a
+    # plaintext opmode.
+    assert OPMODE[AuthType.OWE] != OPMODE[AuthType.OPEN]
+    assert OPMODE_CLASSIC[AuthType.OWE] != OPMODE_CLASSIC[AuthType.OPEN]
 
     ssid = SSID(name="guest", essid="Guest", vlan=20,
                 forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.OWE)
@@ -685,13 +698,14 @@ def test_owe_migrates_as_owe_and_blocks_on_classic():
         return CentralConfig(customer_name="acme", base_url="https://example",
                              destination=kind)
 
-    fails = [r for r in compatibility.run_all(customer, _dest("classic"))
-             if r.status == compatibility.Status.FAIL]
-    assert any("Guest" in r.message and "Enhanced Open" in r.name for r in fails)
-    # New Central has a real opmode for it, so it must NOT be blocked there
-    new_fails = [r for r in compatibility.run_all(customer, _dest("new"))
-                 if r.status == compatibility.Status.FAIL]
-    assert not any("Enhanced Open" in r.name for r in new_fails)
+    for kind in ("classic", "new"):
+        results = compatibility.run_all(customer, _dest(kind))
+        fails = [r for r in results if r.status == compatibility.Status.FAIL]
+        assert not any("Enhanced Open" in r.name for r in fails), (
+            f"{kind}: OWE must not be blocked — the opmode exists there")
+        # Still surfaced, because OWE excludes clients that cannot do it.
+        assert any("Enhanced Open" in r.name
+                   and r.status == compatibility.Status.WARN for r in results)
 
 
 def test_classic_captive_portal_ssid_is_refused(mock_api):

@@ -41,11 +41,15 @@ from .central_client import PSK_PLACEHOLDER, secret_looks_unusable
 OPMODE_CLASSIC = {
     AuthType.OPEN: "opensystem",
     AuthType.MAC: "opensystem",
-    # Classic AOS 10 has NO Enhanced-Open (OWE) opmode. This entry exists only
-    # so the enum mapping is total: compatibility._check_ssid_auth FAILS
-    # preflight for an OWE SSID with a classic destination, so provisioning
-    # never reaches this value with a real OWE network.
-    AuthType.OWE: "opensystem",
+    # Enhanced-Open IS a valid Classic opmode. HPE's own Classic Central
+    # reference ships it in both the WLAN API payload and the AP CLI config:
+    #   central-python-workflows/Classic-Central/wlan_config/configurations/
+    #     enhanced_captive.yaml            -> "opmode: enhanced-open"
+    #   central-python-workflows/Classic-Central/ap_config/configurations/
+    #     open-captive-portal.txt          -> "opmode enhanced-open"
+    # Mapping OWE to opensystem here would strip the encryption OWE exists to
+    # provide, turning a protected network into a plaintext one.
+    AuthType.OWE: "enhanced-open",
     AuthType.WPA2_PSK: "wpa2-psk-aes",
     AuthType.WPA3_SAE: "wpa3-sae-aes",
     AuthType.WPA2_ENTERPRISE: "wpa2-aes",

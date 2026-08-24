@@ -18,8 +18,13 @@ are gated by `lib/http_base.py`: only HPE/Aruba hosts
 bearer token to an unintended or cleartext endpoint. The AOS 8 client
 re-logins once on a 401 (covers out-of-band session invalidation mid-pull)
 but has no 429 handling — its calls are short-lived reads inside one login
-session. Controller TLS verification is ON by default (`AOS8_CA_BUNDLE` to
-point at the controller's CA, `AOS8_DEV_MODE` to opt out in a local lab).
+session. Controller TLS verification is ON by default. A factory self-signed
+cert is handled by trust-on-first-use: `connect()` raises `AOS8TLSError`
+carrying the certificate's SHA-256 fingerprint, Step 1 shows it for
+confirmation, and trusting it pins that exact certificate for the run
+(`assert_fingerprint`, so a substituted cert is still refused). Alternatives:
+`AOS8_CERT_FINGERPRINT` to pin headlessly, `AOS8_CA_BUNDLE` for your own CA,
+`AOS8_DEV_MODE` to disable verification entirely in a local lab.
 
 ## Bases and auth
 
@@ -198,8 +203,12 @@ defence. WPA3-SAE bodies do NOT set `wpa3-transition-mode-enable` (that flag
 is a WPA2-PSK compatibility feature — enabling it on a WPA3-only SSID would
 silently add a WPA2 fallback). OWE / Enhanced Open maps to
 the first-class `ENHANCED_OPEN` opmode — it is **encrypted**, so it must never
-be folded into `OPEN`; Classic has no equivalent value, and preflight FAILs an
-OWE SSID with a classic destination rather than publishing it unencrypted.
+be folded into `OPEN`. Classic has its own equivalent, `enhanced-open`, used
+verbatim in HPE's Classic Central reference
+(`Classic-Central/wlan_config/configurations/enhanced_captive.yaml` and
+`ap_config/configurations/open-captive-portal.txt`), so both destinations
+preserve the encryption and neither blocks an OWE SSID. `opmode_transition_
+disable` stays set, so an OWE SSID never also advertises a legacy open BSS.
 
 **Config API version fallback.** HPE's published v26.04 reference puts scope
 management (`sites`, `device-groups`, `global`, `site-collections`) on `/v1`

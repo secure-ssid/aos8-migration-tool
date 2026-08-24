@@ -635,17 +635,18 @@ def _check_ssid_auth(customer: CustomerConfig,
                    "MAC-only auth is trivially spoofable.",
         ))
     owe = [s.display_name for s in customer.ssids if s.auth_type == AuthType.OWE]
-    if owe and central.destination == "classic":
+    if owe:
         results.append(CheckResult(
             name="Enhanced Open (OWE) SSIDs",
-            status=Status.FAIL,
-            critical=True,
-            message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Classic AOS10 "
-                    "has no Enhanced-Open opmode — these SSIDs would migrate "
-                    "unencrypted.",
-            detail="New Central supports these natively (opmode ENHANCED_OPEN). "
-                   "Target New Central for them, or accept and document the "
-                   "downgrade explicitly before provisioning.",
+            status=Status.WARN,
+            message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Both "
+                    "destinations carry these natively (New Central opmode "
+                    "ENHANCED_OPEN, Classic opmode enhanced-open), so the "
+                    "encryption is preserved.",
+            detail="Transition mode stays disabled, so these SSIDs will not "
+                   "also advertise a legacy unencrypted BSS. Clients too old "
+                   "for OWE cannot associate — confirm that is acceptable, or "
+                   "run a separate open SSID alongside them.",
         ))
     unknown = [s.display_name for s in customer.ssids
                if not s.auth_known and s.auth_type != AuthType.OPEN]
