@@ -102,7 +102,8 @@ def check_target_firmware(target: str, *, supported: Optional[list[str]] = None,
                        f"'{target}' is in the tenant's supported set")
 
 
-def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list[ProbeResult]:
+def probe_new_central(base_url: str, client_id: str, client_secret: str,
+                      target_fw: str = "") -> list[ProbeResult]:
     results: list[ProbeResult] = []
     client = CentralClient(base_url, client_id, client_secret)
 
@@ -153,6 +154,37 @@ def probe_new_central(base_url: str, client_id: str, client_secret: str) -> list
         _require_object_list("monitored devices", a)
         return f"{len(a)} AP(s) readable via /network-monitoring/v1/devices"
     results.append(_probe("Read — monitored devices (validation source)", aps))
+
+    # target-firmware gate: the chosen AOS 10 build is checked against the
+    # tenant's published firmware list, so an unsupported target surfaces at
+    # probe/preflight instead of silently provisioning a build Central can't
+    # apply. Only runs when a target was entered; an empty target is skipped
+    # (the wizard separately blocks Continue until one is set). check_target_
+    # firmware owns the status semantics: FAIL on an outside-set or malformed
+    # build, WARN on a failed/no live query — never a silent pass.
+    if target_fw.strip():
+        def target_firmware() -> ProbeResult:
+            try:
+                data = client._get("/firmware/v1/versions",
+                                   params={"device_type": "IAP"})
+                raw = data.get("data") if isinstance(data, dict) else None
+                if not isinstance(raw, list):
+                    raise ValueError(
+                        "supported-versions response is not a list "
+                        "(response-schema validation)")
+                supported = {str(v.get("firmware_version")).strip()
+                             for v in raw if isinstance(v, dict)
+                             and v.get("firmware_version")}
+                if not supported:
+                    raise ValueError("supported-versions response listed no "
+                                     "firmware versions")
+                return check_target_firmware(target_fw,
+                                             supported=sorted(supported))
+            except Exception as e:
+                # a failed or malformed live query is a WARN ("cannot
+                # validate"), never a silent pass
+                return check_target_firmware(target_fw, error=str(e))
+        results.append(target_firmware())
 
     # hybrid detection: a dry probe of the group-create route. The API has no
     # dry-run, so we send a clearly-disposable name and treat a hybrid block as

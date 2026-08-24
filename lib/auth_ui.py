@@ -77,21 +77,29 @@ def _verify_screen(email: str) -> None:
     code = st.text_input("Verification code", max_chars=6, key="verify_code_input")
     c1, c2, c3 = st.columns([1, 1, 1])
     if c1.button("Verify", type="primary", use_container_width=True):
-        ok, msg = accounts.verify_code(email, code)
-        if ok:
-            _signed_in(email)
+        try:
+            ok, msg = accounts.verify_code(email, code)
+        except accounts.AccountsStorageError as e:
+            st.error(str(e))
         else:
-            st.error(msg)
-    if c2.button("Resend code", use_container_width=True):
-        ok, msg, new_code = accounts.resend_code(email)
-        if ok:
-            if _deliver_code(email, new_code):
-                st.info(msg)
+            if ok:
+                _signed_in(email)
             else:
-                st.error("Could not send the verification email — check the "
-                         "server's SMTP settings and try again.")
+                st.error(msg)
+    if c2.button("Resend code", use_container_width=True):
+        try:
+            ok, msg, new_code = accounts.resend_code(email)
+        except accounts.AccountsStorageError as e:
+            st.error(str(e))
         else:
-            st.error(msg)
+            if ok:
+                if _deliver_code(email, new_code):
+                    st.info(msg)
+                else:
+                    st.error("Could not send the verification email — check the "
+                             "server's SMTP settings and try again.")
+            else:
+                st.error(msg)
     if c3.button("Use a different email", use_container_width=True):
         st.session_state.pop("_pending_email", None)
         st.rerun()
@@ -104,30 +112,38 @@ def _login_register() -> None:
         email = st.text_input("Email", key="login_email")
         pw = st.text_input("Password", type="password", key="login_pw")
         if st.button("Sign in", type="primary", key="login_btn"):
-            status = accounts.verify_password(email, pw)
-            if status == "ok":
-                _signed_in(email)
-            elif status == "unverified":
-                # account exists but never verified — re-arm a code and divert
-                ok, _msg, code = accounts.resend_code(email)
-                delivered = _deliver_code(email, code) if ok else False
-                if ok and not delivered and mailer.configured():
-                    st.error("Your account isn't verified yet and the "
-                             "verification email could not be sent — check "
-                             "the server's SMTP settings and try again.")
-                elif not _delivery_available():
-                    st.error("Your account isn't verified yet and this server "
-                             "has no email delivery configured — ask the "
-                             "administrator to set up SMTP.")
-                else:
-                    st.session_state["_pending_email"] = accounts._norm(email)
-                    st.rerun()
-            elif status == "locked":
-                st.error(f"Too many failed attempts — this account is locked "
-                         f"for {accounts.LOGIN_LOCK_MINUTES} minutes. "
-                         f"Try again later.")
+            try:
+                status = accounts.verify_password(email, pw)
+            except accounts.AccountsStorageError as e:
+                st.error(str(e))
             else:
-                st.error("Invalid email or password.")
+                if status == "ok":
+                    _signed_in(email)
+                elif status == "unverified":
+                    # account exists but never verified — re-arm a code and divert
+                    try:
+                        ok, _msg, code = accounts.resend_code(email)
+                    except accounts.AccountsStorageError as e:
+                        st.error(str(e))
+                    else:
+                        delivered = _deliver_code(email, code) if ok else False
+                        if ok and not delivered and mailer.configured():
+                            st.error("Your account isn't verified yet and the "
+                                     "verification email could not be sent — check "
+                                     "the server's SMTP settings and try again.")
+                        elif not _delivery_available():
+                            st.error("Your account isn't verified yet and this server "
+                                     "has no email delivery configured — ask the "
+                                     "administrator to set up SMTP.")
+                        else:
+                            st.session_state["_pending_email"] = accounts._norm(email)
+                            st.rerun()
+                elif status == "locked":
+                    st.error(f"Too many failed attempts — this account is locked "
+                             f"for {accounts.LOGIN_LOCK_MINUTES} minutes. "
+                             f"Try again later.")
+                else:
+                    st.error("Invalid email or password.")
 
     with tab_register:
         domain_hint = f"**@{accounts.ALLOWED_DOMAIN}** addresses" if accounts.ALLOWED_DOMAIN else "any email address"
@@ -147,17 +163,21 @@ def _login_register() -> None:
             elif pw1 != pw2:
                 st.error("Passwords don't match.")
             else:
-                ok, msg, code = accounts.register(email_r, pw1)
-                if ok:
-                    if _deliver_code(email_r, code):
-                        st.session_state["_pending_email"] = accounts._norm(email_r)
-                        st.rerun()
-                    else:
-                        st.error("Account created, but the verification email "
-                                 "could not be sent — check the server's SMTP "
-                                 "settings, then sign in to resend the code.")
+                try:
+                    ok, msg, code = accounts.register(email_r, pw1)
+                except accounts.AccountsStorageError as e:
+                    st.error(str(e))
                 else:
-                    st.error(msg)
+                    if ok:
+                        if _deliver_code(email_r, code):
+                            st.session_state["_pending_email"] = accounts._norm(email_r)
+                            st.rerun()
+                        else:
+                            st.error("Account created, but the verification email "
+                                     "could not be sent — check the server's SMTP "
+                                     "settings, then sign in to resend the code.")
+                    else:
+                        st.error(msg)
 
 
 def _password_screen() -> None:

@@ -53,6 +53,30 @@ class _MalformedCentral(_HealthyCentral):
         return {"devices": []}       # dict instead of list
 
 
+class _FirmwareCentral(_HealthyCentral):
+    """A healthy tenant that also answers the supported-version query."""
+
+    FW = ["10.6.0.0", "10.7.0.0"]
+
+    def _get(self, path, params=None):
+        return {"data": [{"firmware_version": v, "release_status": "release",
+                          "create_date": "2026-01-01"} for v in self.FW]}
+
+
+class _FailingFirmwareCentral(_HealthyCentral):
+    """The live supported-versions query fails (transport / API error)."""
+
+    def _get(self, path, params=None):
+        raise RuntimeError("firmware query failed")
+
+
+class _GarbledFirmwareCentral(_HealthyCentral):
+    """The query answers but the payload violates the documented schema."""
+
+    def _get(self, path, params=None):
+        return {"data": [{"nope": "not-a-firmware-version"}]}
+
+
 @pytest.fixture()
 def fake_central(monkeypatch):
     yield lambda cls: monkeypatch.setattr(api_probe, "CentralClient", cls)
@@ -119,3 +143,53 @@ def test_firmware_not_in_tenant_supported_set_is_fail():
     r = check_target_firmware("10.7.0.0", supported=["10.6.0.0", "10.6.1.1"])
     assert r.status == "fail"
     assert "NOT in this tenant" in r.detail
+
+
+# ── wired probe path: probe_new_central appends the Target firmware row ────
+
+def _firmware_row(results):
+    return next(r for r in results if r.name == "Target firmware")
+
+
+def test_probe_appends_target_firmware_row_ok(fake_central):
+    fake_central(_FirmwareCentral)
+    r = _firmware_row(api_probe.probe_new_central(
+        "https://us4.api.central.arubanetworks.com", "id", "secret",
+        target_fw="10.7.0.0"))
+    assert r.status == "ok"
+    assert "in the tenant's supported set" in r.detail
+
+
+def test_probe_target_outside_tenant_set_fails(fake_central):
+    fake_central(_FirmwareCentral)
+    r = _firmware_row(api_probe.probe_new_central(
+        "https://us4.api.central.arubanetworks.com", "id", "secret",
+        target_fw="10.9.1.0"))
+    assert r.status == "fail"
+    assert "NOT in this tenant" in r.detail
+
+
+def test_probe_target_query_failure_is_warn(fake_central):
+    fake_central(_FailingFirmwareCentral)
+    r = _firmware_row(api_probe.probe_new_central(
+        "https://us4.api.central.arubanetworks.com", "id", "secret",
+        target_fw="10.7.0.0"))
+    assert r.status == "warn"
+    assert "cannot validate" in r.detail
+    assert "firmware query failed" in r.detail
+
+
+def test_probe_target_malformed_live_query_is_warn(fake_central):
+    fake_central(_GarbledFirmwareCentral)
+    r = _firmware_row(api_probe.probe_new_central(
+        "https://us4.api.central.arubanetworks.com", "id", "secret",
+        target_fw="10.7.0.0"))
+    assert r.status == "warn"
+    assert "cannot validate" in r.detail
+
+
+def test_probe_no_target_skips_firmware_row(fake_central):
+    fake_central(_HealthyCentral)
+    results = api_probe.probe_new_central(
+        "https://us4.api.central.arubanetworks.com", "id", "secret")
+    assert all(r.name != "Target firmware" for r in results)

@@ -39,7 +39,7 @@ st.set_page_config(
 from lib.styles import inject, brand_header, step_progress, sidebar_summary, \
     ORANGE, HPE_GREEN
 from lib.help_content import render_help
-from lib import identity, auth_ui
+from lib import identity, auth_ui, accounts
 
 inject(accent="green" if (on_greenlake or app_mode == "add_devices") else "aruba")
 
@@ -73,7 +73,15 @@ if _pw_weak:
     )
     st.stop()
 if identity.requires_login():        # 'password' or 'accounts' — in-app login gate
-    if not auth_ui.render_gate():
+    try:
+        gate_ok = auth_ui.render_gate()
+    except accounts.AccountsStorageError as e:
+        # accounts registry unreadable (OS error / corrupt JSON): fail closed
+        # — surface the storage error, never draw the wizard against
+        # half-loaded account state.
+        st.error(f"Accounts storage unavailable: {e}")
+        gate_ok = False
+    if not gate_ok:
         st.stop()
     st.session_state["_user"] = identity.current_user()
 elif _mode == "proxy" and not _user:
