@@ -88,7 +88,7 @@ def _render_cutover_gate(results, acks, confirmations) -> None:
             if err:
                 st.code(err, language="text")
             reason = st.text_input(
-                f"Why is it safe to convert despite this failure?",
+                "Why is it safe to convert despite this failure?",
                 key=f"ack_reason_{abs(hash(label))}",
                 placeholder="Required — e.g. 'SSID built by hand in Central; "
                             "verified against source config'")

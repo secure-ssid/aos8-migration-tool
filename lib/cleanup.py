@@ -358,17 +358,19 @@ def cleanup(prefix: str, central=None, classic=None,
                 on_step(*results[-1])
         for cl in clusters:
             nm = cl.get("name", "") or cl.get("cluster-name", "")
-            if _matches(nm, prefix):
-                step(f"Delete gateway cluster: {nm}",
-                     lambda n=quote(nm, safe=""): central._delete(
-                         f"/network-config/v1alpha1/gateway-clusters/{n}"))
+            if _matches(nm, prefix) and _owned(KIND_GATEWAY_CLUSTER, nm):
+                _deleted(KIND_GATEWAY_CLUSTER, nm,
+                         step(f"Delete gateway cluster: {nm}",
+                              lambda n=quote(nm, safe=""): central._delete(
+                                  f"/network-config/v1alpha1/gateway-clusters/{n}")))
 
         # 5. Sites (bulk-by-id, then single)
         try:
             for site in central.list_sites(refresh=True):
                 sname = central._site_name(site)
                 sid = central._site_id(site)
-                if _matches(sname, prefix) and sid:
+                if _matches(sname, prefix) and sid \
+                        and _owned(KIND_SITE, sname):
                     def _del_site(i=sid):
                         for path, body in (
                             ("/network-config/v1alpha1/sites/bulk", {"items": [{"id": i}]}),
@@ -382,7 +384,8 @@ def cleanup(prefix: str, central=None, classic=None,
                         central._delete(f"/network-config/v1alpha1/sites/{i}")
                         # ^ spec offers bulk deletes only; the single-id form
                         # is a last-resort for older tenants
-                    step(f"Delete site: {sname}", _del_site)
+                    _deleted(KIND_SITE, sname,
+                             step(f"Delete site: {sname}", _del_site))
         except Exception as e:
             results.append(("List sites", False, str(e)[:150]))
 
@@ -394,18 +397,21 @@ def cleanup(prefix: str, central=None, classic=None,
             names = []
             results.append(("List classic groups", False, str(e)[:150]))
         for gname in names:
-            if _matches(gname, prefix):
-                step(f"Delete classic group: {gname}",
-                     lambda n=gname: classic.delete_group(n))
+            if _matches(gname, prefix) and _owned(KIND_GROUP, gname):
+                _deleted(KIND_GROUP, gname,
+                         step(f"Delete classic group: {gname}",
+                              lambda n=gname: classic.delete_group(n)))
         # classic provisioning also creates sites — clean those up too
         try:
             for site in classic.list_sites(refresh=True):
                 sname = site.get("site_name", "")
                 sid = site.get("site_id")
-                if _matches(sname, prefix) and sid is not None:
-                    step(f"Delete classic site: {sname}",
-                         lambda i=sid: classic._request(
-                             "DELETE", f"/central/v2/sites/{i}"))
+                if _matches(sname, prefix) and sid is not None \
+                        and _owned(KIND_SITE, sname):
+                    _deleted(KIND_SITE, sname,
+                             step(f"Delete classic site: {sname}",
+                                  lambda i=sid: classic._request(
+                                      "DELETE", f"/central/v2/sites/{i}")))
         except Exception as e:
             results.append(("List classic sites", False, str(e)[:150]))
 

@@ -181,9 +181,6 @@ def test_new_central_ssid_patch_of_foreign_object_refused(manifest):
             raise CentralAPIError(f"POST {resource} failed 400: already exists")
         return {}
     c._config_request = fake_config
-    from lib.models import AuthType, ForwardMode, SSID
-    ssid = SSID(name="corp", vlan=10, forward_mode=ForwardMode.BRIDGE,
-                auth_type=AuthType.WPA2_PSK, psk="passphrase1")
     with pytest.raises(CollisionError):
         c._upsert_ssid("corp", {"ssid": "corp"})
     assert calls == ["POST"]  # never reached the PATCH
