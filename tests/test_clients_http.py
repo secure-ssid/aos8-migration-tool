@@ -1334,3 +1334,46 @@ def test_classic_firmware_error_lists_available_versions(mock_api):
         c.set_firmware_compliance("g1", "10.8.1.0")
     msg = str(ei.value)
     assert "10.7.1.0" in msg and "10.6.0.2" in msg
+
+
+def test_classic_access_rule_is_null(mock_api):
+    """A populated access_rule makes the handler resolve a server group, which
+    fails with KeyError 'server_group' on any SSID without an auth server.
+    Every one of HPE's verified workflow samples sends access_rule: null."""
+    from lib.models import AuthType, ForwardMode, SSID
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="guest", essid="Guest", vlan=20,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    c.create_wlan("g1", ssid, 1)
+    posts = [r for r in mock_api.requests
+             if r["method"] == "POST" and "/configuration/full_wlan/" in r["path"]]
+    body = json.loads(posts[-1]["body"]["value"])
+    assert "access_rule" in body and body["access_rule"] is None
+
+
+def test_classic_existing_ssid_is_treated_as_duplicate(mock_api):
+    """Classic phrases a duplicate as "Cannot create existing SSID" — not
+    "already exists" — so a re-run must not report it as a failed step."""
+    from lib.models import AuthType, ForwardMode, SSID
+    from lib.classic_central_client import _is_duplicate, ClassicCentralAPIError
+
+    err = ClassicCentralAPIError(
+        "POST /configuration/full_wlan/g1/corp failed 400: "
+        "{'description': 'Cannot create existing SSID', 'error_code': '0001'}")
+    assert _is_duplicate(err)
+
+    def app(method, path, query, body):
+        if "full_wlan" in path:
+            return (400, {}, {"description": "Cannot create existing SSID",
+                              "error_code": "0001",
+                              "service_name": "Configuration"})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="corp", essid="Corp", vlan=10,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    c.create_wlan("g1", ssid, 1)   # must not raise

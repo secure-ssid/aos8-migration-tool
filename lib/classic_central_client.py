@@ -115,6 +115,9 @@ _BASE_WLAN = {
     "hotspot_profile": "",
 }
 
+# The access_rule shape HPE's schema documents, kept for reference only.
+# create_wlan sends access_rule=None: a populated rule makes the handler
+# resolve a server group, which fails on any SSID without an auth server.
 _BASE_ACCESS_RULE = {
     "name": "", "action": "allow", "app_rf_mv_info": "", "blacklist": False,
     "classify_media": False, "disable_scanning": False, "dot1p_priority": "",
@@ -152,10 +155,11 @@ def _explain_wlan_error(name: str, err: Exception) -> str:
         return str(err)
     return (
         f"SSID '{name}': Classic Central rejected the WLAN with a bare key "
-        f"error for '{m.group(1)}'. The full_wlan handler indexes every field "
-        f"of the payload, so this means the tenant expects a key this tool did "
-        f"not send — check that the group is an AOS 10 group and report the "
-        f"SSID's auth type. ({err})")
+        f"error for '{m.group(1)}' — the full_wlan handler raised a KeyError "
+        f"instead of validating. If the key is 'server_group', the tenant "
+        f"could not resolve an auth server for this SSID; check that the "
+        f"group is an AOS 10 group and that any RADIUS server the SSID "
+        f"references exists in it. ({err})")
 
 
 def _vlan_token(ssid: SSID) -> str:
@@ -182,7 +186,9 @@ def _is_duplicate(err: Exception) -> bool:
     # not make an unrelated failure read as idempotent success
     m = re.search(r"failed \d+: (.*)", msg, re.S)
     detail = m.group(1) if m else msg
-    return "already exists" in detail or "duplicate" in detail
+    return ("already exists" in detail or "duplicate" in detail
+            # Classic's full_wlan phrases it as "Cannot create existing SSID"
+            or "existing ssid" in detail)
 
 
 class ClassicCentralClient:
@@ -582,8 +588,9 @@ class ClassicCentralClient:
         if ssid.auth_type in ENTERPRISE:
             wlan["access_type"] = "network_based"
             # full_wlan's auth_server1 references a single RADIUS server
-            # OBJECT by name, and this client cannot create those objects in
-            # Classic (no public endpoint) — preflight FAILs enterprise SSIDs
+            # OBJECT by name, and Classic Central exposes no REST API for
+            # auth-server objects (verified against HPE's published API
+            # reference and pycentral) — preflight FAILs enterprise SSIDs
             # on a Classic destination until the operator creates a server
             # with this exact name in the group by hand.
             wlan["auth_server1"] = ssid.auth_server_group or ""
@@ -596,8 +603,14 @@ class ClassicCentralClient:
             # tunnel binding via cluster_name — verify in the Central UI after
             # provisioning (no verbatim reference example exists for this field)
             wlan["cluster_name"] = cluster_name
-        rule = copy.deepcopy(_BASE_ACCESS_RULE)
-        rule["name"] = name
+        # access_rule stays null, exactly as every one of HPE's verified
+        # workflow samples sends it (open, psk AND enterprise). Sending a
+        # populated rule makes the handler build a role that resolves a
+        # server group, which only exists when auth_server1 is set — on an
+        # SSID with no auth server that surfaced as KeyError 'server_group'.
+        # access_type is already "unrestricted", so a permit-all rule adds
+        # nothing.
+        rule = None
         try:
             self._post_full_wlan(group, name, wlan, rule)
         except ClassicCentralAPIError as e:
@@ -613,7 +626,7 @@ class ClassicCentralClient:
                 self.manifest.register(KIND_SSID, name, payload=wlan)
 
     def _post_full_wlan(self, group: str, name: str, wlan: dict,
-                        rule: dict) -> None:
+                        rule: Optional[dict]) -> None:
         """POST a full_wlan body, healing the schema faults this API reports
         as opaque 500s.
 
@@ -653,21 +666,25 @@ class ClassicCentralClient:
 
     def list_supported_firmware(self, device_type: str = "IAP") -> list[str]:
         """Firmware versions this tenant can actually pin (best effort)."""
-        try:
-            body = self._get("/firmware/v1/versions",
-                             params={"device_type": device_type})
-        except ClassicCentralAPIError:
-            return []
-        raw = body.get("available_versions") or body.get("versions") or []
-        out = []
-        for v in raw:
-            if isinstance(v, str):
-                out.append(v)
-            elif isinstance(v, dict):
-                name = v.get("firmware_version") or v.get("version")
-                if name:
-                    out.append(str(name))
-        return out
+        for params in ({"device_type": device_type}, {"device_type": "IAP"}, {}):
+            try:
+                body = self._get("/firmware/v1/versions", params=params or None)
+            except ClassicCentralAPIError:
+                continue
+            raw = (body.get("available_versions") or body.get("versions")
+                   or body.get("firmware_versions") or body.get("items") or [])
+            out = []
+            for v in raw:
+                if isinstance(v, str):
+                    out.append(v)
+                elif isinstance(v, dict):
+                    name = (v.get("firmware_version") or v.get("version")
+                            or v.get("name"))
+                    if name:
+                        out.append(str(name))
+            if out:
+                return out
+        return []
 
     def set_firmware_compliance(self, group: str, version: str) -> None:
         try:
@@ -681,13 +698,15 @@ class ClassicCentralClient:
             hint = (f" Versions available to this tenant: "
                     f"{', '.join(available[:12])}."
                     if available else
-                    " The tenant published no AOS 10 AP versions for this "
-                    "account — check the firmware entitlement.")
+                    " The tool could not list this tenant's versions either, so "
+                    "read the exact string from Central UI → Maintain → Firmware "
+                    "(AOS 10 AP versions look like 10.7.x.x).")
             raise ClassicCentralAPIError(
                 f"Firmware compliance {version} was rejected for group "
                 f"'{group}': the tenant does not publish that version.{hint} "
                 f"Set a published version in Step 2, or clear the firmware "
-                f"field to skip compliance pinning.") from e
+                f"field to skip compliance pinning — every other object in the "
+                f"group provisions without it.") from e
 
     def _apply_firmware_compliance(self, group: str, version: str) -> None:
         body = {

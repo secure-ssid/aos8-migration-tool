@@ -698,14 +698,20 @@ def _check_ssid_auth(customer: CustomerConfig,
             name="Classic RADIUS Servers (manual step)",
             status=Status.FAIL,
             message=f"{' and '.join(kinds)} on a Classic "
-                    "destination: the Classic provisioning path cannot create "
-                    "RADIUS server objects (no public API) — full_wlan "
-                    "references the auth server BY NAME, so the reference "
-                    "dangles until the server exists.",
+                    "destination: Classic Central has no REST API for RADIUS "
+                    "auth-server objects (verified against HPE's published API "
+                    "reference and pycentral) — full_wlan references the auth "
+                    "server BY NAME, so the reference dangles until the server "
+                    "exists.",
             detail="In each Classic group, create a RADIUS auth server named "
                    "EXACTLY like the source server group "
                    f"({', '.join(sorted({s.auth_server_group for s in customer.ssids if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE, AuthType.MAC) and s.auth_server_group})) or 'see source config'}) "
-                   "with the real host/secret, then proceed.",
+                   "with the real host/secret, then proceed. This stays manual "
+                   "even though POST /configuration/v1/ap_cli/{group} could "
+                   "push the CLI, because that endpoint REPLACES the whole "
+                   "group config (HPE: \"may corrupt the configuration\") and "
+                   "because AOS 8 exports the shared secret hashed — it cannot "
+                   "be replayed, so someone has to type the real one.",
         ))
     elif enterprise:
         results.append(CheckResult(
