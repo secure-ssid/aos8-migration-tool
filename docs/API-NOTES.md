@@ -307,7 +307,7 @@ entirely). Two hard rules: a WEP SSID raises instead of provisioning (no AOS
 references a single RADIUS server OBJECT by name — the Classic API cannot
 create server objects, so preflight FAILs enterprise/MAC-auth SSIDs on a
 Classic destination until the operator creates a server with that exact name
-in the group by hand. `access_rule` is sent as **null** (see below).
+in the group by hand. `access_rule` is the populated FullWlanData rule (null makes the handler iterate None).
 
 ### Decoding `full_wlan` 500s
 
@@ -316,7 +316,8 @@ are Python internals rather than API messages:
 
 | Response `description` | Real meaning |
 |---|---|
-| `"'server_group'"` (a bare quoted key) | A `KeyError`. Sending a **populated `access_rule`** makes the handler build a role and resolve a server group, which only exists when `auth_server1` is set — so every SSID *without* an auth server failed. `create_wlan` sends `access_rule: null`, exactly as all three of HPE's verified workflow samples do. |
+| `"'server_group'"` (a bare quoted key) | Instant KeyError. **Not** fixed by sending `access_rule: null` — that produces `argument of type 'NoneType' is not iterable` on enterprise SSIDs. The payload now includes `server_group: ""` on both `wlan` and `access_rule` (PSK/open) or the RADIUS name (enterprise/MAC). |
+| `argument of type 'NoneType' is not iterable` | `access_rule` was JSON null. The handler iterates the rule. Always send the populated FullWlanData rule object. |
 | `Invalid type for JSON key: vlan` | A scalar has the wrong JSON type. `None` serialises to `null` and trips this (`per_user_limit` was the offender). |
 | `Cannot create existing SSID` (400) | Classic's wording for a duplicate — **not** "already exists". `_is_duplicate()` matches it so a re-run reuses the object instead of failing the step. |
 

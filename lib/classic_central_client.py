@@ -113,11 +113,15 @@ _BASE_WLAN = {
     "work_without_uplink": False, "wpa_passphrase": "",
     "wpa_passphrase_changed": False, "zone": "",
     "hotspot_profile": "",
+    # Instant backend KeyErrors this on PSK/open even though FullWlanData
+    # does not list it. Empty string = no RADIUS group, not a missing key.
+    "server_group": "",
 }
 
-# The access_rule shape HPE's schema documents, kept for reference only.
-# create_wlan sends access_rule=None: a populated rule makes the handler
-# resolve a server group, which fails on any SSID without an auth server.
+# Populated rule from HPE's FullWlanData example. Sending null makes the
+# handler iterate None ("argument of type 'NoneType' is not iterable") on
+# enterprise SSIDs — live-tenant, 2026-08-24. server_group is not in the
+# published schema but the Instant backend KeyErrors on it for PSK/open.
 _BASE_ACCESS_RULE = {
     "name": "", "action": "allow", "app_rf_mv_info": "", "blacklist": False,
     "classify_media": False, "disable_scanning": False, "dot1p_priority": "",
@@ -126,6 +130,7 @@ _BASE_ACCESS_RULE = {
     "protocol_id": "", "service_name": "", "service_type": "network",
     "source": "default", "sport": "any", "throttle_downstream": "",
     "throttle_upstream": "", "time_range": "", "tos": "", "vlan": 0,
+    "server_group": "",
 }
 
 
@@ -149,17 +154,29 @@ def _flip_scalar(value):
     return None
 
 
+def _bare_key(msg: str) -> Optional[str]:
+    m = _BARE_KEY_ERR.search(msg)
+    return m.group(1) if m else None
+
+
 def _explain_wlan_error(name: str, err: Exception) -> str:
     m = _BARE_KEY_ERR.search(str(err))
     if not m:
         return str(err)
     return (
         f"SSID '{name}': Classic Central rejected the WLAN with a bare key "
-        f"error for '{m.group(1)}' — the full_wlan handler raised a KeyError "
-        f"instead of validating. If the key is 'server_group', the tenant "
-        f"could not resolve an auth server for this SSID; check that the "
-        f"group is an AOS 10 group and that any RADIUS server the SSID "
-        f"references exists in it. ({err})")
+        f"error for '{m.group(1)}' after a retry that inserted the missing "
+        f"key. The Instant handler still could not resolve it — if the key "
+        f"is 'server_group' this SSID's auth type may require a RADIUS "
+        f"object that does not exist in the group. ({err})")
+
+
+def _resolve_firmware_version(requested: str, available: list[str]) -> Optional[str]:
+    """Map '10.7.1.0' to a published '10.7.1.0_91459'. Never jumps 10.7.0.0 → 10.7.2.x."""
+    if requested in available:
+        return requested
+    hits = [v for v in available if v.startswith(requested + "_")]
+    return sorted(hits)[-1] if hits else None
 
 
 def _vlan_token(ssid: SSID) -> str:
@@ -594,23 +611,23 @@ class ClassicCentralClient:
             # on a Classic destination until the operator creates a server
             # with this exact name in the group by hand.
             wlan["auth_server1"] = ssid.auth_server_group or ""
+            wlan["server_group"] = ssid.auth_server_group or ""
         if ssid.auth_type == AuthType.MAC:
             # never emit a silently-open network for a MAC-auth SSID
             wlan["mac_authentication"] = True
             wlan["access_type"] = "network_based"
             wlan["auth_server1"] = ssid.auth_server_group or ""
+            wlan["server_group"] = ssid.auth_server_group or ""
         if cluster_name and ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT):
             # tunnel binding via cluster_name — verify in the Central UI after
             # provisioning (no verbatim reference example exists for this field)
             wlan["cluster_name"] = cluster_name
-        # access_rule stays null, exactly as every one of HPE's verified
-        # workflow samples sends it (open, psk AND enterprise). Sending a
-        # populated rule makes the handler build a role that resolves a
-        # server group, which only exists when auth_server1 is set — on an
-        # SSID with no auth server that surfaced as KeyError 'server_group'.
-        # access_type is already "unrestricted", so a permit-all rule adds
-        # nothing.
-        rule = None
+        # A null access_rule makes the handler iterate None
+        # ("argument of type 'NoneType' is not iterable") — live corp
+        # failure after we tried matching the YAML samples. Send the
+        # populated FullWlanData rule; server_group="" is already on it.
+        rule = copy.deepcopy(_BASE_ACCESS_RULE)
+        rule["name"] = name
         try:
             self._post_full_wlan(group, name, wlan, rule)
         except ClassicCentralAPIError as e:
@@ -651,16 +668,37 @@ class ClassicCentralClient:
         except ClassicCentralAPIError as e:
             if _is_duplicate(e):
                 raise  # the caller decides whether reuse is legitimate
-            key = _type_error_key(str(e))
-            flipped = _flip_scalar(wlan.get(key)) if key else None
-            if flipped is None:
-                raise ClassicCentralAPIError(_explain_wlan_error(name, e)) from e
-        retry = dict(wlan)
-        retry[key] = flipped
-        send(retry)
-        # record what the tenant actually accepted so the manifest and any
-        # later update send the same shape
-        wlan[key] = flipped
+            msg = str(e)
+            type_key = _type_error_key(msg)
+            flipped = _flip_scalar(wlan.get(type_key)) if type_key else None
+            if flipped is not None:
+                retry = dict(wlan)
+                retry[type_key] = flipped
+                send(retry)
+                wlan[type_key] = flipped
+                return
+            missing = _bare_key(msg)
+            if missing:
+                retry = dict(wlan)
+                target = None
+                if missing not in retry:
+                    retry[missing] = ""
+                    target = "wlan"
+                elif rule is not None and missing not in rule:
+                    rule[missing] = ""
+                    target = "rule"
+                if target:
+                    try:
+                        send(retry)
+                        if target == "wlan":
+                            wlan[missing] = ""
+                        return
+                    except ClassicCentralAPIError as e2:
+                        if _is_duplicate(e2):
+                            raise
+                        raise ClassicCentralAPIError(
+                            _explain_wlan_error(name, e2)) from e2
+            raise ClassicCentralAPIError(_explain_wlan_error(name, e)) from e
 
     # ─────────────────── Firmware ───────────────────
 
@@ -695,12 +733,19 @@ class ClassicCentralClient:
             # the tenant only accepts versions it actually publishes, and the
             # bare 400 names none of them — list them so the operator can pick
             available = self.list_supported_firmware()
+            resolved = _resolve_firmware_version(version, available)
+            if resolved and resolved != version:
+                try:
+                    self._apply_firmware_compliance(group, resolved)
+                    return
+                except ClassicCentralAPIError:
+                    pass
             hint = (f" Versions available to this tenant: "
                     f"{', '.join(available[:12])}."
                     if available else
                     " The tool could not list this tenant's versions either, so "
                     "read the exact string from Central UI → Maintain → Firmware "
-                    "(AOS 10 AP versions look like 10.7.x.x).")
+                    "(AOS 10 AP versions look like 10.7.1.0_91459).")
             raise ClassicCentralAPIError(
                 f"Firmware compliance {version} was rejected for group "
                 f"'{group}': the tenant does not publish that version.{hint} "

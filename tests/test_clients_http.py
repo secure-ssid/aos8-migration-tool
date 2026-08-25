@@ -1229,7 +1229,8 @@ def test_classic_base_wlan_matches_hpe_published_schema():
     # fields the tool previously omitted, which produced the opaque 500s
     for key in ("a_max_tx_rate", "a_min_tx_rate", "accounting_server1",
                 "accounting_server2", "auth_cache_timeout", "auth_req_threshold",
-                "dot11r", "okc_disable", "wpa_passphrase_changed"):
+                "dot11r", "okc_disable", "wpa_passphrase_changed",
+                "server_group"):
         assert key in _BASE_WLAN, f"full_wlan payload is missing {key}"
     # None serialises to JSON null -> "Invalid type for JSON key"
     assert _BASE_WLAN["per_user_limit"] == ""
@@ -1336,10 +1337,10 @@ def test_classic_firmware_error_lists_available_versions(mock_api):
     assert "10.7.1.0" in msg and "10.6.0.2" in msg
 
 
-def test_classic_access_rule_is_null(mock_api):
-    """A populated access_rule makes the handler resolve a server group, which
-    fails with KeyError 'server_group' on any SSID without an auth server.
-    Every one of HPE's verified workflow samples sends access_rule: null."""
+def test_classic_access_rule_is_populated_and_has_server_group(mock_api):
+    """A null access_rule makes the handler iterate None (live corp 500:
+    "argument of type 'NoneType' is not iterable"). PSK/open still KeyError
+    'server_group' unless that key is present on the WLAN."""
     from lib.models import AuthType, ForwardMode, SSID
     mock_api.app = lambda m, p, q, b: (200, {}, {})
     c = ClassicCentralClient(mock_api.url, "tok")
@@ -1350,7 +1351,75 @@ def test_classic_access_rule_is_null(mock_api):
     posts = [r for r in mock_api.requests
              if r["method"] == "POST" and "/configuration/full_wlan/" in r["path"]]
     body = json.loads(posts[-1]["body"]["value"])
-    assert "access_rule" in body and body["access_rule"] is None
+    assert isinstance(body["access_rule"], dict)
+    assert body["access_rule"].get("server_group") == ""
+    assert body["wlan"]["server_group"] == ""
+
+
+def test_classic_injects_missing_key_and_retries(mock_api):
+    """Bare KeyError repr → insert the missing key as '' and retry once."""
+    from lib.models import AuthType, ForwardMode, SSID
+    seen = []
+
+    def app(method, path, query, body):
+        if "full_wlan" in path:
+            wlan = json.loads(body["value"])["wlan"]
+            seen.append("cluster_name" in wlan)
+            if "cluster_name" not in wlan:
+                return (500, {}, {"description": "'cluster_name'",
+                                  "error_code": "0001",
+                                  "service_name": "Configuration"})
+            return (200, {}, {})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="guest", essid="Guest", vlan=20,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    # cluster_name is on _BASE_WLAN already — strip it to force the healer
+    from lib import classic_central_client as m
+    saved = m._BASE_WLAN.get("cluster_name", "")
+    try:
+        del m._BASE_WLAN["cluster_name"]
+        c.create_wlan("g1", ssid, 1)
+    finally:
+        m._BASE_WLAN["cluster_name"] = saved
+    assert seen == [False, True], seen
+
+
+def test_classic_firmware_resolves_build_suffix(mock_api):
+    """10.7.1.0 should pin 10.7.1.0_91459; 10.7.0.0 must not jump to 10.7.2.x."""
+    from lib.classic_central_client import (
+        ClassicCentralAPIError, _resolve_firmware_version,
+    )
+    avail = ["10.7.1.0_91459", "10.7.2.6_96203", "10.8.1.0_95966"]
+    assert _resolve_firmware_version("10.7.1.0", avail) == "10.7.1.0_91459"
+    assert _resolve_firmware_version("10.7.0.0", avail) is None
+    assert _resolve_firmware_version("10.7.2.6_96203", avail) == "10.7.2.6_96203"
+
+    posted = []
+
+    def app(method, path, query, body):
+        if "compliance" in path:
+            ver = (body or {}).get("firmware_compliance_version")
+            posted.append(ver)
+            if ver not in avail:
+                return (400, {}, {"description": f"Firmware version {ver} does not exist",
+                                  "error_code": "0007",
+                                  "service_name": "Firmware Management"})
+            return (200, {}, {})
+        if path.endswith("/firmware/v1/versions"):
+            return (200, {}, {"available_versions": avail})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    c.set_firmware_compliance("g1", "10.7.1.0")
+    assert posted == ["10.7.1.0", "10.7.1.0_91459"]
+    with pytest.raises(ClassicCentralAPIError) as ei:
+        c.set_firmware_compliance("g1", "10.7.0.0")
+    assert "10.7.2.6_96203" in str(ei.value)
 
 
 def test_classic_existing_ssid_is_treated_as_duplicate(mock_api):
