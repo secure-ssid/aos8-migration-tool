@@ -290,8 +290,10 @@ payload = {"value": json.dumps({"wlan": wlan, "access_rule": rule})}
 self._post(f"/configuration/full_wlan/{group}/{name}", json_body=payload)
 ```
 
-`wlan` is a full ~90-field flat object (`_BASE_WLAN` in the client, taken verbatim
-from HPE's central-python-workflows examples); only per-SSID fields are
+`wlan` is a full **109-field** flat object (`_BASE_WLAN` in the client, taken from
+HPE's published `FullWlanData` schema on developer.arubanetworks.com — the
+`central-python-workflows` YAML samples are an older 100-field subset and are
+**not** sufficient); only per-SSID fields are
 overridden (`name`, `essid`, `index`, `opmode`, `type`, `vlan`, `hide_ssid`,
 `wpa_passphrase`, enterprise `access_type`/`auth_server1`,
 `mac_authentication` + `access_type`/`auth_server1` for MAC-auth SSIDs, and
@@ -307,6 +309,40 @@ create server objects, so preflight FAILs enterprise/MAC-auth SSIDs on a
 Classic destination until the operator creates a server with that exact name
 in the group by hand. `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
 SSID name filled in.
+
+### Decoding `full_wlan` 500s
+
+The handler indexes the payload directly instead of validating it, so its errors
+are Python internals rather than API messages:
+
+| Response `description` | Real meaning |
+|---|---|
+| `"'server_group'"` (a bare quoted key) | A `KeyError` — the payload is **missing a field**. The complete 109-field object is mandatory; sending the older 100-field YAML sample set reproduces this on non-enterprise SSIDs. |
+| `Invalid type for JSON key: vlan` | A scalar has the wrong JSON type. `None` serialises to `null` and trips this (`per_user_limit` was the offender), and some tenants disagree with the published `str` type for `vlan`. |
+
+`_post_full_wlan()` retries **once** with the offending scalar flipped between
+`str` and `int`, then keeps whatever the tenant accepted. A bare key error is
+re-raised with an explanation instead of the raw vendor fragment.
+
+`wpa_passphrase_changed` must be `True` whenever a passphrase is sent, otherwise
+the handler keeps the previous (blank) passphrase and the WLAN is unjoinable.
+A **named** AOS 8 VLAN (no numeric id) is carried through as its name — dropping
+it silently parked the WLAN on the AP's native VLAN.
+
+### Firmware compliance
+
+`Firmware version X does not exist` (400, error_code 0007) names no alternative.
+`set_firmware_compliance()` catches it and calls
+`GET /firmware/v1/versions?device_type=IAP` to list what the tenant actually
+publishes, so the operator can pick a valid version or clear the field.
+
+### Device inventory
+
+`POST /platform/device_inventory/v1/devices` only **claims** APs already
+registered to the HPE account — it cannot create inventory entries. Unknown or
+placeholder serials return `ATHENA_ERROR_NO_DEVICE` / `INVALID_MAC_SN`; the
+client rewrites that into an explanation noting that groups, sites and WLANs can
+still be provisioned without the Add-devices step.
 
 ### Runtime-verify caveats (Classic)
 

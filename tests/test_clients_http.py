@@ -1216,3 +1216,121 @@ def test_aos8_api_hidden_ssid_does_not_default_to_broadcast(aos8_api):
     [corp] = c.get_ssids()
     assert corp.broadcast is False
     assert corp.enabled is True      # hidden ≠ administratively disabled
+
+
+# ─────────── Classic full_wlan schema conformance (live-tenant findings) ───────────
+
+def test_classic_base_wlan_matches_hpe_published_schema():
+    """The full_wlan handler indexes every field of the payload, so an omitted
+    key comes back as a bare KeyError repr in a 500 ("'server_group'") rather
+    than a validation message. The base body must therefore carry the complete
+    field set from HPE's published FullWlanData schema."""
+    from lib.classic_central_client import _BASE_WLAN
+    # fields the tool previously omitted, which produced the opaque 500s
+    for key in ("a_max_tx_rate", "a_min_tx_rate", "accounting_server1",
+                "accounting_server2", "auth_cache_timeout", "auth_req_threshold",
+                "dot11r", "okc_disable", "wpa_passphrase_changed"):
+        assert key in _BASE_WLAN, f"full_wlan payload is missing {key}"
+    # None serialises to JSON null -> "Invalid type for JSON key"
+    assert _BASE_WLAN["per_user_limit"] == ""
+    assert not any(v is None for v in _BASE_WLAN.values())
+
+
+def test_classic_named_vlan_is_carried_not_dropped(mock_api):
+    """A named AOS 8 VLAN has no numeric id. Dropping it silently parked the
+    WLAN on the AP's native VLAN and still reported success."""
+    from lib.models import AuthType, ForwardMode, SSID
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="corp", essid="Corp", vlan=None,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    ssid.vlan_raw = "corp-vlan"
+    c.create_wlan("g1", ssid, 1)
+    assert _full_wlan_body(mock_api)["vlan"] == "corp-vlan"
+
+
+def test_classic_psk_sets_passphrase_changed_flag(mock_api):
+    """Without wpa_passphrase_changed the handler keeps the previous/blank
+    passphrase and the WLAN comes up unjoinable."""
+    from lib.models import AuthType, ForwardMode, SSID
+    mock_api.app = lambda m, p, q, b: (200, {}, {})
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="corp", essid="Corp", vlan=10,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    c.create_wlan("g1", ssid, 1)
+    assert _full_wlan_body(mock_api)["wpa_passphrase_changed"] is True
+
+
+def test_classic_wlan_retries_once_on_json_type_error(mock_api):
+    """The tenant reports a wrong scalar type as "Invalid type for JSON key:
+    vlan" without saying what it wants — flip str<->int and retry once."""
+    from lib.models import AuthType, ForwardMode, SSID
+    seen = []
+
+    def app(method, path, query, body):
+        if "full_wlan" in path:
+            wlan = json.loads(body["value"])["wlan"]
+            seen.append(wlan["vlan"])
+            if isinstance(wlan["vlan"], str):
+                return (500, {}, {"description": "Invalid type for JSON key: vlan",
+                                  "error_code": "0001",
+                                  "service_name": "Configuration"})
+            return (200, {}, {})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="corp", essid="Corp", vlan=100,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    c.create_wlan("g1", ssid, 1)          # must not raise
+    assert seen == ["100", 100], seen
+
+
+def test_classic_bare_key_error_is_explained(mock_api):
+    """A bare KeyError repr from the vendor handler must not reach the operator
+    as an unexplained 500."""
+    from lib.models import AuthType, ForwardMode, SSID
+    from lib.classic_central_client import ClassicCentralAPIError
+
+    def app(method, path, query, body):
+        if "full_wlan" in path:
+            return (500, {}, {"description": "'server_group'",
+                              "error_code": "0001",
+                              "service_name": "Configuration"})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    ssid = SSID(name="guest", essid="Guest", vlan=20,
+                forward_mode=ForwardMode.BRIDGE, auth_type=AuthType.WPA2_PSK,
+                psk="SecretPass123")
+    with pytest.raises(ClassicCentralAPIError) as ei:
+        c.create_wlan("g1", ssid, 1)
+    msg = str(ei.value)
+    assert "server_group" in msg and "guest" in msg.lower()
+    assert "bare key error" in msg
+
+
+def test_classic_firmware_error_lists_available_versions(mock_api):
+    """"Firmware version X does not exist" names no alternative — the tool must
+    tell the operator what the tenant actually publishes."""
+    from lib.classic_central_client import ClassicCentralAPIError
+
+    def app(method, path, query, body):
+        if "compliance" in path:
+            return (400, {}, {"description": "Firmware version 10.8.1.0 does not exist",
+                              "error_code": "0007",
+                              "service_name": "Firmware Management"})
+        if path.endswith("/firmware/v1/versions"):
+            return (200, {}, {"available_versions": ["10.7.1.0", "10.6.0.2"]})
+        return (200, {}, {})
+
+    mock_api.app = app
+    c = ClassicCentralClient(mock_api.url, "tok")
+    with pytest.raises(ClassicCentralAPIError) as ei:
+        c.set_firmware_compliance("g1", "10.8.1.0")
+    msg = str(ei.value)
+    assert "10.7.1.0" in msg and "10.6.0.2" in msg
