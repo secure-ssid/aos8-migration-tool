@@ -18,8 +18,13 @@ are gated by `lib/http_base.py`: only HPE/Aruba hosts
 bearer token to an unintended or cleartext endpoint. The AOS 8 client
 re-logins once on a 401 (covers out-of-band session invalidation mid-pull)
 but has no 429 handling — its calls are short-lived reads inside one login
-session. Controller TLS verification is ON by default (`AOS8_CA_BUNDLE` to
-point at the controller's CA, `AOS8_DEV_MODE` to opt out in a local lab).
+session. Controller TLS verification is ON by default. A factory self-signed
+cert is handled by trust-on-first-use: `connect()` raises `AOS8TLSError`
+carrying the certificate's SHA-256 fingerprint, Step 1 shows it for
+confirmation, and trusting it pins that exact certificate for the run
+(`assert_fingerprint`, so a substituted cert is still refused). Alternatives:
+`AOS8_CERT_FINGERPRINT` to pin headlessly, `AOS8_CA_BUNDLE` for your own CA,
+`AOS8_DEV_MODE` to disable verification entirely in a local lab.
 
 ## Bases and auth
 
@@ -198,8 +203,12 @@ defence. WPA3-SAE bodies do NOT set `wpa3-transition-mode-enable` (that flag
 is a WPA2-PSK compatibility feature — enabling it on a WPA3-only SSID would
 silently add a WPA2 fallback). OWE / Enhanced Open maps to
 the first-class `ENHANCED_OPEN` opmode — it is **encrypted**, so it must never
-be folded into `OPEN`; Classic has no equivalent value, and preflight FAILs an
-OWE SSID with a classic destination rather than publishing it unencrypted.
+be folded into `OPEN`. Classic has its own equivalent, `enhanced-open`, used
+verbatim in HPE's Classic Central reference
+(`Classic-Central/wlan_config/configurations/enhanced_captive.yaml` and
+`ap_config/configurations/open-captive-portal.txt`), so both destinations
+preserve the encryption and neither blocks an OWE SSID. `opmode_transition_
+disable` stays set, so an OWE SSID never also advertises a legacy open BSS.
 
 **Config API version fallback.** HPE's published v26.04 reference puts scope
 management (`sites`, `device-groups`, `global`, `site-collections`) on `/v1`
@@ -281,8 +290,10 @@ payload = {"value": json.dumps({"wlan": wlan, "access_rule": rule})}
 self._post(f"/configuration/full_wlan/{group}/{name}", json_body=payload)
 ```
 
-`wlan` is a full ~90-field flat object (`_BASE_WLAN` in the client, taken verbatim
-from HPE's central-python-workflows examples); only per-SSID fields are
+`wlan` is a full **109-field** flat object (`_BASE_WLAN` in the client, taken from
+HPE's published `FullWlanData` schema on developer.arubanetworks.com — the
+`central-python-workflows` YAML samples are an older 100-field subset and are
+**not** sufficient); only per-SSID fields are
 overridden (`name`, `essid`, `index`, `opmode`, `type`, `vlan`, `hide_ssid`,
 `wpa_passphrase`, enterprise `access_type`/`auth_server1`,
 `mac_authentication` + `access_type`/`auth_server1` for MAC-auth SSIDs, and
@@ -296,8 +307,43 @@ entirely). Two hard rules: a WEP SSID raises instead of provisioning (no AOS
 references a single RADIUS server OBJECT by name — the Classic API cannot
 create server objects, so preflight FAILs enterprise/MAC-auth SSIDs on a
 Classic destination until the operator creates a server with that exact name
-in the group by hand. `access_rule` is a full flat object (`_BASE_ACCESS_RULE`) with the
-SSID name filled in.
+in the group by hand. `access_rule` is the populated FullWlanData rule (null makes the handler iterate None).
+
+### Decoding `full_wlan` 500s
+
+The handler indexes the payload directly instead of validating it, so its errors
+are Python internals rather than API messages:
+
+| Response `description` | Real meaning |
+|---|---|
+| `"'server_group'"` (a bare quoted key) | Instant KeyError. **Not** fixed by sending `access_rule: null` — that produces `argument of type 'NoneType' is not iterable` on enterprise SSIDs. The payload now includes `server_group: ""` on both `wlan` and `access_rule` (PSK/open) or the RADIUS name (enterprise/MAC). |
+| `argument of type 'NoneType' is not iterable` | `access_rule` was JSON null. The handler iterates the rule. Always send the populated FullWlanData rule object. |
+| `Invalid type for JSON key: vlan` | A scalar has the wrong JSON type. `None` serialises to `null` and trips this (`per_user_limit` was the offender). |
+| `Cannot create existing SSID` (400) | Classic's wording for a duplicate — **not** "already exists". `_is_duplicate()` matches it so a re-run reuses the object instead of failing the step. |
+
+`_post_full_wlan()` retries **once** with the offending scalar flipped between
+`str` and `int`, then keeps whatever the tenant accepted. A bare key error is
+re-raised with an explanation instead of the raw vendor fragment.
+
+`wpa_passphrase_changed` must be `True` whenever a passphrase is sent, otherwise
+the handler keeps the previous (blank) passphrase and the WLAN is unjoinable.
+A **named** AOS 8 VLAN (no numeric id) is carried through as its name — dropping
+it silently parked the WLAN on the AP's native VLAN.
+
+### Firmware compliance
+
+`Firmware version X does not exist` (400, error_code 0007) names no alternative.
+`set_firmware_compliance()` catches it and calls
+`GET /firmware/v1/versions?device_type=IAP` to list what the tenant actually
+publishes, so the operator can pick a valid version or clear the field.
+
+### Device inventory
+
+`POST /platform/device_inventory/v1/devices` only **claims** APs already
+registered to the HPE account — it cannot create inventory entries. Unknown or
+placeholder serials return `ATHENA_ERROR_NO_DEVICE` / `INVALID_MAC_SN`; the
+client rewrites that into an explanation noting that groups, sites and WLANs can
+still be provisioned without the Add-devices step.
 
 ### Runtime-verify caveats (Classic)
 
@@ -310,7 +356,7 @@ SSID name filled in.
 | 2xx with a non-JSON body | Raises `ClassicCentralAPIError` — flattening to `{}` made `list_group_names` return `[]` and `create_group` re-POST. |
 | Pre-existing group / duplicate WLAN | With a manifest attached, reuse of a same-named group and the duplicate-WLAN swallow are allowed only for manifest-owned (or explicitly adopted) objects — a foreign same-name object fails the step with a collision refusal. |
 | Refresh token rotation | Each refresh returns a new refresh token; `self.refresh_token` holds the newest. Views read it back and persist it to the session. |
-| RADIUS auth-servers / GW clusters | **Cannot** be created via the classic API. Preflight **FAILs** enterprise/MAC-auth SSIDs on a Classic destination until the operator hand-creates a RADIUS server named exactly like the source server group in each group (`full_wlan` references it by name), and `provision()` still appends the MANUAL FOLLOW-UP (gateways auto-cluster on join — verify tunnel SSID binding). |
+| RADIUS auth-servers / GW clusters | **No REST API exists** (see "Why RADIUS servers stay manual" below). Preflight **FAILs** enterprise/MAC-auth SSIDs on a Classic destination until the operator hand-creates a RADIUS server named exactly like the source server group in each group (`full_wlan` references it by name), and `provision()` still appends the MANUAL FOLLOW-UP (gateways auto-cluster on join — verify tunnel SSID binding). |
 | Tunnel WLAN `cluster_name` | Set on the WLAN but unverified by any reference example — confirm in the Central UI. |
 
 ---
@@ -362,3 +408,37 @@ before expiry instead of waiting for a mid-run 401.
 | VLAN | `layer2-vlan` profile scope-mapped to group | (implicit via WLAN `vlan` field) |
 | RADIUS server | `auth-servers` library profile + `server-groups` binding | Manual follow-up (no classic API) |
 | MC cluster | Gateway cluster formed when converted MCs join at cutover (manual follow-up) | Gateways auto-cluster on join (manual follow-up) |
+
+### Why RADIUS servers stay manual (Classic)
+
+This is the tool's only blocker that needs a written acknowledgement, so the
+evidence is recorded here rather than re-argued each time.
+
+**There is no auth-server REST API.** Checked three ways:
+
+1. HPE's published API reference (developer.arubanetworks.com/central) — all
+   **1178** reference pages enumerated: **zero** `radius` / `auth_server` /
+   `server_group` / `aaa` endpoints. The Configuration spec (101 paths) has
+   only `/configuration/v1/certificates`.
+2. **pycentral**, HPE's own SDK — no create/update method. Its only RADIUS
+   surface is `aaa_test()`, a *diagnostic* against an already-existing server.
+3. **hpe-networking-mcp**, an independent HPE-networking migration project,
+   lists this as one of *"three known Central API gaps (AAA servers, AAA
+   server-groups, AP system profiles)"* and emits
+   `[Central API gap — manual UI: Network Services → Server Groups]`.
+
+**The one programmatic route, and why it is not used.**
+`POST /configuration/v1/ap_cli/{group}` accepts Instant CLI and could define
+`wlan auth-server`. It **replaces the entire group configuration** — HPE's own
+description says the body must be derived from the matching GET, *"Otherwise,
+it may corrupt the configuration. Should use with caution!"* A read-modify-write
+of a whole production group, racing any other admin, is not an acceptable
+trade for skipping one manual form during an unattended migration.
+
+**Even with an API it would not help.** AOS 8 exports the RADIUS shared secret
+hashed/encrypted (`secret_looks_unusable()`), exactly like PSKs. An automated
+server object would carry a placeholder secret and reject every client — a WLAN
+that looks provisioned but authenticates nobody. The same conclusion is reached
+independently by hpe-networking-mcp, which 403s its own auth-server write path
+"until secret tokenization ships. Don't try to route around it — create
+auth-servers manually for now."

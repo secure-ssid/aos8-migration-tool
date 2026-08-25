@@ -7,7 +7,8 @@ from dataclasses import asdict
 
 import streamlit as st
 
-from lib.aos8_client import AOS8Client, AOS8APIError, is_model_compatible
+from lib.aos8_client import (AOS8Client, AOS8APIError, AOS8TLSError,
+                             is_model_compatible)
 from lib.aos8_parser import parse_customer_config, parse_instant_config
 from lib.translator import translate
 from lib.styles import (
@@ -387,20 +388,52 @@ def render():
                 value=st.session_state.get("mc_config_path", "/md"),
                 help="Mobility Conductor: /md (or a specific node). Standalone controller: /mm/mynode",
             )
+        _trusted_fp = st.session_state.get("mc_trusted_fp", {}).get(mc_ip)
+        _tls_note = (f"certificate pinned · {_trusted_fp[:17]}…" if _trusted_fp
+                     else "TLS certificate verified")
         st.markdown(
             f'<div style="font-size:11.5px;color:{FAINT};margin:-0.3rem 0 0.7rem;">'
-            f'REST API on port 4343 · self-signed cert accepted · UIDARUBA session token</div>',
+            f'REST API on port 4343 · {_tls_note} · UIDARUBA session token</div>',
             unsafe_allow_html=True,
         )
 
-        if st.button("Connect & Pull Config", type="primary",
-                     disabled=not (mc_ip and mc_user and mc_pass)):
+        _pending = st.session_state.get("mc_pending_fp")
+        if _pending and _pending.get("ip") == mc_ip:
+            st.warning(
+                f"**{mc_ip} presented a certificate that no trusted CA vouches "
+                f"for.** That is normal for an AOS 8 controller using its "
+                f"factory self-signed certificate — but it is also what "
+                f"interception looks like, so confirm the fingerprint below "
+                f"before trusting it.")
+            st.code(_pending["fingerprint"], language=None)
+            st.caption("Check it on the controller with `show crypto pki "
+                       "servercert` over console or SSH. Once trusted, this "
+                       "exact certificate is pinned — a different certificate "
+                       "on a later connection will be refused.")
+            tc1, tc2 = st.columns([1, 3])
+            if tc1.button("Trust this certificate", type="primary"):
+                trusted = dict(st.session_state.get("mc_trusted_fp", {}))
+                trusted[mc_ip] = _pending["fingerprint"]
+                st.session_state["mc_trusted_fp"] = trusted
+                st.session_state.pop("mc_pending_fp", None)
+                st.session_state["mc_retry_connect"] = True
+                st.rerun()
+            if tc2.button("Cancel"):
+                st.session_state.pop("mc_pending_fp", None)
+                st.rerun()
+
+        if (st.button("Connect & Pull Config", type="primary",
+                      disabled=not (mc_ip and mc_user and mc_pass))
+                or st.session_state.pop("mc_retry_connect", False)):
             with st.spinner(f"Connecting to {mc_ip} ..."):
                 client = None
                 try:
                     requested_path = config_path.strip() or "/md"
-                    client = AOS8Client(mc_ip, mc_user, mc_pass,
-                                        config_path=requested_path)
+                    client = AOS8Client(
+                        mc_ip, mc_user, mc_pass,
+                        config_path=requested_path,
+                        pin_fingerprint=st.session_state.get(
+                            "mc_trusted_fp", {}).get(mc_ip))
                     client.connect()
                     customer_cfg = client.pull_config()
                     # pull_config may auto-detect the real config node when the
@@ -449,6 +482,15 @@ def render():
                             f"(`{client.running_config_error}`), so EAP-termination, "
                             "internal-auth and captive-portal detection were skipped "
                             "for this pull — preflight cannot block on them.")
+                except AOS8TLSError as e:
+                    if e.fingerprint:
+                        # Recoverable: let the operator inspect and pin the
+                        # certificate rather than dead-ending, or being pushed
+                        # to switch verification off wholesale.
+                        st.session_state["mc_pending_fp"] = {
+                            "ip": mc_ip, "fingerprint": e.fingerprint}
+                        st.rerun()
+                    st.error(f"TLS error: {e}")
                 except AOS8APIError as e:
                     st.error(f"AOS 8 API error: {e}")
                     st.info("If port 4343 is firewalled or the API is disabled, "

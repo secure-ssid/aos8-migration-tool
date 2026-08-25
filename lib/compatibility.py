@@ -635,17 +635,18 @@ def _check_ssid_auth(customer: CustomerConfig,
                    "MAC-only auth is trivially spoofable.",
         ))
     owe = [s.display_name for s in customer.ssids if s.auth_type == AuthType.OWE]
-    if owe and central.destination == "classic":
+    if owe:
         results.append(CheckResult(
             name="Enhanced Open (OWE) SSIDs",
-            status=Status.FAIL,
-            critical=True,
-            message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Classic AOS10 "
-                    "has no Enhanced-Open opmode — these SSIDs would migrate "
-                    "unencrypted.",
-            detail="New Central supports these natively (opmode ENHANCED_OPEN). "
-                   "Target New Central for them, or accept and document the "
-                   "downgrade explicitly before provisioning.",
+            status=Status.WARN,
+            message=f"OWE / Enhanced-Open SSIDs: {', '.join(owe)}. Both "
+                    "destinations carry these natively (New Central opmode "
+                    "ENHANCED_OPEN, Classic opmode enhanced-open), so the "
+                    "encryption is preserved.",
+            detail="Transition mode stays disabled, so these SSIDs will not "
+                   "also advertise a legacy unencrypted BSS. Clients too old "
+                   "for OWE cannot associate — confirm that is acceptable, or "
+                   "run a separate open SSID alongside them.",
         ))
     unknown = [s.display_name for s in customer.ssids
                if not s.auth_known and s.auth_type != AuthType.OPEN]
@@ -697,14 +698,20 @@ def _check_ssid_auth(customer: CustomerConfig,
             name="Classic RADIUS Servers (manual step)",
             status=Status.FAIL,
             message=f"{' and '.join(kinds)} on a Classic "
-                    "destination: the Classic provisioning path cannot create "
-                    "RADIUS server objects (no public API) — full_wlan "
-                    "references the auth server BY NAME, so the reference "
-                    "dangles until the server exists.",
+                    "destination: Classic Central has no REST API for RADIUS "
+                    "auth-server objects (verified against HPE's published API "
+                    "reference and pycentral) — full_wlan references the auth "
+                    "server BY NAME, so the reference dangles until the server "
+                    "exists.",
             detail="In each Classic group, create a RADIUS auth server named "
                    "EXACTLY like the source server group "
                    f"({', '.join(sorted({s.auth_server_group for s in customer.ssids if s.auth_type in (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE, AuthType.MAC) and s.auth_server_group})) or 'see source config'}) "
-                   "with the real host/secret, then proceed.",
+                   "with the real host/secret, then proceed. This stays manual "
+                   "even though POST /configuration/v1/ap_cli/{group} could "
+                   "push the CLI, because that endpoint REPLACES the whole "
+                   "group config (HPE: \"may corrupt the configuration\") and "
+                   "because AOS 8 exports the shared secret hashed — it cannot "
+                   "be replayed, so someone has to type the real one.",
         ))
     elif enterprise:
         results.append(CheckResult(

@@ -41,11 +41,15 @@ from .central_client import PSK_PLACEHOLDER, secret_looks_unusable
 OPMODE_CLASSIC = {
     AuthType.OPEN: "opensystem",
     AuthType.MAC: "opensystem",
-    # Classic AOS 10 has NO Enhanced-Open (OWE) opmode. This entry exists only
-    # so the enum mapping is total: compatibility._check_ssid_auth FAILS
-    # preflight for an OWE SSID with a classic destination, so provisioning
-    # never reaches this value with a real OWE network.
-    AuthType.OWE: "opensystem",
+    # Enhanced-Open IS a valid Classic opmode. HPE's own Classic Central
+    # reference ships it in both the WLAN API payload and the AP CLI config:
+    #   central-python-workflows/Classic-Central/wlan_config/configurations/
+    #     enhanced_captive.yaml            -> "opmode: enhanced-open"
+    #   central-python-workflows/Classic-Central/ap_config/configurations/
+    #     open-captive-portal.txt          -> "opmode enhanced-open"
+    # Mapping OWE to opensystem here would strip the encryption OWE exists to
+    # provide, turning a protected network into a plaintext one.
+    AuthType.OWE: "enhanced-open",
     AuthType.WPA2_PSK: "wpa2-psk-aes",
     AuthType.WPA3_SAE: "wpa3-sae-aes",
     AuthType.WPA2_ENTERPRISE: "wpa2-aes",
@@ -54,11 +58,17 @@ OPMODE_CLASSIC = {
 
 ENTERPRISE = (AuthType.WPA2_ENTERPRISE, AuthType.WPA3_ENTERPRISE)
 
-# Verbatim full_wlan field set from HPE's central-python-workflows
-# (Classic-Central/wlan_config/configurations/*.yaml) — the API expects the
-# complete flat object; per-SSID fields are overridden in create_wlan().
+# full_wlan field set taken from HPE's published FullWlanData schema
+# (developer.arubanetworks.com/central → Configuration → Create full WLAN).
+# The API expects the COMPLETE flat object and its handler indexes the keys
+# directly, so an omitted key surfaces as a bare KeyError repr in a 500
+# ("description": "'server_group'") rather than a useful validation message.
+# Per-SSID fields are overridden in create_wlan().
 _BASE_WLAN = {
-    "access_type": "unrestricted", "air_time_limit": "", "air_time_limit_cb": False,
+    "a_max_tx_rate": "54", "a_min_tx_rate": "6",
+    "access_type": "unrestricted", "accounting_server1": "",
+    "accounting_server2": "", "air_time_limit": "", "air_time_limit_cb": False,
+    "auth_cache_timeout": 24, "auth_req_threshold": 0,
     "auth_server1": "", "auth_server2": "", "auth_survivability": False,
     "bandwidth_limit": "", "bandwidth_limit_cb": False, "blacklist": True,
     "broadcast_filter": "arp", "called_station_id_deli": 0,
@@ -68,6 +78,7 @@ _BASE_WLAN = {
     "captive_profile_name": "", "cloud_guest": False, "cluster_name": "",
     "content_filtering": False, "deny_intra_vlan_traffic": False,
     "disable_ssid": False, "dmo_channel_util_threshold": 90, "dot11k": False,
+    "dot11r": False,
     "dot11v": False, "download_role": False, "dtim_period": 1,
     "dynamic_multicast_optimization": False, "dynamic_vlans": [],
     "enforce_dhcp": False, "essid": "", "explicit_ageout_client": False,
@@ -80,9 +91,12 @@ _BASE_WLAN = {
     "mac_authentication_upper_case": False, "management_frame_protection": False,
     "max_auth_failures": 0, "max_clients_threshold": 64, "mdid": "",
     "multicast_rate_optimization": False, "name": "", "okc": False,
+    "okc_disable": False,
     "oos_def": "vpn-down", "oos_name": "none", "oos_time": 30,
     "opmode": "wpa2-psk-aes", "opmode_transition_disable": True,
-    "per_user_limit": None, "per_user_limit_cb": False,
+    # per_user_limit must be "" — None serialises to JSON null and the
+    # handler rejects it with "Invalid type for JSON key"
+    "per_user_limit": "", "per_user_limit_cb": False,
     "radius_accounting": False, "radius_accounting_mode": "user-authentication",
     "radius_interim_accounting_interval": 0, "reauth_interval": 0,
     "rf_band": "all", "roles": [], "server_load_balancing": False,
@@ -96,10 +110,18 @@ _BASE_WLAN = {
     "wmm_background_share": 0, "wmm_best_effort_dscp": "",
     "wmm_best_effort_share": 0, "wmm_uapsd": True, "wmm_video_dscp": "",
     "wmm_video_share": 0, "wmm_voice_dscp": "", "wmm_voice_share": 0,
-    "work_without_uplink": False, "wpa_passphrase": "", "zone": "",
+    "work_without_uplink": False, "wpa_passphrase": "",
+    "wpa_passphrase_changed": False, "zone": "",
     "hotspot_profile": "",
+    # Instant backend KeyErrors this on PSK/open even though FullWlanData
+    # does not list it. Empty string = no RADIUS group, not a missing key.
+    "server_group": "",
 }
 
+# Populated rule from HPE's FullWlanData example. Sending null makes the
+# handler iterate None ("argument of type 'NoneType' is not iterable") on
+# enterprise SSIDs — live-tenant, 2026-08-24. server_group is not in the
+# published schema but the Instant backend KeyErrors on it for PSK/open.
 _BASE_ACCESS_RULE = {
     "name": "", "action": "allow", "app_rf_mv_info": "", "blacklist": False,
     "classify_media": False, "disable_scanning": False, "dot1p_priority": "",
@@ -108,7 +130,66 @@ _BASE_ACCESS_RULE = {
     "protocol_id": "", "service_name": "", "service_type": "network",
     "source": "default", "sport": "any", "throttle_downstream": "",
     "throttle_upstream": "", "time_range": "", "tos": "", "vlan": 0,
+    "server_group": "",
 }
+
+
+_JSON_TYPE_ERR = re.compile(r"Invalid type for JSON key:\s*'?([A-Za-z0-9_]+)")
+_BARE_KEY_ERR = re.compile(r"'description':\s*\"'([A-Za-z0-9_]+)'\"")
+
+
+def _type_error_key(msg: str) -> Optional[str]:
+    m = _JSON_TYPE_ERR.search(msg)
+    return m.group(1) if m else None
+
+
+def _flip_scalar(value):
+    """str <-> int for one payload scalar; None when it cannot be flipped."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return None
+
+
+def _bare_key(msg: str) -> Optional[str]:
+    m = _BARE_KEY_ERR.search(msg)
+    return m.group(1) if m else None
+
+
+def _explain_wlan_error(name: str, err: Exception) -> str:
+    m = _BARE_KEY_ERR.search(str(err))
+    if not m:
+        return str(err)
+    return (
+        f"SSID '{name}': Classic Central rejected the WLAN with a bare key "
+        f"error for '{m.group(1)}' after a retry that inserted the missing "
+        f"key. The Instant handler still could not resolve it — if the key "
+        f"is 'server_group' this SSID's auth type may require a RADIUS "
+        f"object that does not exist in the group. ({err})")
+
+
+def _resolve_firmware_version(requested: str, available: list[str]) -> Optional[str]:
+    """Map '10.7.1.0' to a published '10.7.1.0_91459'. Never jumps 10.7.0.0 → 10.7.2.x."""
+    if requested in available:
+        return requested
+    hits = [v for v in available if v.startswith(requested + "_")]
+    return sorted(hits)[-1] if hits else None
+
+
+def _vlan_token(ssid: SSID) -> str:
+    """The full_wlan ``vlan`` field is a STRING (HPE FullWlanData schema).
+
+    A named AOS 8 VLAN has no numeric ``vlan`` — it lives in ``vlan_raw``.
+    Dropping it silently parked the WLAN on the AP's native VLAN, which is a
+    misconfiguration that provisions "successfully".
+    """
+    if ssid.vlan is not None:
+        return str(ssid.vlan)
+    raw = getattr(ssid, "vlan_raw", None)
+    return str(raw).strip() if raw else ""
 
 
 class ClassicCentralAPIError(Exception):
@@ -122,7 +203,9 @@ def _is_duplicate(err: Exception) -> bool:
     # not make an unrelated failure read as idempotent success
     m = re.search(r"failed \d+: (.*)", msg, re.S)
     detail = m.group(1) if m else msg
-    return "already exists" in detail or "duplicate" in detail
+    return ("already exists" in detail or "duplicate" in detail
+            # Classic's full_wlan phrases it as "Cannot create existing SSID"
+            or "existing ssid" in detail)
 
 
 class ClassicCentralClient:
@@ -383,8 +466,21 @@ class ClassicCentralClient:
         except ClassicCentralAPIError as e:
             # "exist" also matches "does not exist" — only _is_duplicate may
             # swallow, and it inspects the response detail, not the URL
-            if not _is_duplicate(e):
-                raise
+            if _is_duplicate(e):
+                return
+            if "INVALID_MAC_SN" in str(e) or "ATHENA_ERROR_NO_DEVICE" in str(e):
+                # the inventory route only accepts devices HPE already shipped
+                # to this customer; it cannot mint new ones
+                raise ClassicCentralAPIError(
+                    "Classic Central rejected every serial/MAC as unknown "
+                    "(ATHENA_ERROR_NO_DEVICE / INVALID_MAC_SN). This route only "
+                    "claims APs already registered to your HPE account — it "
+                    "cannot create inventory entries. Check the serial/MAC pairs "
+                    "against the AOS 8 controller, and note that placeholder or "
+                    "lab serials will never onboard. Skip the Add-devices step to "
+                    "provision groups, sites and WLANs without inventory.\n"
+                    f"({e})") from e
+            raise
 
     # HPE documents a hard cap on this route: more than 50 serials in one
     # request comes back 400 "More than 50 devices cannot be moved to a group".
@@ -485,7 +581,7 @@ class ClassicCentralClient:
             "index": index,
             "opmode": OPMODE_CLASSIC.get(ssid.auth_type, "wpa2-psk-aes"),
             "type": "employee",
-            "vlan": str(ssid.vlan) if ssid.vlan else "",
+            "vlan": _vlan_token(ssid),
             "hide_ssid": not ssid.broadcast,
             # a source WLAN that was administratively disabled stays disabled
             "disable_ssid": not getattr(ssid, "enabled", True),
@@ -503,30 +599,37 @@ class ClassicCentralClient:
             # policy as the New Central client.
             usable = ssid.psk and not secret_looks_unusable(ssid.psk)
             wlan["wpa_passphrase"] = ssid.psk if usable else PSK_PLACEHOLDER
+            # without this flag the handler keeps the previous/blank
+            # passphrase and the WLAN comes up unjoinable
+            wlan["wpa_passphrase_changed"] = True
         if ssid.auth_type in ENTERPRISE:
             wlan["access_type"] = "network_based"
             # full_wlan's auth_server1 references a single RADIUS server
-            # OBJECT by name, and this client cannot create those objects in
-            # Classic (no public endpoint) — preflight FAILs enterprise SSIDs
+            # OBJECT by name, and Classic Central exposes no REST API for
+            # auth-server objects (verified against HPE's published API
+            # reference and pycentral) — preflight FAILs enterprise SSIDs
             # on a Classic destination until the operator creates a server
             # with this exact name in the group by hand.
             wlan["auth_server1"] = ssid.auth_server_group or ""
+            wlan["server_group"] = ssid.auth_server_group or ""
         if ssid.auth_type == AuthType.MAC:
             # never emit a silently-open network for a MAC-auth SSID
             wlan["mac_authentication"] = True
             wlan["access_type"] = "network_based"
             wlan["auth_server1"] = ssid.auth_server_group or ""
+            wlan["server_group"] = ssid.auth_server_group or ""
         if cluster_name and ssid.forward_mode in (ForwardMode.TUNNEL, ForwardMode.SPLIT):
             # tunnel binding via cluster_name — verify in the Central UI after
             # provisioning (no verbatim reference example exists for this field)
             wlan["cluster_name"] = cluster_name
+        # A null access_rule makes the handler iterate None
+        # ("argument of type 'NoneType' is not iterable") — live corp
+        # failure after we tried matching the YAML samples. Send the
+        # populated FullWlanData rule; server_group="" is already on it.
         rule = copy.deepcopy(_BASE_ACCESS_RULE)
         rule["name"] = name
-        # the body must be the JSON-stringified object under a "value" key
-        payload = {"value": json.dumps({"wlan": wlan, "access_rule": rule})}
         try:
-            self._post(f"/configuration/full_wlan/{quote(group, safe='')}/"
-                       f"{quote(name, safe='')}", json_body=payload)
+            self._post_full_wlan(group, name, wlan, rule)
         except ClassicCentralAPIError as e:
             if not _is_duplicate(e):
                 raise
@@ -539,9 +642,118 @@ class ClassicCentralClient:
             if self.manifest is not None:
                 self.manifest.register(KIND_SSID, name, payload=wlan)
 
+    def _post_full_wlan(self, group: str, name: str, wlan: dict,
+                        rule: Optional[dict]) -> None:
+        """POST a full_wlan body, healing the schema faults this API reports
+        as opaque 500s.
+
+        The handler indexes the payload directly, so it answers a wrong scalar
+        type with ``Invalid type for JSON key: <key>`` and a key it expected
+        but did not get with a bare KeyError repr (``"'server_group'"``).
+        Neither says what to send, so retry once with the offending scalar
+        flipped between str and int, and turn anything else into an
+        actionable message instead of a raw vendor traceback fragment.
+        """
+        path = (f"/configuration/full_wlan/{quote(group, safe='')}/"
+                f"{quote(name, safe='')}")
+
+        def send(body: dict) -> None:
+            # the body must be the JSON-stringified object under a "value" key
+            self._post(path, json_body={
+                "value": json.dumps({"wlan": body, "access_rule": rule})})
+
+        try:
+            send(wlan)
+            return
+        except ClassicCentralAPIError as e:
+            if _is_duplicate(e):
+                raise  # the caller decides whether reuse is legitimate
+            msg = str(e)
+            type_key = _type_error_key(msg)
+            flipped = _flip_scalar(wlan.get(type_key)) if type_key else None
+            if flipped is not None:
+                retry = dict(wlan)
+                retry[type_key] = flipped
+                send(retry)
+                wlan[type_key] = flipped
+                return
+            missing = _bare_key(msg)
+            if missing:
+                retry = dict(wlan)
+                target = None
+                if missing not in retry:
+                    retry[missing] = ""
+                    target = "wlan"
+                elif rule is not None and missing not in rule:
+                    rule[missing] = ""
+                    target = "rule"
+                if target:
+                    try:
+                        send(retry)
+                        if target == "wlan":
+                            wlan[missing] = ""
+                        return
+                    except ClassicCentralAPIError as e2:
+                        if _is_duplicate(e2):
+                            raise
+                        raise ClassicCentralAPIError(
+                            _explain_wlan_error(name, e2)) from e2
+            raise ClassicCentralAPIError(_explain_wlan_error(name, e)) from e
+
     # ─────────────────── Firmware ───────────────────
 
+    def list_supported_firmware(self, device_type: str = "IAP") -> list[str]:
+        """Firmware versions this tenant can actually pin (best effort)."""
+        for params in ({"device_type": device_type}, {"device_type": "IAP"}, {}):
+            try:
+                body = self._get("/firmware/v1/versions", params=params or None)
+            except ClassicCentralAPIError:
+                continue
+            raw = (body.get("available_versions") or body.get("versions")
+                   or body.get("firmware_versions") or body.get("items") or [])
+            out = []
+            for v in raw:
+                if isinstance(v, str):
+                    out.append(v)
+                elif isinstance(v, dict):
+                    name = (v.get("firmware_version") or v.get("version")
+                            or v.get("name"))
+                    if name:
+                        out.append(str(name))
+            if out:
+                return out
+        return []
+
     def set_firmware_compliance(self, group: str, version: str) -> None:
+        try:
+            self._apply_firmware_compliance(group, version)
+        except ClassicCentralAPIError as e:
+            if "does not exist" not in str(e).lower():
+                raise
+            # the tenant only accepts versions it actually publishes, and the
+            # bare 400 names none of them — list them so the operator can pick
+            available = self.list_supported_firmware()
+            resolved = _resolve_firmware_version(version, available)
+            if resolved and resolved != version:
+                try:
+                    self._apply_firmware_compliance(group, resolved)
+                    return
+                except ClassicCentralAPIError:
+                    pass
+            hint = (f" Versions available to this tenant: "
+                    f"{', '.join(available[:12])}."
+                    if available else
+                    " The tool could not list this tenant's versions either, so "
+                    "read the exact string from Central UI → Maintain → Firmware "
+                    "(AOS 10 AP versions look like 10.7.1.0_91459).")
+            raise ClassicCentralAPIError(
+                f"Firmware compliance {version} was rejected for group "
+                f"'{group}': the tenant does not publish that version.{hint} "
+                f"Set a published version in Step 2, or clear the firmware "
+                f"field to skip compliance pinning — every other object in the "
+                f"group provisions without it.") from e
+
+    def _apply_firmware_compliance(self, group: str, version: str) -> None:
         body = {
             "device_type": "IAP",  # classic firmware enum — AOS10 APs are "IAP"
             "group": group,
